@@ -122,9 +122,6 @@ let userTranscriptBuffer = '';
 /** Transient (non-persisted) live user bubble built from interim deltas */
 let liveUserBubble = null;
 
-/** Full session conversation log for BlackBox capture */
-let sessionConversation = [];
-
 /** Accumulated audio samples for continuous playback */
 let accumulatedSamples = new Float32Array(0);
 
@@ -826,7 +823,6 @@ export async function connect(operator) {
     currentGrokPresetId = presetId || null;
 
     // Reset session state
-    sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
     isBufferingAudio = false;
     nextPlaybackTime = 0;
@@ -918,7 +914,6 @@ export function disconnect() {
     isConnected = false;
     sessionId = null;
     reconnectAttempts = 0;
-    sessionConversation = [];
     updateStatus('Disconnected');
     updateUI();
 }
@@ -968,12 +963,6 @@ function handleMessage(msg) {
                 // Add to main chat UI
                 addBubble('assistant', transcript.trim());
 
-                // Save to session conversation
-                sessionConversation.push({
-                    role: 'assistant',
-                    content: transcript.trim(),
-                    timestamp: new Date().toISOString()
-                });
             }
 
             transcriptBuffer = '';
@@ -1012,13 +1001,6 @@ function handleMessage(msg) {
                 // Add to main chat UI
                 addBubble('user', userText.trim());
 
-                // Save to session conversation
-                sessionConversation.push({
-                    role: 'user',
-                    content: userText.trim(),
-                    timestamp: new Date().toISOString(),
-                    source: 'voice'
-                });
 
                 // Show in transcript widget
                 const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;
@@ -1474,11 +1456,6 @@ export function initGrokLiveUI(config) {
                 }));
                 textInput.value = '';
 
-                // Add to conversation
-                sessionConversation.push({
-                    role: 'user',
-                    content: text
-                });
 
                 // Show in transcript
                 const transcriptEl = SEL.transcriptEl ? $(SEL.transcriptEl) : null;

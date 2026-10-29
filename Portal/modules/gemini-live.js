@@ -135,9 +135,6 @@ let userTranscriptBuffer = '';
 /** Transient (non-persisted) live user bubble built from interim deltas */
 let liveUserBubble = null;
 
-/** Full session conversation log for BlackBox capture */
-let sessionConversation = [];
-
 /** Accumulated audio samples for continuous playback */
 let accumulatedSamples = new Float32Array(0);
 
@@ -891,7 +888,6 @@ export async function connect(operator) {
     currentGeminiTargetLanguage = translateOn ? targetLanguage : null;
 
     // Reset session state
-    sessionConversation = [];
     accumulatedSamples = new Float32Array(0);
     isBufferingAudio = false;
     nextPlaybackTime = 0;
@@ -967,68 +963,6 @@ export async function connect(operator) {
 }
 
 /**
- * Save session conversation to BlackBox
- */
-async function saveSessionToBlackBox() {
-    if (sessionConversation.length === 0) {
-        console.log('[GEMINI-LIVE] No conversation to save');
-        return;
-    }
-
-    const operator = getOperator();
-    if (!operator) {
-        console.warn('[GEMINI-LIVE] No operator set, cannot save session');
-        return;
-    }
-
-    // Format conversation as readable transcript
-    const transcript = sessionConversation.map(msg => {
-        const role = msg.role === 'user' ? 'User' : 'AI';
-        return `[${role}]: ${msg.content}`;
-    }).join('\n\n');
-
-    const sessionSummary = `=== Gemini Live Voice Session ===
-Session ID: ${sessionId || 'unknown'}
-Voice: ${selectedVoice}
-Timestamp: ${new Date().toISOString()}
-Messages: ${sessionConversation.length}
-
---- Transcript ---
-${transcript}
---- End Session ---`;
-
-    try {
-        // Send to /chat endpoint for BlackBox capture using Gemini 2.5 Pro
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                operator: operator,
-                messages: [{
-                    role: 'user',
-                    content: `[Voice Session Transcript]\n${sessionSummary}`
-                }],
-                provider: 'google',
-                model: 'gemini-2.5-pro',
-                streaming: false,
-                auto_checkpoint: false
-            })
-        });
-
-        if (response.ok) {
-            console.log('[GEMINI-LIVE] Session saved to BlackBox');
-            toast('Voice session saved to BlackBox');
-        } else {
-            console.error('[GEMINI-LIVE] Failed to save session:', await response.text());
-        }
-    } catch (err) {
-        console.error('[GEMINI-LIVE] Error saving session:', err);
-    }
-
-    sessionConversation = [];
-}
-
-/**
  * Disconnect from Gemini Live API
  */
 export function disconnect() {
@@ -1058,7 +992,6 @@ export function disconnect() {
     isConnected = false;
     sessionId = null;
     reconnectAttempts = 0;
-    sessionConversation = [];  // Clear local state
     updateStatus('Disconnected');
     updateUI();
 }
@@ -1134,11 +1067,6 @@ function handleMessage(msg) {
 
             if (transcriptBuffer.trim()) {
                 addBubble('assistant', transcriptBuffer.trim());
-                sessionConversation.push({
-                    role: 'assistant',
-                    content: transcriptBuffer.trim(),
-                    timestamp: new Date().toISOString()
-                });
             }
             transcriptBuffer = '';
             clearTranscript();
@@ -1211,12 +1139,6 @@ function handleMessage(msg) {
                     liveUserBubble = null;
                 }
                 addBubble('user', msg.data);
-                sessionConversation.push({
-                    role: 'user',
-                    content: msg.data,
-                    timestamp: new Date().toISOString(),
-                    source: 'voice'
-                });
             }
             // Reset for the next utterance (covers delta-less backends too).
             userTranscriptBuffer = '';
@@ -1408,11 +1330,6 @@ export function sendText(text) {
     if (!text.trim()) return;
 
     addBubble('user', text);
-    sessionConversation.push({
-        role: 'user',
-        content: text.trim(),
-        timestamp: new Date().toISOString()
-    });
 
     ws.send(JSON.stringify({
         type: 'text_input',

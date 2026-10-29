@@ -142,9 +142,6 @@ let userTranscriptBuffer = '';
 /** Transient (non-persisted) live user bubble built from interim deltas */
 let liveUserBubble = null;
 
-/** Full session conversation log for BlackBox capture */
-let sessionConversation = [];
-
 /** Audio buffer for smoother playback - collect chunks before playing */
 let audioBufferChunks = [];
 
@@ -1178,7 +1175,6 @@ export async function connect(operator) {
     pauseAllPlayers();
 
     // Reset session state for new connection
-    sessionConversation = [];
     audioBufferChunks = [];
     isBufferingAudio = false;
     nextPlaybackTime = 0;
@@ -1308,71 +1304,6 @@ export async function connect(operator) {
 }
 
 /**
- * Save session conversation to BlackBox
- */
-async function saveSessionToBlackBox() {
-    if (sessionConversation.length === 0) {
-        console.log('[REALTIME] No conversation to save');
-        return;
-    }
-
-    const operator = getOperator();
-    if (!operator) {
-        console.warn('[REALTIME] No operator set, cannot save session');
-        return;
-    }
-
-    // Format conversation as a readable transcript
-    const transcript = sessionConversation.map(msg => {
-        const role = msg.role === 'user' ? 'User' : 'AI';
-        return `[${role}]: ${msg.content}`;
-    }).join('\n\n');
-
-    const sessionSummary = `=== GPT-4o Realtime Voice Session ===
-Session ID: ${sessionId || 'unknown'}
-Voice: ${selectedVoice}
-Timestamp: ${new Date().toISOString()}
-Messages: ${sessionConversation.length}
-
---- Transcript ---
-${transcript}
---- End Session ---`;
-
-    try {
-        // Send to /chat endpoint to be captured in BlackBox
-        const response = await fetch('/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                operator: operator,
-                messages: [
-                    {
-                        role: 'user',
-                        content: `[Voice Session Transcript]\n${sessionSummary}`
-                    }
-                ],
-                provider: 'google',  // Use Google for session save
-                model: 'gemini-2.5-pro',  // Most capable model for session analysis
-                streaming: false,
-                auto_checkpoint: false  // Don't auto-checkpoint, just record
-            })
-        });
-
-        if (response.ok) {
-            console.log('[REALTIME] Session saved to BlackBox');
-            toast('Voice session saved to BlackBox');
-        } else {
-            console.error('[REALTIME] Failed to save session:', await response.text());
-        }
-    } catch (err) {
-        console.error('[REALTIME] Error saving session:', err);
-    }
-
-    // Clear session for next conversation
-    sessionConversation = [];
-}
-
-/**
  * Disconnect from Realtime API
  */
 export function disconnect() {
@@ -1466,12 +1397,6 @@ function handleMessage(msg) {
             // Add complete response to chat history and session log (persisted to localStorage)
             if (transcriptBuffer.trim()) {
                 addBubble('assistant', transcriptBuffer.trim());
-                // Track for BlackBox capture
-                sessionConversation.push({
-                    role: 'assistant',
-                    content: transcriptBuffer.trim(),
-                    timestamp: new Date().toISOString()
-                });
             }
             transcriptBuffer = '';
             clearTranscript();
@@ -1543,14 +1468,8 @@ function handleMessage(msg) {
                     liveUserBubble.remove();
                     liveUserBubble = null;
                 }
-                // Add to chat and session log (persisted to localStorage)
+                // Add to chat (persisted to localStorage)
                 addBubble('user', msg.data);
-                sessionConversation.push({
-                    role: 'user',
-                    content: msg.data,
-                    timestamp: new Date().toISOString(),
-                    source: 'voice'
-                });
             }
             // Reset for the next utterance (covers delta-less providers too).
             userTranscriptBuffer = '';
@@ -1740,12 +1659,6 @@ export function sendText(text) {
     // Add user message to chat (persisted to localStorage)
     addBubble('user', text);
 
-    // Track for BlackBox capture
-    sessionConversation.push({
-        role: 'user',
-        content: text.trim(),
-        timestamp: new Date().toISOString()
-    });
 
     // Send to server
     ws.send(JSON.stringify({
