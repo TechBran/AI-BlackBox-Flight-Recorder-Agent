@@ -38,12 +38,12 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode = 37
+        versionCode = 38
         // W10 mic A/B: `-PforceMicSource=VOICE_COMMUNICATION` builds a debug APK whose composer
         // mic is pinned to that source (MicSourcePolicy.simplexChain), named so it cannot be
         // mistaken for the shipping build. Empty, and pinned by MicSourcePolicyTest, otherwise.
         def forceMicSource = (project.findProperty('forceMicSource') ?: '').toString().trim()
-        versionName = "1.13.1-m1-hardening" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
+        versionName = "1.14.0-m6-acceptance" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
         buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: every phone, Fold and XR headset this app targets is arm64, and
