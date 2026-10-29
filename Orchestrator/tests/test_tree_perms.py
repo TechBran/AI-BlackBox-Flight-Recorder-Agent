@@ -90,10 +90,49 @@ def test_a_missing_private_directory_is_not_a_problem(checkout):
     assert tree_perms.audit_checkout(checkout) == []
 
 
+def test_a_world_writable_file_is_named_too(checkout):
+    """Review of rank 79: install.sh takes o+w off files ("the same hole"),
+    but the startup check only looked at directories."""
+    ledger = checkout / "Volumes" / "SNAPSHOT_VOLUME.txt"
+    ledger.parent.mkdir()
+    ledger.parent.chmod(0o755)
+    ledger.write_text("ledger\n")
+    ledger.chmod(0o666)
+    module = checkout / "Orchestrator" / "routes" / "chat.py"
+    module.write_text("x = 1\n")
+    module.chmod(0o646)
+    (checkout / "Orchestrator" / "routes" / "fine.py").write_text("y = 1\n")
+    (checkout / "Orchestrator" / "routes" / "fine.py").chmod(0o664)   # group write: private
+    (warning,) = tree_perms.audit_checkout(checkout)
+    assert warning.startswith("2 files in ") and "every local account" in warning
+    assert "Volumes/SNAPSHOT_VOLUME.txt" in warning and "Orchestrator/routes/chat.py" in warning
+    assert "fine.py" not in warning and "install.sh" in warning
+
+
+def test_many_writable_files_are_counted_not_all_listed(checkout):
+    d = checkout / "Portal" / "modules"
+    for i in range(tree_perms.SHOWN + 3):
+        f = d / f"m{i}.js"
+        f.write_text("//\n")
+        f.chmod(0o666)
+    (warning,) = tree_perms.audit_checkout(checkout)
+    assert f"{tree_perms.SHOWN + 3} files" in warning and "and 3 more" in warning
+
+
+def test_a_symlink_to_a_writable_file_is_not_the_checkouts(checkout, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x\n")
+    outside.chmod(0o666)
+    (checkout / "Portal" / "link.txt").symlink_to(outside)
+    assert tree_perms.audit_checkout(checkout) == []
+
+
 def test_venvs_and_build_trees_are_not_walked(checkout):
     (checkout / "Orchestrator" / "venv" / "lib").chmod(0o777)
     (checkout / "installer" / "node_modules" / "x").mkdir(parents=True)
     (checkout / "installer" / "node_modules" / "x").chmod(0o777)
+    (checkout / "Orchestrator" / "venv" / "lib" / "site.py").write_text("")
+    (checkout / "Orchestrator" / "venv" / "lib" / "site.py").chmod(0o666)
     assert tree_perms.audit_checkout(checkout) == []
 
 

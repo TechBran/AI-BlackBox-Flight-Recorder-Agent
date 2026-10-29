@@ -6,7 +6,9 @@ directory, so Python imports from it first, and the Portal, the MCP server and
 the CLI agents' slash commands are served or read from it too. A directory in
 it that other local accounts can write lets them plant a module the service
 imports (the dev box had the root, Orchestrator/, Portal/, Manifest/ and
-.claude/commands/ at 0777). Manifest/ (MCP tokens, OAuth stores, update state)
+.claude/commands/ at 0777), and a file in it they can write is the same hole
+without the planting (the ledger, a module, .claude/settings.local.json, whose
+hooks run as whoever starts Claude Code there). Manifest/ (MCP tokens, OAuth stores, update state)
 and credentials/ hold 0600 files, but in a directory others can open or write
 those can be listed, unlinked and replaced, so both must be 0700.
 
@@ -39,6 +41,8 @@ _PRUNE_PATHS = frozenset({".claude/worktrees"})
 # How many directories one start may look at (the dev box's checkout, minus
 # the pruned trees, is about 9000).
 MAX_DIRS = 20000
+# How many writable files a warning names (the rest are counted).
+SHOWN = 8
 
 _REMEDY = "sudo bash Scripts/install.sh fixes it (it removes those bits as the checkout's owner)"
 
@@ -48,9 +52,10 @@ def audit_checkout(root: Path, *, max_dirs: int = MAX_DIRS) -> list[str]:
     root = Path(root)
     warnings: list[str] = []
     writable: list[str] = []
+    writable_files: list[str] = []
     seen = 0
     cut_short = False
-    for dirpath, dirnames, _files in os.walk(root, onerror=lambda _e: None):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
         rel = os.path.relpath(dirpath, root)
         dirnames[:] = [d for d in dirnames
                        if d not in _PRUNE_NAMES
@@ -65,14 +70,28 @@ def audit_checkout(root: Path, *, max_dirs: int = MAX_DIRS) -> list[str]:
             continue
         if _writable_by_others(st):
             writable.append("(the checkout root)" if rel == "." else rel)
+        for name in filenames:
+            try:
+                fst = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            # Others' write only, as install.sh removes (a file's group write
+            # in the owner's private group is the owner's alone).
+            if stat.S_ISREG(fst.st_mode) and fst.st_mode & stat.S_IWOTH:
+                writable_files.append(os.path.normpath(os.path.join(rel, name)))
+    note = f" (stopped after {max_dirs} directories)" if cut_short else ""
     if writable:
-        shown = ", ".join(writable[:8]) + (f" and {len(writable) - 8} more" if len(writable) > 8 else "")
         noun = "directory" if len(writable) == 1 else "directories"
-        note = f" (stopped after {max_dirs} directories)" if cut_short else ""
         warnings.append(
             f"{len(writable)} {noun} in {root} can be written by other local accounts"
-            f"{note}: {shown}. Any of them can plant code this service imports or "
+            f"{note}: {_some(writable)}. Any of them can plant code this service imports or "
             f"serves; {_REMEDY}.")
+    if writable_files:
+        noun = "file" if len(writable_files) == 1 else "files"
+        warnings.append(
+            f"{len(writable_files)} {noun} in {root} can be written by every local account"
+            f"{note}: {_some(writable_files)}. Any of them can be rewritten in place (code, "
+            f"config, the ledger); {_REMEDY}.")
     # A parent anyone can write (without the sticky bit) lets them move the
     # whole checkout aside and put another in its place.
     for parent in root.resolve().parents:
@@ -97,6 +116,10 @@ def audit_checkout(root: Path, *, max_dirs: int = MAX_DIRS) -> list[str]:
                 f"credentials other local accounts must not list or replace; {_REMEDY} "
                 f"(or: chmod 0700 {root / name}).")
     return warnings
+
+
+def _some(paths: list[str]) -> str:
+    return ", ".join(paths[:SHOWN]) + (f" and {len(paths) - SHOWN} more" if len(paths) > SHOWN else "")
 
 
 # Groups whose members can become root with their own password.
