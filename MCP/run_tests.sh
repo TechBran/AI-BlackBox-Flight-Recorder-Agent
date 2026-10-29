@@ -31,13 +31,16 @@ for name in $(compgen -e); do
 done
 export BLACKBOX_ROOT="$repo"
 # The MCP control listener (POST /internal/reload) of every server a harness
-# starts binds a free port, never this box's 9094.
+# starts binds a free port, never this box's 9094, and its per-boot reload
+# secret goes to a temp dir, not the checkout's credentials/.
 export BLACKBOX_MCP_CONTROL_PORT=0
+secret_dir="$(mktemp -d)"
+export BLACKBOX_MCP_RELOAD_SECRET_FILE="$secret_dir/mcp_reload.secret"
 
 stub_out="$(mktemp)"
 "$PY" "$here/_stub_backend.py" >"$stub_out" 2>&1 &
 stub_pid=$!
-trap 'kill "$stub_pid" 2>/dev/null; rm -f "$stub_out"' EXIT
+trap 'kill "$stub_pid" 2>/dev/null; rm -f "$stub_out"; rm -rf "$secret_dir"' EXIT
 port=""
 for _ in $(seq 100); do
     port="$(head -n 1 "$stub_out" 2>/dev/null)"
