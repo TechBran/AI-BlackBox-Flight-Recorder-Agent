@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Callable, Optional
 
 from Orchestrator.models import TaskType
@@ -50,6 +51,21 @@ class MintGate:
     create_task: Callable
     save_operator_state: Callable
     drift_state_for: Callable
+
+    @classmethod
+    def of(cls, module: ModuleType) -> "MintGate":
+        """The gate as ``module`` sees it, read now: its AUTO_ENABLE, ON_RED,
+        ON_YELLOW, TOKENS_THRESHOLD, TURNS_THRESHOLD, DEBOUNCE_MS, perform_mint,
+        should_create_checkpoint, create_task, save_operator_state and
+        drift_state_for (a stub on the module's name is honoured)."""
+        return cls(
+            auto_enable=module.AUTO_ENABLE, on_red=module.ON_RED, on_yellow=module.ON_YELLOW,
+            tokens_threshold=module.TOKENS_THRESHOLD, turns_threshold=module.TURNS_THRESHOLD,
+            debounce_ms=module.DEBOUNCE_MS, perform_mint=module.perform_mint,
+            should_create_checkpoint=module.should_create_checkpoint,
+            create_task=module.create_task, save_operator_state=module.save_operator_state,
+            drift_state_for=module.drift_state_for,
+        )
 
 
 # The retrieval channels a snapshot lists as "relevant" (recent is its own list).
@@ -86,30 +102,12 @@ def relevant_ids(provenance: dict) -> list:
     return out
 
 
-async def persist_turn_and_maybe_mint(
-    state, operator: str, user_text: str, assistant_text: str, *,
-    gate: MintGate,
-    snap_text: Optional[str] = None,
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
-    total_tokens: Optional[int] = None,
-    model: Optional[str] = None,
-    location_gauge: str = "",
-    provenance: Optional[dict] = None,
-    count_context: bool = False,
-    offload: bool = True,
-    tag: str = "[TURN]",
-) -> TurnResult:
-    """Record one finished turn in ``state`` and mint / checkpoint as configured.
-
-    ``user_text`` "" records no user turn. ``total_tokens`` defaults to
-    prompt + completion (a provider total that counts thinking tokens is
-    passed as is). ``model`` None leaves the recorded model as it is (the worker
-    sets it before the provider call); ``location_gauge`` "" is a turn without
-    a location. ``count_context`` also adds the tokens to context_used (the
-    worker's gauge). ``offload`` runs the mint off the event loop; a caller on a
-    worker thread mints inline.
-    """
+def _record_turn(state, operator: str, user_text: str, assistant_text: str, *,
+                 gate: MintGate, snap_text: Optional[str], prompt_tokens: int,
+                 completion_tokens: int, total_tokens: Optional[int], model: Optional[str],
+                 location_gauge: str, provenance: Optional[dict], count_context: bool,
+                 tag: str) -> Optional[str]:
+    """Everything before the mint; returns the mint reason (None: no mint now)."""
     utc_now = now_utc_iso()
     if user_text:
         state.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_text})
@@ -135,28 +133,35 @@ async def persist_turn_and_maybe_mint(
     meta["usage_last"] = {"prompt_tokens": prompt_tokens,
                           "completion_tokens": completion_tokens,
                           "total_tokens": total_tokens}
+    # perform_mint reads recent_ids and relevant_ids from last_context_meta; a
+    # turn that brings none records none (never the previous turn's).
+    provenance = provenance or {}
     if provenance:
-        # perform_mint reads recent_ids and relevant_ids from last_context_meta.
         meta["gm_excerpt"] = True  # the turn's context always carried the system prompt
-        meta["recent_ids"] = provenance.get("recent", [])
-        meta["relevant_ids"] = relevant_ids(provenance)
+    meta["recent_ids"] = provenance.get("recent", [])
+    meta["relevant_ids"] = relevant_ids(provenance)
+    if provenance:
         print(f"{tag} Provenance - Recent: {meta['recent_ids']}, Relevant: {meta['relevant_ids']}")
 
+    if not gate.auto_enable:
+        return None
+    reason = mint_reason(state, gate)
+    if reason and (int(time.time() * 1000) - state.last_mint_ms >= gate.debounce_ms):
+        return reason
+    return None
+
+
+def _finish_turn(state, operator: str, reason: Optional[str], minted: Optional[dict], *,
+                 gate: MintGate, tag: str) -> TurnResult:
+    """Everything after the mint: the result, the checkpoint cadence, the save."""
     result = TurnResult()
-    if gate.auto_enable:
-        now_ms = int(time.time() * 1000)
-        reason = mint_reason(state, gate)
-        if reason and (now_ms - state.last_mint_ms >= gate.debounce_ms):
-            if offload:
-                minted = await run_blocking(gate.perform_mint, operator, reason)
-            else:
-                minted = gate.perform_mint(operator, reason)
-            state.last_mint_ms = int(time.time() * 1000)
-            result.minted = True
-            result.snap_id = (minted or {}).get("snap_id")
-            # None when no vector was generated (fresh box / soft failure)
-            result.dims = (minted or {}).get("dims")
-            print(f"{tag} Auto-mint triggered for {operator}: {reason} -> {result.snap_id}")
+    if reason:
+        state.last_mint_ms = int(time.time() * 1000)
+        result.minted = True
+        result.snap_id = (minted or {}).get("snap_id")
+        # None when no vector was generated (fresh box / soft failure)
+        result.dims = (minted or {}).get("dims")
+        print(f"{tag} Auto-mint triggered for {operator}: {reason} -> {result.snap_id}")
 
     if gate.should_create_checkpoint(operator):
         print(f"{tag} Creating checkpoint task for {operator} at turn {state.total_turns}")
@@ -167,3 +172,60 @@ async def persist_turn_and_maybe_mint(
 
     gate.save_operator_state()
     return result
+
+
+async def persist_turn_and_maybe_mint(
+    state, operator: str, user_text: str, assistant_text: str, *,
+    gate: MintGate,
+    snap_text: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: Optional[int] = None,
+    model: Optional[str] = None,
+    location_gauge: str = "",
+    provenance: Optional[dict] = None,
+    count_context: bool = False,
+    tag: str = "[TURN]",
+) -> TurnResult:
+    """Record one finished turn in ``state`` and mint / checkpoint as configured.
+
+    ``user_text`` "" records no user turn. ``total_tokens`` defaults to
+    prompt + completion (a provider total that counts thinking tokens is
+    passed as is). ``model`` None leaves the recorded model as it is (the worker
+    sets it before the provider call); ``location_gauge`` "" is a turn without
+    a location; no ``provenance`` records none. ``count_context`` also adds the
+    tokens to context_used (the worker's gauge).
+    """
+    reason = _record_turn(state, operator, user_text, assistant_text, gate=gate,
+                          snap_text=snap_text, prompt_tokens=prompt_tokens,
+                          completion_tokens=completion_tokens, total_tokens=total_tokens,
+                          model=model, location_gauge=location_gauge, provenance=provenance,
+                          count_context=count_context, tag=tag)
+    # On the event loop: the mint (ledger append + embedding) runs in a thread.
+    minted = await run_blocking(gate.perform_mint, operator, reason) if reason else None
+    return _finish_turn(state, operator, reason, minted, gate=gate, tag=tag)
+
+
+def persist_turn_and_maybe_mint_blocking(
+    state, operator: str, user_text: str, assistant_text: str, *,
+    gate: MintGate,
+    snap_text: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: Optional[int] = None,
+    model: Optional[str] = None,
+    location_gauge: str = "",
+    provenance: Optional[dict] = None,
+    count_context: bool = False,
+    tag: str = "[TURN]",
+) -> TurnResult:
+    """persist_turn_and_maybe_mint for a caller on a worker thread (the /chat
+    worker): the same arguments, and the mint runs inline."""
+    reason = _record_turn(state, operator, user_text, assistant_text, gate=gate,
+                          snap_text=snap_text, prompt_tokens=prompt_tokens,
+                          completion_tokens=completion_tokens, total_tokens=total_tokens,
+                          model=model, location_gauge=location_gauge, provenance=provenance,
+                          count_context=count_context, tag=tag)
+    # On a worker thread (the /chat worker): the mint runs inline.
+    minted = gate.perform_mint(operator, reason) if reason else None
+    return _finish_turn(state, operator, reason, minted, gate=gate, tag=tag)

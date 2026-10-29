@@ -17,6 +17,7 @@ import base64
 import json
 import os
 import signal
+import sys
 import threading
 import uuid
 import queue
@@ -49,7 +50,10 @@ from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator import tool_outcomes
-from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint
+from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint_blocking
+# process_chat_task's MintGate.of(this module) also reads perform_mint,
+# should_create_checkpoint and the AUTO_ENABLE / ON_RED / ON_YELLOW /
+# TOKENS_THRESHOLD / TURNS_THRESHOLD / DEBOUNCE_MS knobs imported above.
 from Orchestrator import provider_billing
 from Orchestrator.notifications.bridge import notify_in_background
 from Orchestrator.secret_redaction import redact, response_error
@@ -2634,12 +2638,13 @@ def process_chat_task(task: Task):
         # the turn, its usage and its DELIVERED provenance (build_fossil_context's
         # window guard may have dropped whole snapshots), counted with
         # context_used, minted inline (this is a worker thread, not the loop).
-        checkpoint_triggered = asyncio.run(persist_turn_and_maybe_mint(
-            s, active_operator, log_text, ui_reply, gate=_mint_gate(), snap_text=snap_text,
-            prompt_tokens=usage.get("prompt_tokens", 0),
+        # The gate is this module's knobs, read now (tests stub them here).
+        checkpoint_triggered = persist_turn_and_maybe_mint_blocking(
+            s, active_operator, log_text, ui_reply, gate=MintGate.of(sys.modules[__name__]),
+            snap_text=snap_text, prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0), total_tokens=total_tok,
-            provenance=provenance, count_context=True, offload=False, tag="[CHECKPOINT]",
-        )).checkpoint_triggered
+            provenance=provenance, count_context=True, tag="[CHECKPOINT]",
+        ).checkpoint_triggered
 
         result_data = {
             "ui_reply": ui_reply, "reply": reply_alias, "text": reply_alias,
@@ -2731,17 +2736,6 @@ _KW_ENTITY_RX = re.compile(
     r"|[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9]+"  # file.ext
     r"|\b[A-Z]{2,}\b"                          # ALLCAPS
 )
-
-
-def _mint_gate() -> MintGate:
-    """This module's auto-mint knobs and hooks, read per call (tests stub them here)."""
-    return MintGate(
-        auto_enable=AUTO_ENABLE, on_red=ON_RED, on_yellow=ON_YELLOW,
-        tokens_threshold=TOKENS_THRESHOLD, turns_threshold=TURNS_THRESHOLD,
-        debounce_ms=DEBOUNCE_MS, perform_mint=perform_mint,
-        should_create_checkpoint=should_create_checkpoint, create_task=create_task,
-        save_operator_state=save_operator_state, drift_state_for=drift_state_for,
-    )
 
 
 def _to_kebab(token: str) -> str:

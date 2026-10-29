@@ -97,3 +97,15 @@ def test_the_policy_is_not_a_per_caller_choice(name):
     import inspect
     from Orchestrator import turn_persistence
     assert name not in inspect.signature(turn_persistence.persist_turn_and_maybe_mint).parameters
+
+
+def test_a_turn_without_provenance_does_not_inherit_the_last_turns(gate, monkeypatch):
+    """A save with no provenance (a voice transcript, a CU / CLI summary) records
+    none, not the previous retrieval-heavy turn's snapshot ids."""
+    op = "persist-fix-noprov"
+    monkeypatch.setattr(cr, "AUTO_ENABLE", False)
+    asyncio.run(cr.chat_save(_Req({
+        "operator": op, "assistant_response": "ok", "model": "m", "provenance": PROVENANCE})))
+    asyncio.run(cr.chat_save(_Req({"operator": op, "assistant_response": "spoken", "model": "m"})))
+    meta = get_state(op).last_context_meta
+    assert meta["recent_ids"] == [] and meta["relevant_ids"] == []

@@ -171,11 +171,10 @@ def test_every_stream_emits_browser_task_for_use_computer(rec, loop):
 # --------------------------------------------------------------------------- #
 # The non-stream entry point                                                  #
 # --------------------------------------------------------------------------- #
-
-def test_the_blocking_dispatch_also_works_inside_a_running_loop(rec, monkeypatch):
-    """call_* used to asyncio.run each executor tool, which raises inside a
-    running loop; dispatch_tool_blocking runs it on a helper thread instead,
-    keeping the caller's context (the origin device, the tool-outcome log)."""
+def test_the_blocking_dispatch_keeps_the_callers_context(rec, monkeypatch):
+    """The non-stream loops run each tool on its own loop (asyncio.run), whose
+    task copies the worker thread's context: the turn's origin device and
+    tool-outcome log reach the executor."""
     import contextvars
 
     marker = contextvars.ContextVar("marker", default="unset")
@@ -192,10 +191,71 @@ def test_the_blocking_dispatch_also_works_inside_a_running_loop(rec, monkeypatch
     monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
     ctx = td.ToolContext(operator="op-fix", origin_device_id=None,
                          profile=td.PROFILES["call_anthropic"], services=rec["services"])
+    token = marker.set("from-the-worker")
+    try:
+        assert td.dispatch_tool_blocking("roll_dice", {"sides": 6}, ctx).result == "ran"
+    finally:
+        marker.reset(token)
+    assert seen == ["from-the-worker"]
 
-    async def caller():
-        marker.set("from-the-caller")
-        return td.dispatch_tool_blocking("roll_dice", {"sides": 6}, ctx)
 
-    assert asyncio.run(caller()).result == "ran"
-    assert seen == ["from-the-caller"]
+@pytest.mark.parametrize("loop", STREAMS)
+def test_a_non_string_executor_result_never_breaks_the_label(rec, monkeypatch, loop):
+    class _Executor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def execute(self, name, args):
+            return ToolResult(success=True, result={"rolled": 3})
+
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    out = _dispatch(rec, loop, "roll_dice", {"sides": 6})
+    assert {"type": "tool_result", "data": "roll_dice: {'rolled': 3}"} in out.events
+
+
+@pytest.mark.parametrize("fn, key", [("call_openai", "OPENAI_API_KEY"), ("call_xai", "XAI_API_KEY")])
+@pytest.mark.parametrize("raw", ["", "{not json"])
+def test_a_non_stream_tool_call_with_unparseable_arguments_still_runs(monkeypatch, fn, key, raw):
+    """A zero-argument tool (llama.cpp and Grok send arguments "") or a
+    malformed argument string ran with {} on the stream path but raised
+    JSONDecodeError on the non-stream twin, failing the whole /chat, cron or
+    SMS turn. Both now run the tool with {}."""
+    import Orchestrator.routes.chat_routes as cr
+
+    executed = []
+
+    class _Executor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def execute(self, name, args):
+            executed.append((name, args))
+            return ToolResult(success=True, result="12:00")
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    replies = iter([
+        _Resp({"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_current_time", "arguments": raw}}]},
+            "finish_reason": "tool_calls"}], "usage": {}}),
+        _Resp({"choices": [{"message": {"role": "assistant", "content": "It is noon."},
+                            "finish_reason": "stop"}], "usage": {}}),
+    ])
+    monkeypatch.setattr(cr, key, "test-key")
+    monkeypatch.setattr(cr, "_get_tools", lambda *a, **k: [])
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    monkeypatch.setattr(cr.requests, "post", lambda *a, **k: next(replies))
+    from Orchestrator import provider_billing as pb
+    monkeypatch.setattr(pb, "note_ok", lambda *a, **k: None)
+
+    result = getattr(cr, fn)([{"role": "user", "content": "time?"}], "model-x", operator="op-fix")
+    assert result[0] == "It is noon."
+    assert executed == [("get_current_time", {})]

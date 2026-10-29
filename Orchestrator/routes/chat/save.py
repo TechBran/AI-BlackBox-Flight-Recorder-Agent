@@ -7,41 +7,35 @@ the namespace every importer and test uses.
 from __future__ import annotations
 
 import json
+import sys
 
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from Orchestrator.checkpoint import app
 from Orchestrator.artifacts import parse_and_process_artifacts_with_meta
-from Orchestrator.checkpoint import perform_mint, should_create_checkpoint
-from Orchestrator.config import (
-    AUTO_ENABLE,
-    DEBOUNCE_MS,
-    ON_RED,
-    ON_YELLOW,
-    TOKENS_THRESHOLD,
-    TURNS_THRESHOLD,
-)
-from Orchestrator.monitoring import drift_state_for
 from Orchestrator import location as user_location
-from Orchestrator.state import get_state, save_operator_state
-from Orchestrator.tasks import create_task
+from Orchestrator.state import get_state
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint
+# The auto-mint knobs and hooks MintGate.of reads from this module on every
+# turn (a stub set on chat_routes lands here).
+from Orchestrator.checkpoint import perform_mint, should_create_checkpoint  # noqa: F401
+from Orchestrator.config import (  # noqa: F401
+    AUTO_ENABLE, DEBOUNCE_MS, ON_RED, ON_YELLOW, TOKENS_THRESHOLD, TURNS_THRESHOLD,
+)
+from Orchestrator.monitoring import drift_state_for  # noqa: F401
+from Orchestrator.state import save_operator_state  # noqa: F401
+from Orchestrator.tasks import create_task  # noqa: F401
 
 from Orchestrator.routes.chat.context import _checked_operator, _take_turn_location
 
 
 def _mint_gate() -> MintGate:
     """This module's auto-mint knobs and hooks, read per call: a stub on
-    chat_routes.perform_mint / AUTO_ENABLE / ... reaches the shared tail."""
-    return MintGate(
-        auto_enable=AUTO_ENABLE, on_red=ON_RED, on_yellow=ON_YELLOW,
-        tokens_threshold=TOKENS_THRESHOLD, turns_threshold=TURNS_THRESHOLD,
-        debounce_ms=DEBOUNCE_MS, perform_mint=perform_mint,
-        should_create_checkpoint=should_create_checkpoint, create_task=create_task,
-        save_operator_state=save_operator_state, drift_state_for=drift_state_for,
-    )
+    chat_routes.perform_mint / AUTO_ENABLE / ... lands here and reaches the
+    shared tail."""
+    return MintGate.of(sys.modules[__name__])
 
 
 async def _cu_save_to_blackbox(operator: str, user_text: str, result_text: str, session):

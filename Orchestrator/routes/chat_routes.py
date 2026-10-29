@@ -15,6 +15,12 @@ the CU drivers' lazy imports):
     in every part that binds that name, so the code in the parts sees the stub
     exactly as it did when it all lived in this one file. Nothing in the
     application sets attributes here; only tests do.
+
+The names re-exported from Orchestrator/providers (the adapters' helpers, such
+as _guard_anthropic_history or ANTHROPIC_NONSTREAM_TIMEOUT) are for reading:
+the adapters take what a test may stub (keys, URLs, _get_tools, the upload
+loaders) from the chat routes per call, and anything else is stubbed on its
+own module.
 """
 from __future__ import annotations
 

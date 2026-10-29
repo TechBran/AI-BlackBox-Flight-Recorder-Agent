@@ -38,8 +38,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import concurrent.futures
-import contextvars
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -224,18 +222,12 @@ async def dispatch_tool(name: str, args: Dict, ctx: ToolContext) -> ToolOutcome:
 
 
 def dispatch_tool_blocking(name: str, args: Dict, ctx: ToolContext) -> ToolOutcome:
-    """dispatch_tool for the non-stream call_* loops, which run on a worker
-    thread with no event loop: the call gets its own loop (asyncio.run), as
-    the executor branches always did. A caller already inside a running loop
-    gets one on a helper thread instead of asyncio.run's RuntimeError; the
-    copied context keeps the request's origin device and tool-outcome log."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(dispatch_tool(name, args, ctx))
-    run = contextvars.copy_context().run
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(run, asyncio.run, dispatch_tool(name, args, ctx)).result()
+    """dispatch_tool for the non-stream call_* loops, which run on worker
+    threads (the /chat worker, the checkpoint and flight-report threads): each
+    call gets its own loop (asyncio.run), as the executor branches always did.
+    Its task copies the thread's context, so the turn's origin device and
+    tool-outcome log reach the executor."""
+    return asyncio.run(dispatch_tool(name, args, ctx))
 
 
 async def _blocking(ctx: ToolContext, fn: Callable, *args, **kwargs):
@@ -299,6 +291,14 @@ def _list_arg(args: Dict, key: str) -> List:
 def _read_b64(path) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
+
+
+def _as_text(result) -> str:
+    """An executor result as label text (a module executor may hand back a
+    non-str; slicing a dict used to end the stream)."""
+    if result is None:
+        return ""
+    return result if isinstance(result, str) else str(result)
 
 
 def _ellipsis(prompt: str) -> str:
@@ -659,7 +659,7 @@ async def _catch_all(name, args, ctx: ToolContext) -> ToolOutcome:
     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
     if profile.empty_note and not result:
         result = f"Tool '{name}' executed successfully (no output)."
-    print(f"\033[33m[TOOLVAULT-EXEC] {profile.tag} {name} (catch-all): {(result or '')[:120]}\033[0m")
+    print(f"\033[33m[TOOLVAULT-EXEC] {profile.tag} {name} (catch-all): {_as_text(result)[:120]}\033[0m")
     kind = _media_kind(name)
     data = getattr(tool_result, "data", None)
     if not profile.stream:
@@ -681,6 +681,7 @@ async def _catch_all(name, args, ctx: ToolContext) -> ToolOutcome:
             # native branches, so the UI shows and fills a placeholder.
             print(f"{profile.tag} Sending {kind}_task (catch-all): task_id={task_id}")
             extra.append({"type": f"{kind}_task", "data": {"task_id": str(task_id), "prompt": args.get("prompt", "")}})
+    label = {"type": "tool_result", "data": f"{name}: {_as_text(result)[:80]}"}
     if profile.label_first:
-        return ToolOutcome(result, [{"type": "tool_result", "data": f"{name}: {(result or '')[:80]}"}] + extra)
-    return ToolOutcome(result, extra + [{"type": "tool_result", "data": f"{name}: {result[:80]}"}])
+        return ToolOutcome(result, [label] + extra)
+    return ToolOutcome(result, extra + [label])

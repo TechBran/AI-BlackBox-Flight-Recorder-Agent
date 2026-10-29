@@ -192,6 +192,16 @@ def _headers(provider: CompatProvider, target: _Target, stream: bool) -> Dict[st
     return {"Authorization": f"Bearer {target.api_key}"}
 
 
+def _tool_args(raw) -> Dict:
+    """A tool call's arguments string as a dict: "" (a zero-argument tool, as
+    llama.cpp and Grok send it) or malformed JSON is {} — the tool then runs
+    and answers for itself instead of the whole turn failing."""
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
 def _reasoning_of(message: Dict) -> str:
     for field in _REASONING_FIELDS:
         val = message.get(field)
@@ -659,12 +669,7 @@ async def stream(provider: CompatProvider, messages: List[Dict], model: str, ope
                         # Execute each tool call
                         for tool_call in tool_calls:
                             func_name = tool_call["function"]["name"]
-                            func_args_str = tool_call["function"]["arguments"]
-
-                            try:
-                                func_args = json.loads(func_args_str)
-                            except json.JSONDecodeError:
-                                func_args = {}
+                            func_args = _tool_args(tool_call["function"]["arguments"])
 
                             outcome = await dispatch_tool(func_name, func_args, env.tool_context(operator, loop))
                             for event in outcome.events:
@@ -784,7 +789,7 @@ def call(provider: CompatProvider, messages: List[Dict], model: str, operator: s
                 func = tool_call["function"]
                 tool_name = func["name"]
                 tool_id = tool_call["id"]
-                args = json.loads(func["arguments"])
+                args = _tool_args(func["arguments"])
 
                 outcome = dispatch_tool_blocking(tool_name, args, env.tool_context(operator, loop))
                 if outcome.media_task:
