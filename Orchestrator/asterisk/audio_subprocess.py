@@ -73,8 +73,6 @@ AS_FRAME_BYTES = 320      # 20ms at 8kHz, 16-bit mono (160 samples × 2 bytes)
 PRE_BUFFER_FRAMES = 5     # 5 × 20ms = 100ms
 
 
-
-
 class _QuietStream:
     """stdout/stderr that drops a write once the parent's log pipe is gone,
     instead of raising BrokenPipeError into whatever was logging."""
