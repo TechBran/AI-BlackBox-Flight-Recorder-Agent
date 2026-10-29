@@ -96,3 +96,39 @@ def make_zip_box(box, at):
     _identity(root)
     (root / "Manifest").mkdir(exist_ok=True)
     return root
+
+
+# ── release signing (audit X04-security-clients-infra-11) ───────────────
+
+def make_signing_key(directory, name="release"):
+    """A fresh ed25519 SSH signing key. `.line` is its ALLOWED SIGNERS entry,
+    in the format installer/allowed_signers documents."""
+    directory.mkdir(parents=True, exist_ok=True)
+    key = directory / f"{name}_ed25519"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name,
+                    "-f", str(key)], check=True, capture_output=True)
+    kind, blob = (directory / f"{name}_ed25519.pub").read_text().split()[:2]
+    return SimpleNamespace(key=key, line=f'{name}@example.invalid namespaces="git" {kind} {blob}')
+
+
+def push_signed(box, key, *, version=3):
+    """Publish a commit on origin signed with `key` (make_signing_key).
+    Returns its SHA."""
+    (box.seed / "app.py").write_text(f"VERSION = {version}\n")
+    git(box.seed, "add", "-A")
+    git(box.seed, "-c", "gpg.format=ssh", "-c", f"user.signingkey={key.key}",
+        "commit", "-q", "-S", "-m", f"v{version} (signed)")
+    git(box.seed, "push", "-q", "origin", "main")
+    return git(box.seed, "rev-parse", "HEAD")
+
+
+def write_pins(trust_dir, *, origins=None, signers=None):
+    """Write the update trust pins install.sh publishes (None = leave absent)."""
+    if origins is not None:
+        p = trust_dir / "update-origin"
+        p.write_text("# pinned by the test\n" + "".join(f"{o}\n" for o in origins))
+        p.chmod(0o644)
+    if signers is not None:
+        p = trust_dir / "update-allowed-signers"
+        p.write_text("# release keys\n" + "".join(f"{s}\n" for s in signers))
+        p.chmod(0o644)

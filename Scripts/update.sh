@@ -27,12 +27,22 @@
 # would overwrite it). Edits saved during the venv freezes, after the last
 # question, are stashed rather than reset over.
 #
+# Updates come only from the origin the root-owned /etc/blackbox/update-origin
+# pins (checked before the fetch) and, once /etc/blackbox/update-allowed-signers
+# holds a release key, only as commits SSH-signed by it; the reset installs the
+# exact commit that was checked (2026-10 audit X04-security-clients-infra-11;
+# docs/runbooks/2026-10-29-update-trust-and-service-user.md). A failed
+# install.sh puts back the venvs, the code, the stash taken for the update and
+# the old code's root-owned template store.
+#
 # Exit codes:
 #   0 — updated successfully (or "already up to date")
 #   1 — error during update; venvs and code rolled back via the freezes + tag
 #   2 — user declined the update or the stash, or --yes met local edits
 #       without --stash
 #   3 — preflight failure (not a git repo, network unreachable, etc.)
+#   4 — refused by the trust pins: the origin is not a pinned one, or the
+#       commit is not signed by a pinned release key; nothing was changed
 
 set -euo pipefail
 
@@ -66,6 +76,22 @@ if [[ ! -d .git ]]; then
     exit 3
 fi
 
+# ── Who may touch the checkout (2026-10 audit X04-security-clients-infra-12) ──
+# On a box moved to a dedicated service account (sudo bash install.sh
+# --service-user <name>) the checkout belongs to that account and the operator
+# running this script is another, sudo-capable one. Every git, pip and file
+# step on the checkout then runs as its owner, so nothing in it ends up owned
+# by the operator or by root; only install.sh and the restart run as root. On
+# every other box the owner is the caller and both helpers change nothing.
+TREE_OWNER="$(stat -c %U "$BLACKBOX_ROOT")"
+if [[ "$TREE_OWNER" != "$(id -un)" ]]; then
+    as_owner() { sudo -u "$TREE_OWNER" -- "$@"; }
+    git() { sudo -u "$TREE_OWNER" -- git "$@"; }
+    echo "[update] $BLACKBOX_ROOT belongs to $TREE_OWNER: its git and pip steps run as $TREE_OWNER."
+else
+    as_owner() { "$@"; }
+fi
+
 if ! git remote get-url origin > /dev/null 2>&1; then
     echo "[update] ERROR: no 'origin' remote configured. Run install.sh's Step 0a manually." >&2
     exit 3
@@ -80,6 +106,104 @@ if git remote get-url origin | grep -q "TechBran/blackbox-poc"; then
     git remote set-url origin https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git
     echo "[update] origin re-pointed to the renamed repo (ai-blackbox-flight-recorder-agent)."
 fi
+
+# ── Pinned origin + release signature (2026-10 audit X04-security-clients-infra-11) ──
+# The in-app updater's rules, line for line (Orchestrator/update/verify.py has
+# the reference text). The origin must be one of the root-owned
+# $UPDATE_TRUST_DIR/update-origin lines, compared ignoring case, one trailing
+# "/" and one trailing ".git", and it is checked BEFORE the fetch. Once the
+# root-owned $UPDATE_TRUST_DIR/update-allowed-signers holds a key, the commit
+# installed must carry an SSH signature that git verify-commit accepts against
+# that file alone: the -c options beat .git/config (which the service can
+# write), and the PGP and X.509 verifiers are `false`. A pin that is a symlink,
+# not owned by root or writable by anyone else refuses the update; a missing
+# one only warns (a box that has not run the install.sh that publishes them, or
+# a repo that ships no release key yet). Both constants are fixed: nothing in
+# the caller's environment can point the check anywhere else.
+UPDATE_TRUST_DIR=/etc/blackbox
+UPDATE_TRUST_UID=0
+
+refuse_update() {
+    echo "[update] REFUSED: $*" >&2
+    echo "[update] Nothing was changed." >&2
+    exit 4
+}
+
+# Loads pin <name> into PIN_LINES (its lines, trimmed, without comments and
+# blank lines). Returns 1 when the pin does not exist; refuses the update when
+# the pin or the directory holding it cannot be trusted.
+load_pin() {  # <name>
+    local path="$UPDATE_TRUST_DIR/$1" p line
+    PIN_LINES=()
+    [[ -e "$path" || -L "$path" ]] || return 1
+    for p in "$UPDATE_TRUST_DIR" "$path"; do
+        if [[ -L "$p" || "$(stat -c %u "$p")" != "$UPDATE_TRUST_UID" ]] \
+                || (( 8#$(stat -c %a "$p") & 8#022 )); then
+            refuse_update "$p is not a trusted pin: it must be root-owned, not a symlink, and writable by nobody else (sudo bash $BLACKBOX_ROOT/Scripts/install.sh writes it that way)."
+        fi
+    done
+    [[ -f "$path" ]] || refuse_update "$path is not a regular file, so it is not a trusted pin."
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        PIN_LINES+=("$line")
+    done < "$path"
+    return 0
+}
+
+normalize_origin() {  # <url>: trimmed, lower case, one "/" and one ".git" off the end
+    local u="$1"
+    u="${u#"${u%%[![:space:]]*}"}"
+    u="${u%"${u##*[![:space:]]}"}"
+    u="${u,,}"
+    u="${u%/}"
+    printf '%s\n' "${u%.git}"
+}
+
+check_pinned_origin() {
+    local url want pin
+    if ! load_pin update-origin; then
+        echo "[update] WARNING: no update origin is pinned on this box ($UPDATE_TRUST_DIR/update-origin is missing), so the origin was not checked. sudo bash $BLACKBOX_ROOT/Scripts/install.sh pins it." >&2
+        return 0
+    fi
+    [[ ${#PIN_LINES[@]} -gt 0 ]] \
+        || refuse_update "$UPDATE_TRUST_DIR/update-origin lists no update origin, so no origin is accepted. Re-run sudo bash $BLACKBOX_ROOT/Scripts/install.sh to restore it."
+    url="$(git remote get-url origin)"
+    want="$(normalize_origin "$url")"
+    for pin in "${PIN_LINES[@]}"; do
+        [[ "$(normalize_origin "$pin")" == "$want" ]] && return 0
+    done
+    refuse_update "this checkout fetches updates from $url, which is not a pinned update origin ($UPDATE_TRUST_DIR/update-origin lists ${PIN_LINES[*]}). If the origin was changed by mistake, put it back (as $TREE_OWNER, in $BLACKBOX_ROOT) with: git remote set-url origin ${PIN_LINES[0]}"
+}
+
+verify_release_commit() {  # <sha>
+    local sha="$1" raw keygen="" no="" p out
+    if ! load_pin update-allowed-signers || [[ ${#PIN_LINES[@]} -eq 0 ]]; then
+        echo "[update] WARNING: no release signing key is pinned on this box ($UPDATE_TRUST_DIR/update-allowed-signers is missing or holds no key), so the signature of ${sha:0:7} was not checked." >&2
+        return 0
+    fi
+    raw="$(git cat-file commit "$sha")"
+    if ! grep -qxF 'gpgsig -----BEGIN SSH SIGNATURE-----' <<< "${raw%%$'\n\n'*}"; then
+        refuse_update "commit ${sha:0:7} is not signed with a release key (no SSH signature), and this box only installs signed releases ($UPDATE_TRUST_DIR/update-allowed-signers)."
+    fi
+    for p in /usr/bin/ssh-keygen /bin/ssh-keygen; do
+        if [[ -x "$p" ]]; then keygen="$p"; break; fi
+    done
+    for p in /usr/bin/false /bin/false; do
+        if [[ -x "$p" ]]; then no="$p"; break; fi
+    done
+    [[ -n "$keygen" && -n "$no" ]] \
+        || refuse_update "ssh-keygen (openssh-client) is not installed, so the release signature cannot be checked."
+    if ! out="$(git -c gpg.ssh.allowedSignersFile="$UPDATE_TRUST_DIR/update-allowed-signers" \
+                    -c gpg.ssh.program="$keygen" -c gpg.program="$no" -c gpg.x509.program="$no" \
+                    verify-commit "$sha" 2>&1)"; then
+        refuse_update "the signature on commit ${sha:0:7} is not from a pinned release key ($UPDATE_TRUST_DIR/update-allowed-signers): $(tail -n 1 <<< "$out")"
+    fi
+    echo "[update] Commit ${sha:0:7} is signed by a pinned release key."
+}
+
+check_pinned_origin
 
 # ── Fetch latest ──
 echo "[update] Fetching latest from $(git remote get-url origin)..."
@@ -114,6 +238,10 @@ echo "[update] ─────────────────────�
 git log --oneline "$CURRENT_SHA..$LATEST_SHA"
 echo "[update] ──────────────────────────────────────────────────"
 
+# The commit the reset below installs: LATEST_SHA itself, never whatever
+# origin/main names by then.
+verify_release_commit "$LATEST_SHA"
+
 # ── Local edits to tracked files (audit M2, O16-01) ──
 # The reset below destroys them; the pre-update tag protects committed work
 # only. Untracked files (ledger, uploads, Manifest/) survive a reset, so only
@@ -126,11 +254,12 @@ tracked_edits() {
     # deletion. Compare the files on disk with HEAD through a throwaway index
     # (as git_ops.tracked_changes does); the box's own index is never written.
     if [[ -z "$(git ls-files -z | head -c 1)" && -n "$(git ls-tree --name-only HEAD 2>/dev/null | head -c 1)" ]]; then
-        tmp="$(mktemp -d "$(git rev-parse --absolute-git-dir)/blackbox-status-XXXXXX")"
-        GIT_INDEX_FILE="$tmp/index" git read-tree HEAD \
-            && GIT_INDEX_FILE="$tmp/index" git --no-optional-locks status --porcelain --untracked-files=no
+        tmp="$(as_owner mktemp -d "$(git rev-parse --absolute-git-dir)/blackbox-status-XXXXXX")"
+        # `env` so the variable reaches git through as_owner's sudo too.
+        as_owner env GIT_INDEX_FILE="$tmp/index" git read-tree HEAD \
+            && as_owner env GIT_INDEX_FILE="$tmp/index" git --no-optional-locks status --porcelain --untracked-files=no
         rc=$?
-        rm -rf "$tmp"
+        as_owner rm -rf "$tmp"
         return "$rc"
     fi
     git status --porcelain --untracked-files=no
@@ -197,16 +326,16 @@ echo "[update] Tagged $PRE_TAG (rollback anchor)"
 # update_state.json. A failed freeze leaves no file, never an older one.
 freeze_venv() {  # <pip> <freeze file>
     local frozen
-    if frozen="$("$1" freeze 2>/dev/null)"; then
-        printf '# blackbox-freeze-for: %s\n%s\n' "$PRE_TAG" "$frozen" > "$2"
+    if frozen="$(as_owner "$1" freeze 2>/dev/null)"; then
+        printf '# blackbox-freeze-for: %s\n%s\n' "$PRE_TAG" "$frozen" | as_owner tee "$2" > /dev/null
         echo "[update] Saved $2 for venv rollback"
     else
-        rm -f "$2"
+        as_owner rm -f "$2"
         echo "[update] WARNING: could not freeze the venv behind $1; a rollback keeps its packages." >&2
     fi
 }
 
-mkdir -p Manifest
+as_owner mkdir -p Manifest
 if [[ -x Orchestrator/venv/bin/pip ]]; then
     freeze_venv Orchestrator/venv/bin/pip Manifest/pre_update_pip_freeze.txt
 fi
@@ -221,16 +350,20 @@ CHANGED_FILES="$(git diff --name-only "$CURRENT_SHA" "$LATEST_SHA")"
 # ── Rollback: venvs from the pre-update freezes, then code (O22-09) ──
 restore_venv() {  # <pip> <freeze file>
     local pip="$1" freeze="$2" restore
-    [[ -x "$pip" && -s "$freeze" ]] || return 0
+    # Manifest/ is the owner's alone (0700, install.sh), so ask as the owner.
+    if [[ ! -x "$pip" ]] || ! as_owner test -s "$freeze"; then
+        return 0
+    fi
     # Same rule as the in-app runner: a pin with a local version label
     # (torch==2.11.0+cpu) came from another index, PyPI cannot serve it, and
     # one such line makes pip refuse the whole file. Updates never touch them.
     # Comments (the freeze's tag line) and blank lines go too.
     restore="${freeze%.txt}_restore.txt"
-    grep -Ev '^(#|$)|^[A-Za-z0-9][A-Za-z0-9._-]*==[^[:space:]]*\+' "$freeze" > "$restore" || true
-    [[ -s "$restore" ]] || return 0
+    { as_owner grep -Ev '^(#|$)|^[A-Za-z0-9][A-Za-z0-9._-]*==[^[:space:]]*\+' "$freeze" || true; } \
+        | as_owner tee "$restore" > /dev/null
+    as_owner test -s "$restore" || return 0
     echo "[update] Restoring the venv behind $pip from $freeze..."
-    if ! "$pip" install -r "$restore" --quiet --force-reinstall; then
+    if ! as_owner "$pip" install -r "$restore" --quiet --force-reinstall; then
         echo "[update] WARNING: venv restore failed; retry: $pip install -r $restore --force-reinstall" >&2
     fi
 }
@@ -245,6 +378,7 @@ restore_venv() {  # <pip> <freeze file>
 keep_local_work() {  # <stash message> <reset target> <displaced dir name>
     local message="$1" target="$2" aside="Manifest/displaced/$3" rel part seg
     local -a in_way=() segs=()
+    KEPT_STASH=""  # the stash made here, if any (the rollback puts it back)
     if [[ -n "$(tracked_edits)" ]]; then
         if [[ "$STASH_MODE" -ne 1 ]]; then
             echo "[update] Tracked files changed after the last check:"
@@ -254,7 +388,8 @@ keep_local_work() {  # <stash message> <reset target> <displaced dir name>
             echo "[update] ERROR: git stash failed, so nothing was reset." >&2
             return 1
         fi
-        echo "[update] Stashed local edits to tracked files as $message ($(git rev-parse -q --verify refs/stash))."
+        KEPT_STASH="$(git rev-parse -q --verify refs/stash)"
+        echo "[update] Stashed local edits to tracked files as $message ($KEPT_STASH)."
         echo "[update] Recover them with: git stash list && git stash apply <that SHA>"
     fi
     while IFS= read -r -d '' rel; do
@@ -276,8 +411,10 @@ keep_local_work() {  # <stash message> <reset target> <displaced dir name>
     done < <(git diff --name-only -z --no-renames --diff-filter=A HEAD "$target")
     for rel in ${in_way[@]+"${in_way[@]}"}; do
         [[ -e "$rel" || -L "$rel" ]] || continue  # already moved (a shared parent)
-        if [[ -e "$aside/$rel" || -L "$aside/$rel" ]] \
-                || ! mkdir -p "$aside/$(dirname -- "$rel")" || ! mv -- "$rel" "$aside/$rel"; then
+        # $aside is under Manifest/, which only the owner can read (0700).
+        if as_owner test -e "$aside/$rel" || as_owner test -L "$aside/$rel" \
+                || ! as_owner mkdir -p "$aside/$(dirname -- "$rel")" \
+                || ! as_owner mv -- "$rel" "$aside/$rel"; then
             echo "[update] ERROR: could not move $rel aside to $aside/, so nothing was reset." >&2
             return 1
         fi
@@ -302,12 +439,54 @@ rollback_to_pre_tag() {
     git reset --hard "$PRE_TAG"
 }
 
+# ── After the rollback: the stash and the trusted store go back too (X04-...-11) ──
+# The stash taken for this update was made on PRE_TAG, so it applies cleanly
+# now that the code is back there; once it has, its entry is dropped (found by
+# SHA: an entry's stash@{n} moves whenever another stash is made). What the
+# rollback itself stashed (the failed run's leftovers) stays in the list.
+put_back_update_stash() {
+    local sha ref
+    [[ -n "$UPDATE_STASH" ]] || return 0
+    if ! git stash apply -q "$UPDATE_STASH"; then
+        echo "[update] WARNING: the stashed local edits ($UPDATE_STASH) could not be put back; restore them with: git stash apply $UPDATE_STASH" >&2
+        return 0
+    fi
+    while read -r sha ref; do
+        if [[ "$sha" == "$UPDATE_STASH" ]]; then
+            git stash drop -q "$ref"
+            break
+        fi
+    done < <(git stash list --format='%H %gd')
+    echo "[update] Put the local edits stashed for the update back in the working tree."
+}
+
+# The failed install.sh had already published the NEW templates to the
+# root-owned store and installed the new /usr/local/sbin helpers (Steps 0b/0c
+# run before anything that can fail), and the startup hooks re-assert that store
+# onto the deployed sudoers and helpers. Republish the old code's. An install.sh
+# from before --publish-store-only (no such arm in its option parser) would run
+# the whole installer instead, so it is only named.
+republish_trusted_store() {
+    if ! grep -qE '^[[:space:]]*--publish-store-only\)' "$BLACKBOX_ROOT/Scripts/install.sh"; then
+        echo "[update] The root-owned template store may still hold the failed update's templates." >&2
+        echo "[update] Republish this commit's with: sudo bash $BLACKBOX_ROOT/Scripts/install.sh" >&2
+        return 0
+    fi
+    echo "[update] Republishing the root-owned template store from $PRE_TAG..."
+    if ! sudo "$BLACKBOX_ROOT/Scripts/install.sh" --publish-store-only; then
+        echo "[update] WARNING: republishing the template store failed; run: sudo bash $BLACKBOX_ROOT/Scripts/install.sh --publish-store-only" >&2
+    fi
+}
+
 # ── Atomic code swap ──
-if ! keep_local_work "auto-stash-${PRE_TAG}" origin/main "$PRE_TAG"; then
+# To the commit verify_release_commit checked, by SHA (not origin/main, which
+# a hostile .git or a concurrent fetch can move meanwhile).
+if ! keep_local_work "auto-stash-${PRE_TAG}" "$LATEST_SHA" "$PRE_TAG"; then
     exit 1
 fi
-echo "[update] Resetting to origin/main ($LATEST_SHORT)..."
-git reset --hard origin/main
+UPDATE_STASH="$KEPT_STASH"
+echo "[update] Resetting to $LATEST_SHORT (origin/main as checked above)..."
+git reset --hard "$LATEST_SHA"
 
 # ── Re-run idempotent install.sh steps + restart ──
 # install.sh's existing if-not-exists guards prevent overwriting per-customer
@@ -318,6 +497,8 @@ echo "[update] Re-running install.sh to apply system-level changes..."
 if ! sudo "$BLACKBOX_ROOT/Scripts/install.sh"; then
     echo "[update] ERROR: install.sh failed. Rolling back venvs and code to $PRE_TAG..." >&2
     if rollback_to_pre_tag; then
+        put_back_update_stash
+        republish_trusted_store
         echo "[update] Rolled back. Service was NOT restarted (still at old SHA)." >&2
     else
         echo "[update] Service was NOT restarted. Do not restart it until the code is back at $PRE_TAG." >&2

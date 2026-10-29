@@ -1,0 +1,14 @@
+# Update origins this BlackBox accepts, one URL per line (# starts a comment).
+#
+# Scripts/install.sh publishes this file, root-owned, as
+# /etc/blackbox/update-origin (publish_update_pins). Scripts/update.sh and the
+# in-app updater (Orchestrator/update/verify.py) fetch updates only while the
+# checkout's `git remote get-url origin` is one of these URLs, compared
+# ignoring case, one trailing "/" and one trailing ".git".
+#
+# The pin comes from this tracked file, never from the box's .git/config, which
+# the running service can write. A fork that ships its own updates lists its
+# own URL here. A box that must fetch from somewhere else (a mirror) adds that
+# URL to /etc/blackbox/update-origin as root; install.sh rewrites the file from
+# this one, so the line has to be added again after each install.sh run.
+https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git

@@ -182,5 +182,48 @@ if grep -qE '^[^#].*NOPASSWD:.*/bash[[:space:]].*install\.sh' "$SUDOERS_TMPL"; t
     fail "the sudoers template reintroduced a 'bash … install.sh' NOPASSWD grant — that is the in-service→root escalation this change removed"
 fi
 
+# ── 9. Scripts/update.sh checks the trust pins before anything changes ────────
+# 2026-10 audit rank 79 (X04-security-clients-infra-11): the origin is checked
+# against the root-owned pin BEFORE the fetch, the release signature of the
+# exact commit BEFORE the first stash/tag/reset, and the reset installs that
+# SHA, never `origin/main` (which a hostile .git or a concurrent fetch can move
+# after the check). Anchored on executable lines only.
+UPDATE_SH="$REPO_ROOT/Scripts/update.sh"
+bash -n "$UPDATE_SH" || fail "update.sh does not parse"
+line_of() { grep -nE "$1" "$UPDATE_SH" | head -n1 | cut -d: -f1; }
+ORIGIN_AT="$(line_of '^check_pinned_origin$')"
+FETCH_AT="$(line_of '^if ! git fetch origin main')"
+SIGN_AT="$(line_of '^verify_release_commit "\$LATEST_SHA"$')"
+TAG_AT="$(line_of '^git tag "\$PRE_TAG"$')"
+SWAP_AT="$(line_of '^if ! keep_local_work "auto-stash-\$\{PRE_TAG\}" "\$LATEST_SHA"')"
+[[ -n "$ORIGIN_AT" && -n "$FETCH_AT" && "$ORIGIN_AT" -lt "$FETCH_AT" ]] \
+    || fail "update.sh must check the pinned origin (line ${ORIGIN_AT:-none}) before it fetches (line ${FETCH_AT:-none})"
+[[ -n "$SIGN_AT" && -n "$TAG_AT" && "$SIGN_AT" -lt "$TAG_AT" ]] \
+    || fail "update.sh must verify the release signature (line ${SIGN_AT:-none}) before it tags, freezes or stashes (line ${TAG_AT:-none})"
+[[ -n "$SWAP_AT" ]] || fail "update.sh no longer resets to the verified \$LATEST_SHA"
+grep -qE '^[[:space:]]*git reset --hard origin/main' "$UPDATE_SH" \
+    && fail "update.sh resets to origin/main again — it must reset to the verified \$LATEST_SHA"
+grep -qE '^git reset --hard "\$LATEST_SHA"$' "$UPDATE_SH" \
+    || fail "update.sh's code swap is not 'git reset --hard \"\$LATEST_SHA\"'"
+grep -qE '^UPDATE_TRUST_DIR=/etc/blackbox$' "$UPDATE_SH" \
+    || fail "update.sh's trust pins no longer come from the fixed /etc/blackbox"
+grep -qE '\$\{UPDATE_TRUST_(DIR|UID):?[-=]' "$UPDATE_SH" \
+    && fail "update.sh lets the environment move its trust pins (a \${UPDATE_TRUST_*:-…} default)"
+
+# ── 10. the in-app runner checks the same pins, in the same places ─────────────
+RUNNER="$REPO_ROOT/Orchestrator/update/runner.py"
+R_ORIGIN="$(grep -n 'verify.check_origin' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_FETCH="$(grep -n 'git_ops.fetch_origin_main' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_SIGN="$(grep -n 'verify.check_commit' "$RUNNER" | head -n1 | cut -d: -f1)"
+R_TAG="$(grep -n 'git_ops.tag, self.pre_update_tag' "$RUNNER" | head -n1 | cut -d: -f1)"
+[[ -n "$R_ORIGIN" && -n "$R_FETCH" && "$R_ORIGIN" -lt "$R_FETCH" ]] \
+    || fail "runner.py must check the pinned origin before its fetch"
+[[ -n "$R_SIGN" && -n "$R_TAG" && "$R_SIGN" -lt "$R_TAG" ]] \
+    || fail "runner.py must verify the release signature before it tags"
+grep -qE '^TRUST_DIR = "/etc/blackbox"$' "$REPO_ROOT/Orchestrator/update/verify.py" \
+    || fail "verify.py's trust pins no longer come from the fixed /etc/blackbox"
+grep -q 'os.environ' "$REPO_ROOT/Orchestrator/update/verify.py" \
+    && fail "verify.py reads the environment — the service's environment comes partly from the service-writable .env"
+
 echo "ALL TESTS PASSED"
 exit 0

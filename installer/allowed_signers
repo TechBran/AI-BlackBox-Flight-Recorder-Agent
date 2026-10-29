@@ -1,0 +1,30 @@
+# Release signing keys, in ssh-keygen's ALLOWED SIGNERS format (man ssh-keygen,
+# "ALLOWED SIGNERS"), one key per line:
+#   <principal> namespaces="git" <key type> <base64 public key>
+# for example
+#   releases@example.invalid namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+#
+# Scripts/install.sh publishes this file, root-owned, as
+# /etc/blackbox/update-allowed-signers (publish_update_pins). While it holds no
+# key, as shipped today, updates are not signature-checked and their log says
+# so. Once it holds one, Scripts/update.sh and the in-app updater
+# (Orchestrator/update/verify.py) install only commits SSH-signed by one of these
+# keys: `git verify-commit` against this file alone.
+#
+# Signing releases (the owner, on the machine that holds the private key):
+#   ssh-keygen -t ed25519 -C blackbox-releases -f ~/.ssh/blackbox_release   # once
+#   git config gpg.format ssh
+#   git config user.signingkey ~/.ssh/blackbox_release
+#   git config commit.gpgsign true          # every commit is signed from now on
+#   git log --show-signature -1             # check before pushing
+# The updater checks the commit it installs, which is the tip of main, so every
+# commit that reaches main must be signed: merge and rebase locally and push. A
+# merge made on GitHub's website carries GitHub's own signature, which is not in
+# this file, and every box would refuse it.
+#
+# Adding the first key, or rotating one, is a commit to this file (sign it with
+# a key the boxes already trust). A box enforces it from its next
+# `sudo bash Scripts/install.sh`; Scripts/update.sh runs that on every update,
+# the in-app updater never does. Keep a retiring key listed until every box has
+# pinned its successor. docs/runbooks/2026-10-29-update-trust-and-service-user.md
+# has the whole procedure.

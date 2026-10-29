@@ -8,10 +8,23 @@ Audit 2026-10-09 rank 43 (O16-01, O22-09):
     the script saved (before, only the code went back), stashing anything the
     failed run left in tracked files first.
 
+Audit 2026-10-09 rank 79 (X04-security-clients-infra-11/-12):
+  * the origin must be one the root-owned /etc/blackbox/update-origin pins,
+    checked before the fetch, and once /etc/blackbox/update-allowed-signers
+    holds a key the commit installed must be SSH-signed by it (exit 4, nothing
+    changed). The reset installs the verified SHA, not whatever origin/main
+    names by then;
+  * a failed install.sh is rolled back further: the stash taken for the update
+    is put back and the old code republishes the root-owned template store;
+  * on a box whose checkout belongs to a dedicated service account, git and
+    pip run as that account (only install.sh and the restart run as root).
+
 The real script runs in a real git box (_gitbox) whose Scripts/install.sh is a
 stub. `sudo` is a fake on PATH that records its arguments and never escalates:
-install.sh runs as the stub, `systemctl` is recorded and never run. The test
-proves the fake is the `sudo` the script will find before it starts it.
+install.sh runs as the stub, `systemctl` is recorded and never run, `-u <user>`
+runs the command as this user. The test proves the fake is the `sudo` the
+script will find before it starts it. The script's copy reads its trust pins
+from the per-test trust directory (conftest.py), never /etc/blackbox.
 """
 from __future__ import annotations
 
@@ -26,7 +39,8 @@ from pathlib import Path
 
 import pytest
 
-from ._gitbox import git, head, make_box, make_zip_box, push_upstream, stash_entries, tags
+from ._gitbox import (git, head, make_box, make_signing_key, make_zip_box, push_signed,
+                      push_upstream, stash_entries, tags, write_pins)
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -34,6 +48,9 @@ INSTALL_STUB = textwrap.dedent("""\
     #!/bin/sh
     # Stand-in for Scripts/install.sh. STUB_TOUCH edits a tracked file first,
     # as a half-finished install could.
+    case "$1" in
+        --publish-store-only) echo "[install-stub] store republished"; exit 0 ;;
+    esac
     echo "[install-stub] ran"
     if [ -n "$STUB_TOUCH" ]; then echo "touched by install" >> app.py; fi
     # An intent-to-add entry: `git stash` refuses it ("Cannot save the
@@ -45,12 +62,32 @@ INSTALL_STUB = textwrap.dedent("""\
 FAKE_SUDO = textwrap.dedent("""\
     #!/bin/sh
     # Test double: records the call and never escalates. systemctl is only
-    # recorded, everything else (the install.sh stub) runs as this user.
+    # recorded, `-u <user> --` runs the rest as this user, and everything else
+    # (the install.sh stub) runs as this user.
     echo "$*" >> "$FAKE_SUDO_LOG"
     [ "$1" = "-n" ] && shift
+    if [ "$1" = "-u" ]; then shift 2; [ "$1" = "--" ] && shift; exec "$@"; fi
     case "$1" in systemctl) exit 0 ;; esac
     exec "$@"
 """)
+
+# The constants update.sh reads its trust pins and the checkout's owner from.
+TRUST_DIR_LINE = "UPDATE_TRUST_DIR=/etc/blackbox\n"
+TRUST_UID_LINE = "UPDATE_TRUST_UID=0\n"
+TREE_OWNER_LINE = 'TREE_OWNER="$(stat -c %U "$BLACKBOX_ROOT")"\n'
+
+
+def sandboxed_update_sh(trust_dir, tree_owner=None) -> str:
+    """Scripts/update.sh, reading its pins from `trust_dir` (owned by the test
+    user) instead of /etc/blackbox, and, when asked, believing the checkout
+    belongs to `tree_owner`."""
+    script = (REPO / "Scripts" / "update.sh").read_text()
+    script = script.replace(TRUST_DIR_LINE, f"UPDATE_TRUST_DIR={trust_dir}\n", 1)
+    script = script.replace(TRUST_UID_LINE, f"UPDATE_TRUST_UID={os.getuid()}\n", 1)
+    if tree_owner:
+        assert TREE_OWNER_LINE in script
+        script = script.replace(TREE_OWNER_LINE, f"TREE_OWNER={tree_owner}\n", 1)
+    return script
 
 FAKE_PIP = textwrap.dedent("""\
     #!/bin/sh
@@ -71,11 +108,11 @@ def _write_exec(path: Path, body: str) -> None:
 
 
 @pytest.fixture
-def sh(tmp_path):
-    def build(*, requirements=False):
+def sh(tmp_path, trust):
+    def build(*, requirements=False, install_stub=INSTALL_STUB, tree_owner=None):
         box = make_box(tmp_path, {
-            "Scripts/update.sh": (REPO / "Scripts" / "update.sh").read_text(),
-            "Scripts/install.sh": INSTALL_STUB,
+            "Scripts/update.sh": sandboxed_update_sh(trust, tree_owner),
+            "Scripts/install.sh": install_stub,
             "requirements.txt": "aiohttp==3.13.2\n",
         })
         box.v2 = push_upstream(box, requirements=requirements)
@@ -387,3 +424,229 @@ def test_a_zip_install_box_lists_only_its_real_edits(sh):
     assert (root / "notes.txt").read_text() == "customer edit\n"
     assert git(root, "ls-files") == "", "the box's own index stays as install.sh left it"
     assert not list((root / ".git").glob("blackbox-status-*"))
+
+
+# ── pinned origin + signed releases (audit rank 79, X04-security-clients-infra-11) ──
+
+def test_the_trust_pins_are_root_owned_constants_not_environment(sh):
+    """The copy under test can only be pointed at a sandbox by rewriting these
+    two lines: nothing in the operator's environment moves them."""
+    script = (REPO / "Scripts" / "update.sh").read_text()
+    assert script.count(TRUST_DIR_LINE) == 1 and script.count(TRUST_UID_LINE) == 1
+    assert "${UPDATE_TRUST_DIR:-" not in script and "${UPDATE_TRUST_UID:-" not in script
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/TechBran/AI-BlackBox-Flight-Recorder-Agent.git",
+    "  https://github.com/TechBran/ai-blackbox-flight-recorder-agent.GIT/  ",
+    "https://github.com/TechBran/ai-blackbox-flight-recorder-agent",
+    "https://github.com/TechBran/blackbox-poc.git",
+    "git@github.com:TechBran/ai-blackbox-flight-recorder-agent.git",
+    "/srv/mirrors/blackbox.git//",
+])
+def test_update_sh_compares_origins_exactly_like_the_in_app_runner(url):
+    import re
+    from Orchestrator.update import verify
+    script = (REPO / "Scripts" / "update.sh").read_text()
+    fn = re.search(r"^normalize_origin\(\) \{.*?^\}", script, re.S | re.M).group(0)
+    out = subprocess.run(["bash", "-c", fn + '\nnormalize_origin "$1"', "_", url],
+                         capture_output=True, text=True, check=True).stdout
+    assert out == verify.normalize_origin(url) + "\n"
+
+
+def test_an_origin_the_pin_does_not_list_is_refused_before_the_fetch(sh, trust):
+    box = sh()
+    write_pins(trust, origins=["https://github.com/example/the-real-repo.git"])
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "the-real-repo" in r.stderr and str(box.origin) in r.stderr
+    assert git(box.root, "rev-parse", "origin/main") == box.v1, "nothing may be fetched"
+    assert head(box.root) == box.v1 and tags(box.root) == [] and stash_entries(box.root) == []
+    assert sudo_calls(box) == []
+
+
+def test_status_reports_a_refused_origin(sh, trust):
+    box = sh()
+    write_pins(trust, origins=["https://github.com/example/the-real-repo.git"])
+    r = run_update(box, "--status")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert head(box.root) == box.v1
+
+
+def test_a_pinned_origin_updates_whatever_its_case(sh, trust):
+    box = sh()
+    write_pins(trust, origins=[str(box.origin).upper()])
+    r = run_update(box, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+
+
+def test_an_unpinned_box_updates_with_a_warning(sh):
+    box = sh()
+    r = run_update(box, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+    assert "no update origin is pinned" in r.stderr
+    assert "no release signing key is pinned" in r.stderr
+
+
+def test_with_a_pinned_key_an_unsigned_commit_is_refused(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "not signed with a release key" in r.stderr
+    assert head(box.root) == box.v1 and tags(box.root) == [] and sudo_calls(box) == []
+
+
+def test_a_commit_signed_by_another_key_is_refused(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    push_signed(box, make_signing_key(tmp_path / "stranger", "stranger"))
+    write_pins(trust, signers=[key.line])
+    r = run_update(box, "--yes")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "not from a pinned release key" in r.stderr
+    assert head(box.root) == box.v1 and sudo_calls(box) == []
+
+
+def test_a_commit_signed_by_the_pinned_key_is_installed(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    signed = push_signed(box, key)
+    write_pins(trust, origins=[str(box.origin)], signers=[key.line])
+    r = run_update(box, "--yes")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == signed
+    assert "WARNING: no" not in r.stderr
+
+
+def test_a_planted_allowed_signers_file_in_git_config_is_ignored(sh, trust, tmp_path):
+    box = sh()
+    key = make_signing_key(tmp_path / "keys")
+    attacker = make_signing_key(tmp_path / "attacker", "attacker")
+    push_signed(box, attacker)
+    planted = tmp_path / "attacker_allowed_signers"
+    planted.write_text(attacker.line + "\n")
+    git(box.root, "config", "gpg.ssh.allowedSignersFile", str(planted))
+    write_pins(trust, signers=[key.line])
+    r = run_update(box, "--yes")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert head(box.root) == box.v1 and sudo_calls(box) == []
+
+
+def test_a_pin_the_service_could_write_is_not_a_pin(sh, trust):
+    box = sh()
+    write_pins(trust, origins=[str(box.origin)])
+    (trust / "update-origin").chmod(0o666)
+    r = run_update(box, "--yes")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "not a trusted pin" in r.stderr
+    assert head(box.root) == box.v1
+
+
+MOVING_PIP = textwrap.dedent("""\
+    #!/bin/sh
+    # pip freeze that re-points origin/main while the venvs are frozen: after
+    # the version check, before the reset.
+    if [ "$1" = "freeze" ] && [ -n "$MOVE_ORIGIN_TO" ]; then
+        git update-ref refs/remotes/origin/main "$MOVE_ORIGIN_TO"
+        echo "aiohttp==3.13.2"
+    fi
+    exit 0
+""")
+
+
+def test_the_reset_installs_the_checked_commit_even_if_origin_main_moves(sh):
+    box = sh()
+    (box.seed / "app.py").write_text("VERSION = 666\n")
+    git(box.seed, "commit", "-q", "-am", "kept off main")
+    evil = git(box.seed, "rev-parse", "HEAD")
+    git(box.seed, "push", "-q", "origin", "HEAD:refs/heads/evil")
+    git(box.root, "fetch", "-q", "origin", "evil")
+    _write_exec(box.root / "Orchestrator" / "venv" / "bin" / "pip", MOVING_PIP)
+    r = run_update(box, "--yes", MOVE_ORIGIN_TO=evil)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert git(box.root, "rev-parse", "origin/main") == evil, "precondition: origin/main moved"
+    assert head(box.root) == box.v2
+
+
+# ── a failed install.sh: the stash and the trusted store go back too ──────
+
+def test_a_failed_install_puts_the_stashed_edit_back(sh):
+    box = sh()
+    (box.root / "app.py").write_text("VERSION = 1  # hand fix\n")
+    r = run_update(box, "--yes", "--stash", STUB_INSTALL_RC="1")
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert head(box.root) == box.v1
+    assert (box.root / "app.py").read_text() == "VERSION = 1  # hand fix\n"
+    assert stash_entries(box.root) == [], "the stash that went back is dropped"
+
+
+def test_a_failed_install_republishes_the_trusted_store_from_the_old_code(sh):
+    box = sh()
+    r = run_update(box, "--yes", STUB_INSTALL_RC="1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    calls = sudo_calls(box)
+    assert calls[-1] == f"{box.root}/Scripts/install.sh --publish-store-only", calls
+    assert "[install-stub] store republished" in r.stdout
+    assert "systemctl restart blackbox.service" not in calls
+
+
+LEGACY_INSTALL_STUB = textwrap.dedent("""\
+    #!/bin/sh
+    # An install.sh from before the trusted-store-only mode: every run is a
+    # full install, whatever its arguments (it mentions --publish-store-only only
+    # in this comment).
+    echo "[install-stub] full install"
+    exit "${STUB_INSTALL_RC:-0}"
+""")
+
+
+def test_old_code_without_the_store_mode_gets_the_remedy_not_a_full_install(sh):
+    box = sh(install_stub=LEGACY_INSTALL_STUB)
+    r = run_update(box, "--yes", STUB_INSTALL_RC="1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert [c for c in sudo_calls(box) if "install.sh" in c] == [f"{box.root}/Scripts/install.sh"]
+    assert f"sudo bash {box.root}/Scripts/install.sh" in r.stderr
+
+
+# ── a checkout owned by a dedicated service account (X04-...-12) ─────────
+
+def test_git_and_pip_run_as_the_checkouts_owner(sh):
+    box = sh(tree_owner="svc-owner")
+    _write_exec(box.root / "Orchestrator" / "venv" / "bin" / "pip", FAKE_PIP)
+    r = run_update(box, "--yes")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert head(box.root) == box.v2
+    calls = sudo_calls(box)
+    assert "-u svc-owner -- git fetch origin main" in calls
+    assert f"-u svc-owner -- git reset --hard {box.v2}" in calls
+    assert any(c.startswith("-u svc-owner -- ") and c.endswith("/pip freeze") for c in calls)
+    assert "-u svc-owner -- tee Manifest/pre_update_pip_freeze.txt" in calls
+    # Only install.sh and the restart run as root.
+    root_calls = [c for c in calls if not c.startswith("-u svc-owner -- ")]
+    assert root_calls == [f"{box.root}/Scripts/install.sh",
+                          "systemctl restart blackbox.service"], root_calls
+
+
+def test_a_failed_install_rolls_back_as_the_checkouts_owner(sh):
+    box = sh(requirements=True, tree_owner="svc-owner")
+    _write_exec(box.root / "Orchestrator" / "venv" / "bin" / "pip", FAKE_PIP)
+    (box.root / "app.py").write_text("VERSION = 1  # hand fix\n")
+    r = run_update(box, "--yes", "--stash", STUB_INSTALL_RC="1")
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert head(box.root) == box.v1
+    assert (box.root / "app.py").read_text() == "VERSION = 1  # hand fix\n"
+    calls = sudo_calls(box)
+    assert any(c.startswith("-u svc-owner -- ") and "/pip install -r " in c for c in calls)
+    assert any(c.startswith("-u svc-owner -- git stash apply") for c in calls)
+    assert [c for c in calls if not c.startswith("-u svc-owner -- ")] == [
+        f"{box.root}/Scripts/install.sh", f"{box.root}/Scripts/install.sh --publish-store-only"]

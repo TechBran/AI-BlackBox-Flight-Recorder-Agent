@@ -54,6 +54,16 @@ DESIGN NOTES (audit-driven):
     commit adding a new MUST_HAVE dependency surfaces a "run sudo bash install.sh
     once" remedy.
 
+TRUSTED ORIGIN + SIGNED RELEASES (2026-10 audit rank 79,
+X04-security-clients-infra-11): before the fetch the checkout's origin must be
+one /etc/blackbox/update-origin pins, and once /etc/blackbox/update-allowed-
+signers holds a key the commit installed must be SSH-signed by it (verify.py
+has the rules; Scripts/update.sh applies the same ones). A refusal changes
+nothing and is not persisted, like a dirty-tree refusal. The reset installs the
+SHA that was verified, never whatever origin/main names by then. A failed
+update that is rolled back puts the local changes it stashed back once the
+code is at the pre-update tag (_restore_stashes).
+
 SELF-UPDATE CEILING: update_routes.py imports UpdateRunner at module load and
 iterates one instance for the whole update — there is no reload and no re-exec,
 so the OLD runner.py runs everything after `git reset --hard`, including the
@@ -66,6 +76,7 @@ re-template the root-owned helpers on every service start).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -78,12 +89,15 @@ from typing import AsyncIterator, Optional
 
 from Orchestrator.update import changes as changes_mod
 from Orchestrator.update import git_ops
+from Orchestrator.update import verify
 from Orchestrator.update.manager import (
     UpdateManager, UpdateInProgressError,
     PHASE_STAGING, PHASE_APT_INSTALL, PHASE_PIP_INSTALL, PHASE_MCP_INSTALL,
     PHASE_SYSTEMD_REGEN, PHASE_RESET_HARD, PHASE_RESTART_PENDING,
     PHASE_COMPLETE, PHASE_FAILED, PHASE_ROLLBACK, PHASE_ROLLED_BACK,
 )
+
+logger = logging.getLogger("blackbox.update")
 
 # What a git_ops call raises: a non-zero exit, its timeout (fetch is 120 s), or
 # git itself missing.
@@ -274,6 +288,12 @@ class UpdateRunner:
         except _GIT_ERRORS as e:
             yield self._fail("staging", f"could not read the current commit: {_git_error(e)}")
             return
+        # The pinned origin, before anything is fetched from it (verify.py).
+        try:
+            trust_notes = await asyncio.to_thread(verify.check_origin, self.root)
+        except verify.UpdateRefused as e:
+            yield update_refusal(str(e))
+            return
         try:
             await self._git(git_ops.fetch_origin_main)
             self.target_sha = await self._git(git_ops.latest_origin_sha)
@@ -286,6 +306,14 @@ class UpdateRunner:
                    "sha_before": self.from_sha, "sha_after": self.target_sha,
                    "phase": PHASE_COMPLETE, "restart_scheduled": False,
                    "message": "Already up to date"}
+            return
+
+        # The release signature of the exact commit the reset below installs.
+        try:
+            trust_notes += await asyncio.to_thread(verify.check_commit, self.root,
+                                                   self.target_sha)
+        except verify.UpdateRefused as e:
+            yield update_refusal(str(e))
             return
 
         # Local changes to tracked files (O16-01): the reset below destroys
@@ -319,6 +347,8 @@ class UpdateRunner:
         self._write_state(PHASE_STAGING)
         yield self._phase_event(PHASE_STAGING)
         yield self._log(PHASE_STAGING, f"Tagged {self.pre_update_tag} as rollback anchor")
+        for note in trust_notes:
+            yield self._log(PHASE_STAGING, note)
         if stash_note:
             yield self._log(PHASE_STAGING, stash_note)
 
@@ -339,6 +369,14 @@ class UpdateRunner:
         yield self._log(PHASE_STAGING,
                         f"Diff: {len(changed)} files changed. Buckets: "
                         f"{', '.join(b for b, on in buckets.items() if on and b != 'code_only')}")
+        pin_sources = [f for f in verify.PIN_SOURCES if f in changed]
+        if pin_sources:
+            # Only the human install.sh run publishes them (publish_update_pins).
+            yield self._log(PHASE_STAGING,
+                            f"Note: this update changes the update trust pins "
+                            f"({', '.join(pin_sources)}). This box keeps checking "
+                            f"updates against its current pins until `sudo bash "
+                            f"{self.root}/Scripts/install.sh` publishes the new ones.")
 
         # PHASE: reset_hard — atomic file swap (audit C2)
         # NOTE: We do reset_hard FIRST then re-run the install.sh-equivalent
@@ -1063,6 +1101,28 @@ class UpdateRunner:
         git_ops.reset_hard(self.root, ref)
         return notes
 
+    def _restore_stashes(self, shas: list[str]) -> tuple[list[str], str]:
+        """Put back the stashes `shas` (oldest first) after a rollback reset,
+        dropping each one that applied: its changes are in the working tree
+        again. Stops at the first that does not apply and leaves it, and the
+        rest, in the stash list (still named in stash_refs). Blocking; returns
+        (SHAs put back, "" or the problem sentence)."""
+        put_back: list[str] = []
+        for sha in shas:
+            try:
+                git_ops.stash_apply(self.root, sha)
+            except _GIT_ERRORS as e:
+                return put_back, (f"the local changes in stash {sha[:7]} could not be put "
+                                  f"back ({_git_error(e)}); `git stash apply {sha[:7]}` "
+                                  f"restores them")
+            try:
+                git_ops.drop_stash(self.root, sha)
+            except _GIT_ERRORS:
+                pass  # applied: the entry left behind is a spare copy
+            self.stash_refs.remove(sha)
+            put_back.append(sha)
+        return put_back, ""
+
     async def _fail_rolled_back(self, phase: str, error: str,
                                 *venvs: str) -> AsyncIterator[dict]:
         """Roll a failed update back, then report the failure: restore the
@@ -1072,7 +1132,9 @@ class UpdateRunner:
         rollback runs BEFORE the event, and the event's error ends with what
         really happened: rolled back, a venv that could not be restored, or
         code left in place because what the reset would destroy could not be
-        kept (the reset then never runs)."""
+        kept (the reset then never runs). Once the code is back, the local
+        changes this run stashed are put back too (X04-security-clients-infra-11:
+        the rollback used to leave them in the stash list)."""
         restored: list[str] = []
         problems: list[str] = []
         for which in venvs:
@@ -1085,6 +1147,10 @@ class UpdateRunner:
                 problems.append(f"restoring the {label} venv failed (rc={rc}): {_tail(out)}")
             else:
                 restored.append(label)
+        # Made on the pre-update code, so they apply cleanly once it is back;
+        # what the rollback's own reset stashes (the failed run's leftovers) is
+        # not among them and stays in the stash list.
+        stashed_before = list(self.stash_refs)
         try:
             kept = await self._reset_keeping(
                 self.pre_update_tag, f"auto-stash-rollback-{self.pre_update_tag}",
@@ -1103,6 +1169,13 @@ class UpdateRunner:
                 outcome += (f" and the {' and '.join(restored)} venv restored from its "
                             f"pre-update pip freeze (Manifest/)")
             outcome += "."
+            put_back, stash_problem = await asyncio.to_thread(self._restore_stashes,
+                                                              stashed_before)
+            if put_back:
+                outcome += (" The local changes it stashed were put back in the "
+                            "working tree.")
+            if stash_problem:
+                problems.append(stash_problem)
         error += "\n" + outcome
         for problem in problems:
             error += f"\nWARNING: {problem}."
@@ -1273,6 +1346,17 @@ def dirty_tree_refusal(dirty: list[str], action: str) -> dict:
     return {"type": "complete", "succeeded": False, "phase": None,
             "refused": "dirty_tree", "dirty_files": list(dirty),
             "error": dirty_tree_message(dirty, action),
+            "restart_scheduled": False}
+
+
+def update_refusal(error: str) -> dict:
+    """The complete event for an update the trust pins refuse (verify.py): an
+    origin they do not list, or a commit without a pinned release signature.
+    Nothing was fetched from an unpinned origin, and nothing was tagged,
+    stashed or reset, so no state is persisted; the journal gets a warning."""
+    logger.warning("[UPDATE] refused: %s", error)
+    return {"type": "complete", "succeeded": False, "phase": None,
+            "refused": "unverified_update", "error": error,
             "restart_scheduled": False}
 
 

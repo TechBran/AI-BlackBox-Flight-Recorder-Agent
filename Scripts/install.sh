@@ -2,6 +2,31 @@
 # AI BlackBox installer — Ubuntu 24.04
 set -euo pipefail
 
+# ── Options (2026-10 audit rank 79, X04-security-clients-infra-11) ──
+# With no option this is the full, idempotent install, which is also what
+# Scripts/update.sh re-runs. Options:
+#   --publish-store-only   republish only the root-owned trust anchors from this
+#                          checkout (the /usr/local/sbin dispatch helpers, the
+#                          /etc/blackbox apt allowlist, template store and
+#                          update pins), then stop. Scripts/update.sh runs it
+#                          from the old code after rolling back a failed update.
+# docs/runbooks/2026-10-29-update-trust-and-service-user.md
+PUBLISH_STORE_ONLY=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --publish-store-only) PUBLISH_STORE_ONLY=1 ;;
+        -h|--help)
+            sed -n '/^# ── Options/,/^# docs\/runbooks/p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "[install] ERROR: unknown option: $1 (try --help)" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
 # ── Step 0: detect sudo, resolve real user/home (audit M6) ──
 if [[ $EUID -eq 0 ]]; then
     if [[ -z "${SUDO_USER:-}" ]]; then
@@ -89,7 +114,10 @@ BLACKBOX_ROOT_SED_ESC="${BLACKBOX_ROOT_SED_ESC//|/\\|}"
 #      detect divergence and ask before stomping (audit M2).
 #
 # Repo is public (Brandon's T10 decision) so HTTPS clone needs no credentials.
-if [[ ! -d "$BLACKBOX_ROOT/.git" ]]; then
+# --publish-store-only never bootstraps: it republishes from the files on disk.
+if [[ "$PUBLISH_STORE_ONLY" -eq 1 ]]; then
+    echo "[install] --publish-store-only: republishing the root-owned trust anchors only"
+elif [[ ! -d "$BLACKBOX_ROOT/.git" ]]; then
     if [[ -z "$(ls -A "$BLACKBOX_ROOT" 2>/dev/null)" ]]; then
         echo "[install] $BLACKBOX_ROOT is empty — cloning ai-blackbox-flight-recorder-agent..."
         sudo -u "$REAL_USER" git clone https://github.com/TechBran/ai-blackbox-flight-recorder-agent.git "$BLACKBOX_ROOT"
@@ -115,7 +143,9 @@ else
 fi
 
 # ── Pre-flight (Phase 4.0) ──
-"$BLACKBOX_ROOT/Scripts/install-preflight.sh"
+if [[ "$PUBLISH_STORE_ONLY" -ne 1 ]]; then
+    "$BLACKBOX_ROOT/Scripts/install-preflight.sh"
+fi
 
 # ── Step 0b: root-owned dispatch helpers for the update pipeline (T2 / T3) ──
 # Two bounded helper scripts that the update flow's sudoers grants point at
@@ -293,6 +323,50 @@ zellij-web-unit       installer/templates/zellij-web.service       0644
 STORE_MANIFEST
 }
 publish_template_store
+
+# ── Step 0c2: publish the update trust pins (2026-10 audit rank 79, ──────────
+#              X04-security-clients-infra-11) ───────────────────────────────────
+# Scripts/update.sh and the in-app updater (Orchestrator/update/verify.py) fetch
+# only from an origin /etc/blackbox/update-origin lists and, once
+# /etc/blackbox/update-allowed-signers holds a key, install only commits
+# SSH-signed by it. Both are copied from tracked files (installer/update-origin,
+# and installer/allowed_signers, whose header says how releases are signed),
+# root-owned like the store next to them: /etc/blackbox is outside the
+# service's ReadWritePaths (scripts/tests/test_install_perimeter_invariants.sh),
+# and the updaters refuse a pin that is not root-owned or that anyone else can
+# write, so the directory is held to that too. The box's CURRENT origin is never
+# what gets pinned: it lives in .git/config, which the service can write.
+# Same sandbox overrides as publish_template_store
+# (scripts/tests/test_publish_update_pins.sh); production pins root:root + sudo.
+publish_update_pins() {
+    local ETC_BLACKBOX_DIR="${ETC_BLACKBOX_DIR:-/etc/blackbox}"
+    local OWNER GROUP SUDO keys
+    if [[ "$ETC_BLACKBOX_DIR" == "/etc/blackbox" ]]; then
+        OWNER=root; GROUP=root; SUDO=sudo
+    else
+        OWNER="${INSTALL_OWNER:-root}"; GROUP="${INSTALL_GROUP:-root}"
+        SUDO="${INSTALL_SUDO-sudo}"
+    fi
+    $SUDO mkdir -p "$ETC_BLACKBOX_DIR"
+    $SUDO chmod go-w "$ETC_BLACKBOX_DIR"
+    $SUDO install -m 0644 -o "$OWNER" -g "$GROUP" \
+        "$BLACKBOX_ROOT/installer/update-origin" "$ETC_BLACKBOX_DIR/update-origin"
+    $SUDO install -m 0644 -o "$OWNER" -g "$GROUP" \
+        "$BLACKBOX_ROOT/installer/allowed_signers" "$ETC_BLACKBOX_DIR/update-allowed-signers"
+    echo "[install] Pinned the update origin: $ETC_BLACKBOX_DIR/update-origin"
+    keys="$(grep -cvE '^[[:space:]]*(#|$)' "$BLACKBOX_ROOT/installer/allowed_signers" || true)"
+    if [[ "$keys" -gt 0 ]]; then
+        echo "[install] Pinned $keys release signing key(s): updates must be signed by one ($ETC_BLACKBOX_DIR/update-allowed-signers)"
+    else
+        echo "[install] No release signing key is pinned yet: updates are not signature-checked (see installer/allowed_signers)"
+    fi
+}
+publish_update_pins
+
+if [[ "$PUBLISH_STORE_ONLY" -eq 1 ]]; then
+    echo "[install] Trust anchors republished from $BLACKBOX_ROOT (--publish-store-only); nothing else was changed."
+    exit 0
+fi
 
 # ── Step 0d: privilege-perimeter migrations + journal retention (2026-10 ──────
 #             audit ranks 12 + 17) ─────────────────────────────────────────────

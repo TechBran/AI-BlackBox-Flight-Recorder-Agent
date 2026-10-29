@@ -99,6 +99,33 @@ def latest_origin_sha(root: Path) -> str:
     return _git(root, "rev-parse", "origin/main").stdout.strip()
 
 
+def origin_url(root: Path) -> str:
+    """The URL `git fetch origin` uses: remote.origin.url with any
+    url.*.insteadOf rewrite applied (verify.check_origin compares it with the
+    pinned update origin)."""
+    return _git(root, "remote", "get-url", "origin").stdout.strip()
+
+
+def raw_commit(root: Path, sha: str) -> str:
+    """The raw commit object `sha` (header, then a blank line, then the
+    message). verify.check_commit reads its gpgsig header."""
+    return _git(root, "cat-file", "commit", sha).stdout
+
+
+def verify_commit(root: Path, sha: str, *, allowed_signers: str, ssh_keygen: str,
+                  false: str) -> subprocess.CompletedProcess:
+    """`git verify-commit sha` against `allowed_signers` ONLY: the -c options
+    beat .git/config, so a planted gpg.ssh.program or allowedSignersFile is
+    ignored, and the PGP and X.509 verifiers are `false`. Never raises on a
+    bad signature: the caller reads returncode."""
+    return _git(root,
+                "-c", f"gpg.ssh.allowedSignersFile={allowed_signers}",
+                "-c", f"gpg.ssh.program={ssh_keygen}",
+                "-c", f"gpg.program={false}",
+                "-c", f"gpg.x509.program={false}",
+                "verify-commit", sha, check=False)
+
+
 def commits_behind(root: Path, base: str = "HEAD",
                     target: str = "origin/main") -> int:
     """How many commits target is ahead of base (i.e. updates available)."""
@@ -296,3 +323,23 @@ def latest_stash(root: Path) -> str:
     to the operator so a stashed change can be found again."""
     out = _git(root, "rev-parse", "-q", "--verify", "refs/stash", check=False)
     return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def stash_apply(root: Path, sha: str) -> None:
+    """`git stash apply <sha>`: put a stash made by the updater back in the
+    working tree. Raises CalledProcessError when it does not apply cleanly
+    (git then leaves the working tree as it was for files the stash touches)."""
+    _git(root, "stash", "apply", "-q", sha)
+
+
+def drop_stash(root: Path, sha: str) -> bool:
+    """Drop the stash entry whose commit is `sha`, found by SHA (an entry's
+    stash@{n} index moves whenever another stash is made). False when no entry
+    has that SHA."""
+    out = _git(root, "stash", "list", "--format=%H %gd", check=False).stdout
+    for line in out.splitlines():
+        entry_sha, _, ref = line.partition(" ")
+        if entry_sha == sha and ref:
+            _git(root, "stash", "drop", "-q", ref)
+            return True
+    return False
