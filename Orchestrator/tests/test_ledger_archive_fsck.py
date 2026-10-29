@@ -258,6 +258,12 @@ def test_health_reports_the_ledger_counts(box, app_client, monkeypatch):
     assert body["latest_manifest"]["latest_bytes"] == box.vol.stat().st_size
 
 
+def test_the_dashboard_shows_the_retention_the_pass_applies(app_client, monkeypatch):
+    monkeypatch.setattr(volume, "archive_keep_copies", lambda: 7)
+    settings = app_client.get("/dashboard").json()["archive_status"]["cleanup_settings"]
+    assert settings == {"days_to_keep": 30, "max_size_gb": 5.0, "max_files": 7}
+
+
 # -- the ledger check -------------------------------------------------------------------
 
 def _check(box, **kw):

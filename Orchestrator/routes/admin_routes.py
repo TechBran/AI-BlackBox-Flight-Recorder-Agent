@@ -43,7 +43,7 @@ from Orchestrator.models import task_queue
 from Orchestrator.monitoring import drift_state_global, get_disk_usage
 from Orchestrator.state import get_state, state_by_op
 from Orchestrator.volume import LedgerError, cleanup_old_archives, ledger_counts, parse_tail, read_tail_text, read_text_safe, sha256_bytes, verify_gm_or_halt
-from Orchestrator.maintenance import cleanup_old_session_files
+from Orchestrator.maintenance import archive_retention, cleanup_old_session_files
 
 
 def _require_operator(name) -> str:
@@ -556,11 +556,8 @@ def dashboard():
             "count": usage["archives"]["count"],
             "size_mb": usage["archives"]["size_mb"],
             "auto_cleanup_enabled": True,
-            "cleanup_settings": {
-                "days_to_keep": 30,
-                "max_size_gb": 5.0,
-                "max_files": 200
-            }
+            # The retention the hourly pass applies (max_files is [archive] keep_copies).
+            "cleanup_settings": archive_retention()
         },
         "system_uptime": get_system_uptime(),
         "service_status": "running",  # If we're responding, we're running
