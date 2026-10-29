@@ -156,9 +156,12 @@ jobs:
             sudo apt-get install -y --no-install-recommends acl
           fi
 
+      # *_REQUIRED: a missing tool fails its suite instead of a silent SKIP
+      # (shellcheck is preinstalled on GitHub's Ubuntu runners).
       - name: scripts/tests/run_all.sh
         env:
           ACL_TOOLS_REQUIRED: "1"
+          SHELLCHECK_REQUIRED: "1"
         run: bash scripts/tests/run_all.sh
 
   android:
