@@ -13,7 +13,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
-import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.media.ImageReader
 import android.media.MediaPlayer
@@ -26,7 +25,6 @@ import android.util.Base64
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
@@ -137,6 +135,18 @@ class OverlayService : Service() {
     // OverlayCapture (rank 76). What it shows or attaches comes back through CaptureHost.
     private val capture = OverlayCapture(this, handler, { windowManager }, CaptureHost())
 
+    // The bubble and panel windows, the consent banner and the recording stop button:
+    // OverlayWindows (rank 76). The bubble's and panel's contents stay here.
+    private val windows = OverlayWindows(
+        context = this,
+        handler = handler,
+        windowManager = { windowManager },
+        isXrDevice = { isXrDevice },
+        showToast = { showToast(it) },
+        isRecording = { capture.isRecording },
+        onStopRecording = { capture.stopRecording() },
+    )
+
     // TTS via BlackBox
     private var autoTtsEnabled = true
     private var mediaPlayer: MediaPlayer? = null
@@ -171,23 +181,6 @@ class OverlayService : Service() {
     // Chat state
     private val attachedScreenshots = mutableListOf<File>()
     private var attachedRecording: File? = null
-
-    // Recording stop button UI
-    private var recordingStopButton: View? = null
-    private var recordingTimer: TextView? = null
-    private var recordingIndicator: View? = null
-    private var recordingStartTime: Long = 0L
-    private val recordingTimerRunnable = object : Runnable {
-        override fun run() {
-            if (capture.isRecording) {
-                val elapsed = System.currentTimeMillis() - recordingStartTime
-                recordingTimer?.text = formatRecordingTime(elapsed)
-                // Pulse the recording indicator
-                recordingIndicator?.animate()?.alpha(if (recordingIndicator?.alpha == 1.0f) 0.3f else 1.0f)?.setDuration(500)?.start()
-                handler.postDelayed(this, 1000)
-            }
-        }
-    }
 
     // UI elements
     private var promptInput: EditText? = null
@@ -266,9 +259,6 @@ class OverlayService : Service() {
 
     // ---- (M1.4) Remote-control consent banner + kill switch -----------------
 
-    /** The persistent "AI is controlling this device" banner overlay, or null when idle. */
-    private var controlBannerView: View? = null
-
     /**
      * Bus listener: show the banner while a session is active, hide it when it ends/is
      * killed. Marshalled onto the main thread ([handler]) because it may fire from the
@@ -282,77 +272,9 @@ class OverlayService : Service() {
                 // showControlBanner()/hideControlBanner() are no-ops on XR (kept for symmetry).
                 OverlayBridge.updateState { it.copy(controlSessionActive = session != null) }
             } else {
-                if (session != null) showControlBanner() else hideControlBanner()
+                if (session != null) windows.showControlBanner() else windows.hideControlBanner()
             }
         }
-    }
-
-    /**
-     * Add the top-of-screen consent banner (a "🔴 AI is controlling this device" label +
-     * a STOP button that fires [RemoteSessionBus.stop]). Built programmatically (no XML) so
-     * it adds no layout resource. Phone/tablet path only — XR renders its own in-headset
-     * panel (M6.3), and the always-on notification banner ([NotificationListenerFgs]) is the
-     * universal fail-safe. Idempotent + best-effort.
-     */
-    private fun showControlBanner() {
-        if (isXrDevice) return
-        if (controlBannerView != null) return
-        runCatching {
-            val density = resources.displayMetrics.density
-            fun dp(v: Int) = (v * density).toInt()
-
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(10), dp(16), dp(10))
-                setBackgroundColor(0xEEB00020.toInt()) // strong red, mostly opaque
-            }
-            val label = TextView(this).apply {
-                text = "🔴  AI is controlling this device"
-                setTextColor(0xFFFFFFFF.toInt())
-                textSize = 14f
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val stop = TextView(this).apply {
-                text = "STOP"
-                setTextColor(0xFFB00020.toInt())
-                textSize = 14f
-                setPadding(dp(18), dp(8), dp(18), dp(8))
-                setBackgroundColor(0xFFFFFFFF.toInt())
-                setOnClickListener { RemoteSessionBus.stop() }
-            }
-            row.addView(label)
-            row.addView(stop)
-
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    @Suppress("DEPRECATION")
-                    WindowManager.LayoutParams.TYPE_PHONE,
-                // Not focusable so it never steals input from the app being driven; the STOP
-                // button still receives touches (FLAG_NOT_FOCUSABLE keeps key focus away only).
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT,
-            ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            }
-            windowManager.addView(row, params)
-            controlBannerView = row
-            Log.i(TAG, "control consent banner shown")
-        }.onFailure {
-            Log.w(TAG, "control banner add failed (${it.javaClass.simpleName})")
-        }
-    }
-
-    /** Remove the consent banner. Best-effort; never throws. */
-    private fun hideControlBanner() {
-        val view = controlBannerView ?: return
-        controlBannerView = null
-        runCatching { windowManager.removeView(view) }
-        Log.i(TAG, "control consent banner hidden")
     }
 
     /**
@@ -517,7 +439,7 @@ class OverlayService : Service() {
 
         // (M1.4) Stop observing the session bus + remove the consent banner if present.
         RemoteSessionBus.removeListener(controlSessionListener)
-        hideControlBanner()
+        windows.hideControlBanner()
 
         // Cleanup XR bridge — signal activity to finish, then reset
         if (isXrDevice) {
@@ -533,18 +455,7 @@ class OverlayService : Service() {
 
         // Cleanup views (phone path only — XR path never creates these views)
         if (!isXrDevice) {
-            try {
-                if (::overlayView.isInitialized) {
-                    windowManager.removeView(overlayView)
-                }
-                if (::expandedPanel.isInitialized) {
-                    windowManager.removeView(expandedPanel)
-                }
-                // Cleanup recording stop button
-                removeRecordingStopButton()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing views", e)
-            }
+            windows.removeAll()
         }
 
         // Cleanup resources
@@ -756,25 +667,6 @@ class OverlayService : Service() {
     private fun createFloatingBubble() {
         overlayView = LayoutInflater.from(this).inflate(R.layout.overlay_bubble, null)
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 200
-        }
-
-        // Make bubble draggable
-        setupDragListener(overlayView, params)
-
         // Get reference to bubble glow view
         bubbleGlow = overlayView.findViewById(R.id.bubbleGlow)
 
@@ -783,36 +675,12 @@ class OverlayService : Service() {
             toggleExpanded()
         }
 
-        try {
-            windowManager.addView(overlayView, params)
-            Log.d(TAG, "Floating bubble created")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add bubble view", e)
-            showToast("Failed to create overlay: ${e.message}")
-        }
+        // On screen, draggable
+        windows.addBubble(overlayView)
     }
 
     private fun createExpandedPanel() {
         expandedPanel = LayoutInflater.from(this).inflate(R.layout.overlay_expanded, null)
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE,
-            // Allow focus for keyboard input
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = 0
-            y = 100
-            // Set soft input mode
-            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-        }
 
         // Get UI references (legacy - kept for compatibility)
         promptInput = expandedPanel.findViewById(R.id.promptInput)
@@ -868,18 +736,10 @@ class OverlayService : Service() {
 
         // Make panel draggable by handle
         val dragHandle = expandedPanel.findViewById<View>(R.id.dragHandle)
-        if (dragHandle != null) {
-            setupDragListener(dragHandle, params, isHandle = true)
-        }
 
         expandedPanel.visibility = View.GONE
 
-        try {
-            windowManager.addView(expandedPanel, params)
-            Log.d(TAG, "Expanded panel created")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add expanded panel", e)
-        }
+        windows.addPanel(expandedPanel, dragHandle)
     }
 
     private fun setupExpandedPanelButtons() {
@@ -932,7 +792,7 @@ class OverlayService : Service() {
         // Handle keyboard show/hide for input
         promptInput?.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) {
-                updatePanelForKeyboard(true)
+                windows.updatePanelForKeyboard(true)
             }
         }
     }
@@ -951,73 +811,6 @@ class OverlayService : Service() {
                     .start()
             }
             .start()
-    }
-
-    private fun updatePanelForKeyboard(showKeyboard: Boolean) {
-        try {
-            val params = expandedPanel.layoutParams as WindowManager.LayoutParams
-            if (showKeyboard) {
-                params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                               WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            } else {
-                params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                               WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-            }
-            windowManager.updateViewLayout(expandedPanel, params)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error updating panel for keyboard", e)
-        }
-    }
-
-    private fun setupDragListener(view: View, params: WindowManager.LayoutParams, isHandle: Boolean = false) {
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-        var isDragging = false
-
-        view.setOnTouchListener { v, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    isDragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val deltaX = (event.rawX - initialTouchX).toInt()
-                    val deltaY = (event.rawY - initialTouchY).toInt()
-
-                    if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
-                        isDragging = true
-                    }
-
-                    params.x = initialX + deltaX
-                    params.y = initialY + deltaY
-
-                    try {
-                        val targetView = if (isHandle) expandedPanel else view
-                        if (targetView == overlayView) {
-                            windowManager.updateViewLayout(overlayView, params)
-                        } else {
-                            windowManager.updateViewLayout(expandedPanel, params)
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error updating view layout", e)
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!isDragging) {
-                        v.performClick()
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
     }
 
     private fun toggleExpanded() {
@@ -1129,12 +922,6 @@ class OverlayService : Service() {
         val seconds = (ms / 1000) % 60
         val minutes = (ms / 1000) / 60
         return String.format("%d:%02d", minutes, seconds)
-    }
-
-    private fun formatRecordingTime(ms: Long): String {
-        val seconds = ((ms / 1000) % 60).toInt()
-        val minutes = ((ms / 1000) / 60).toInt()
-        return String.format("%02d:%02d", minutes, seconds)
     }
 
     private fun showTtsPlayerBar(duration: Int) {
@@ -1298,143 +1085,6 @@ class OverlayService : Service() {
 
     // Screenshots, frames, recording and the projection refresh live in OverlayCapture.
 
-    // ==================== Recording Stop Button ====================
-
-    private var recordingStopButtonParams: WindowManager.LayoutParams? = null
-
-    private fun createRecordingStopButton() {
-        if (recordingStopButton != null) return
-
-        recordingStopButton = LayoutInflater.from(this).inflate(R.layout.overlay_recording_stop, null)
-
-        recordingStopButtonParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            x = 0
-            y = 50  // Near top of screen
-        }
-
-        // Get UI references
-        recordingTimer = recordingStopButton?.findViewById(R.id.recordingTimer)
-        recordingIndicator = recordingStopButton?.findViewById(R.id.recordingIndicator)
-        val stopBtn = recordingStopButton?.findViewById<ImageView>(R.id.btnStopRecording)
-
-        // Setup stop button click listener - stops recording
-        stopBtn?.setOnClickListener {
-            Log.d(TAG, "Recording stop button clicked")
-            capture.stopRecording()
-        }
-
-        // Also allow clicking anywhere on the bar to stop
-        recordingStopButton?.setOnClickListener {
-            Log.d(TAG, "Recording stop bar clicked")
-            capture.stopRecording()
-        }
-
-        // Make it draggable
-        setupRecordingStopDragListener()
-
-        try {
-            windowManager.addView(recordingStopButton, recordingStopButtonParams)
-            Log.d(TAG, "Recording stop button created")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add recording stop button", e)
-        }
-    }
-
-    private fun setupRecordingStopDragListener() {
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-        var isDragging = false
-
-        recordingStopButton?.setOnTouchListener { v, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = recordingStopButtonParams?.x ?: 0
-                    initialY = recordingStopButtonParams?.y ?: 0
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    isDragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val deltaX = (event.rawX - initialTouchX).toInt()
-                    val deltaY = (event.rawY - initialTouchY).toInt()
-
-                    if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
-                        isDragging = true
-                    }
-
-                    recordingStopButtonParams?.x = initialX + deltaX
-                    recordingStopButtonParams?.y = initialY + deltaY
-
-                    try {
-                        windowManager.updateViewLayout(recordingStopButton, recordingStopButtonParams)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error updating recording stop button layout", e)
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!isDragging) {
-                        v.performClick()
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
-    }
-
-    private fun showRecordingStopButton() {
-        if (recordingStopButton == null) {
-            createRecordingStopButton()
-        }
-        recordingStopButton?.visibility = View.VISIBLE
-
-        // Start timer
-        recordingStartTime = System.currentTimeMillis()
-        recordingTimer?.text = "00:00"
-        recordingIndicator?.alpha = 1.0f
-        handler.post(recordingTimerRunnable)
-
-        Log.d(TAG, "Recording stop button shown")
-    }
-
-    private fun hideRecordingStopButton() {
-        handler.removeCallbacks(recordingTimerRunnable)
-        recordingStopButton?.visibility = View.GONE
-        Log.d(TAG, "Recording stop button hidden")
-    }
-
-    private fun removeRecordingStopButton() {
-        handler.removeCallbacks(recordingTimerRunnable)
-        try {
-            recordingStopButton?.let {
-                windowManager.removeView(it)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error removing recording stop button", e)
-        }
-        recordingStopButton = null
-        recordingTimer = null
-        recordingIndicator = null
-        recordingStopButtonParams = null
-    }
-
-
-
     /**
      * What capture shows and attaches through the overlay: the status line, the bubble and
      * panel it hides from the frame, the screenshot and recording attachments, the floating
@@ -1470,7 +1120,7 @@ class OverlayService : Service() {
         override fun onRecordingStarted() {
             overlayView.visibility = View.GONE
             expandedPanel.visibility = View.GONE
-            showRecordingStopButton()
+            windows.showRecordingStopButton()
         }
         override fun onRecordingSaved(file: File) {
             attachedRecording?.delete()
@@ -1479,7 +1129,7 @@ class OverlayService : Service() {
             showToast("Recording saved!")
         }
         override fun onRecordingStopped() {
-            hideRecordingStopButton()
+            windows.hideRecordingStopButton()
 
             overlayView.visibility = View.GONE
             expandedPanel.visibility = View.VISIBLE
