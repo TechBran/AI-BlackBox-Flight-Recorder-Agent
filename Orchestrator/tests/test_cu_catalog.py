@@ -236,18 +236,39 @@ def test_cu_streams_require_operator():
             f"{fn.__name__} must not default operator")
 
 
-def test_browser_prompt_no_unsatisfiable_tool():
+def test_browser_prompt_no_unsatisfiable_tool(monkeypatch):
     """Task 12: the legacy computer-tool-only loop is deleted; the headless
     runner's default prompt is the chat path's COMPUTER_USE_SYSTEM_PROMPT.
     Guard the same invariant in the new shape: if the prompt instructs a
     get_current_time 'first action', the (shared) Anthropic driver must be
     able to execute that tool — otherwise the instruction is unsatisfiable."""
+    # The driver runs every non-computer tool through the shared dispatcher
+    # (audit rank 74), so the check is that the dispatcher, with the driver's
+    # profile, hands get_current_time to the ToolVault executor.
+    import asyncio
     import inspect
     from Orchestrator.browser import driver_anthropic
+    from Orchestrator.providers import tool_dispatch as td
     from Orchestrator.routes.chat_routes import COMPUTER_USE_SYSTEM_PROMPT
+    from Orchestrator.toolvault.context import ToolResult
+    import Orchestrator.tools as tools_pkg
     if "get_current_time" in COMPUTER_USE_SYSTEM_PROMPT:
-        src = inspect.getsource(driver_anthropic.run_anthropic_cu_loop)
-        assert "get_current_time" in src, (
+        assert "dispatch_tool(" in inspect.getsource(driver_anthropic.run_anthropic_cu_loop)
+        ran = []
+
+        class _Executor:
+            def __init__(self, *a, **k):
+                pass
+
+            async def execute(self, name, args):
+                ran.append(name)
+                return ToolResult(success=True, result="12:00 UTC")
+
+        monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+        ctx = td.ToolContext(operator="system", origin_device_id=None,
+                             profile=td.PROFILES["cu_anthropic"], services=None)
+        outcome = asyncio.run(td.dispatch_tool("get_current_time", {}, ctx))
+        assert ran == ["get_current_time"] and outcome.result == "12:00 UTC", (
             "CU prompt instructs get_current_time but the driver cannot execute it")
 
 

@@ -2,8 +2,9 @@
 
 
 def test_local_image_in_tool_providers():
-    # Covers all 11 dispatch sites that key off `name in IMAGE_TOOL_PROVIDERS`
-    # (chat_routes x7, the 3 voice routes, driver_anthropic).
+    # Covers every dispatch site that keys off `name in IMAGE_TOOL_PROVIDERS`
+    # (the shared providers/tool_dispatch.py, which the chat loops and the
+    # Anthropic CU driver use, and the 3 voice routes).
     from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
     assert IMAGE_TOOL_PROVIDERS["local_image"] == "local"
 

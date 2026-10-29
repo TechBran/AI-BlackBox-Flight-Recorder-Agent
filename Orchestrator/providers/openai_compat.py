@@ -194,12 +194,16 @@ def _headers(provider: CompatProvider, target: _Target, stream: bool) -> Dict[st
 
 def _tool_args(raw) -> Dict:
     """A tool call's arguments string as a dict: "" (a zero-argument tool, as
-    llama.cpp and Grok send it) or malformed JSON is {} — the tool then runs
-    and answers for itself instead of the whole turn failing."""
+    llama.cpp and Grok send it), malformed JSON, or JSON that is not an object
+    ("null", "[]") is {} — the tool then runs and answers for itself instead of
+    the whole turn failing. A server that sends the object itself keeps it."""
+    if isinstance(raw, dict):
+        return raw
     try:
-        return json.loads(raw)
+        args = json.loads(raw)
     except (TypeError, ValueError):
         return {}
+    return args if isinstance(args, dict) else {}
 
 
 def _reasoning_of(message: Dict) -> str:

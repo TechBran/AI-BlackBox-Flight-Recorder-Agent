@@ -12,6 +12,7 @@ from Orchestrator.utils.paths import (
     blackbox_root,
     resolve_upload_path,
 )
+from Orchestrator.utils.tool_args import int_value
 from fastapi import HTTPException
 from Orchestrator.checkpoint import app
 from Orchestrator.config import UPLOADS_DIR
@@ -91,8 +92,11 @@ def execute_list_media(media_type: str = None, limit: int = 20) -> dict:
     # Sync uploads folder first to catch any unindexed files
     sync_uploads_folder()
 
-    # Cap limit at 50
-    limit = min(limit or 20, 50)
+    # Cap limit at 50. The limit is the model's (list_media on the chat, voice
+    # and CU surfaces and the ToolVault executor): "5" is 5, and a missing,
+    # unreadable or non-positive one is the default (O03-chat-routes-B-07).
+    limit = int_value(limit, 0)
+    limit = min(limit, 50) if limit > 0 else 20
 
     # Get media list
     entries = list_media(media_type=media_type, limit=limit)
@@ -134,8 +138,9 @@ def execute_search_media(query: str, media_type: str = None, limit: int = 10) ->
     # Sync uploads folder first to catch any unindexed files
     sync_uploads_folder()
 
-    # Cap limit at 20
-    limit = min(limit or 10, 20)
+    # Cap limit at 20 (the model's limit, read as execute_list_media reads it).
+    limit = int_value(limit, 0)
+    limit = min(limit, 20) if limit > 0 else 10
 
     # Search
     results = search_media(query=query, media_type=media_type, limit=limit)

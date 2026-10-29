@@ -200,7 +200,6 @@ def test_stream_anthropic_attributes_media_to_the_operator(cr, monkeypatch, tmp_
 _TOOL_LOOPS = {
     _ROUTES: (),
     _TOOL_DISPATCH: ("_image", "_video", "_music"),
-    _CU_DRIVER: ("run_anthropic_cu_loop",),
 }
 
 
@@ -218,16 +217,22 @@ def _create_task_sites(path):
     return sites
 
 
-@pytest.mark.parametrize("path, minimum", [(_TOOL_DISPATCH, 5), (_CU_DRIVER, 3)])
+@pytest.mark.parametrize("path, minimum", [(_TOOL_DISPATCH, 5)])
 def test_every_tool_loop_create_task_passes_the_session_operator(path, minimum):
     # The dispatcher: five media sites (image, music, and video's extension,
-    # call_* and stream forms) shared by every chat loop; the CU driver: three.
-    # Each passes the session `operator`.
+    # call_* and stream forms) shared by every chat loop and the Anthropic CU
+    # driver. Each passes the session `operator`.
     sites = [s for s in _create_task_sites(path) if s[0] in _TOOL_LOOPS[path]]
     assert len(sites) >= minimum, f"{path.name}: create_task sites went missing"
     bad = [(fn, line, ast.unparse(arg) if arg is not None else None) for fn, line, arg in sites
            if not (isinstance(arg, ast.Name) and arg.id == "operator")]
     assert bad == [], f"{path.name}: create_task without operator=operator at {bad}"
+
+
+def test_the_cu_driver_creates_no_media_task_of_its_own():
+    # Its media tools go through the dispatcher's branches above (audit rank
+    # 74); test_cu_driver_dispatch runs one and checks the session operator.
+    assert _create_task_sites(_CU_DRIVER) == []
 
 
 @pytest.mark.parametrize("path", [_ROUTES, *_ROUTE_PARTS, _TOOL_DISPATCH, _CU_DRIVER],

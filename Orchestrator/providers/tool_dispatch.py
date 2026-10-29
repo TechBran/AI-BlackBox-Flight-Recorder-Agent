@@ -2,11 +2,13 @@
 
 Audit rank 74 (X05-architecture-11, O02-chat-routes-A-10, O03-chat-routes-B-07).
 Each of the ten chat tool loops in routes/chat_routes.py (five streams, five
-non-stream call_* twins) used to carry its own ~300-line ``elif tool_name ==``
+non-stream call_* twins) and the Anthropic Computer Use loop
+(browser/driver_anthropic.py) used to carry its own ``elif tool_name ==``
 table: web_fetch, the native image/video/music branches, the media lookups,
 snapshot search, a dozen executor branches with their own progress labels and
-the BlackBoxToolExecutor catch-all. Seven copies of the same table drifted, and
-every fix had to be made seven times.
+the BlackBoxToolExecutor catch-all. Eight copies of the same table drifted, and
+every fix had to be made eight times. (The Computer Use loop keeps only its own
+computer, bash and editor tools.)
 
 The table now lives here once. A loop hands over the tool call and gets back a
 ToolOutcome: the text that goes back to the model, the SSE events a stream
@@ -47,6 +49,7 @@ from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
 from Orchestrator.models import TaskType
 from Orchestrator.utils.async_helpers import run_blocking
 from Orchestrator.utils.paths import IMAGE_EXTS
+from Orchestrator.utils.tool_args import int_value
 
 
 # -----------------------------------------------------------------------------
@@ -167,6 +170,11 @@ PROFILES: Dict[str, LoopProfile] = {
         tag="[ANTHROPIC-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
     "stream_gemini": LoopProfile(
         tag="[GEMINI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
+    # The Anthropic Computer Use loop. It always handed the call tools the
+    # model's own arguments (send_sms keeps from_number), so they reach the
+    # catch-all, as on the xAI and custom streams.
+    "cu_anthropic": LoopProfile(
+        tag="[CU-BG]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS),
 }
 
 
@@ -205,6 +213,11 @@ class ToolOutcome:
 async def dispatch_tool(name: str, args: Dict, ctx: ToolContext) -> ToolOutcome:
     """Run one tool call the way ``ctx.profile``'s loop always has."""
     profile = ctx.profile
+    if not isinstance(args, dict):
+        # A tool's arguments are an object. A Gemini functionCall with
+        # "args": null, or any other shape, runs the tool with none instead of
+        # an AttributeError ending the turn.
+        args = {}
     if name == "web_fetch":
         return await _web_fetch(args, ctx)
     if profile.native:
@@ -245,36 +258,14 @@ async def _run_executor(ctx: ToolContext, name: str, args):
 
 def _int_arg(args: Dict, keys, default: int, lo: Optional[int] = None,
              hi: Optional[int] = None) -> int:
-    """A numeric tool argument as the model sent it: an int, an integral float
-    or a numeric string ("2", " 2 ", "2.0") all count, anything else is
-    ``default``; then clamped to [lo, hi]. The first of ``keys`` present wins.
-    Models stringify numbers, and range("2") used to kill the whole turn
-    (O03-chat-routes-B-07)."""
+    """A numeric tool argument as the model sent it (utils.tool_args.int_value:
+    "2", " 2 " and 2.0 all count, anything else is ``default``), clamped to
+    [lo, hi]. The first of ``keys`` present wins. Models stringify numbers,
+    and range("2") used to kill the whole turn (O03-chat-routes-B-07)."""
     for key in ((keys,) if isinstance(keys, str) else keys):
         if key in args:
-            raw = args[key]
-            break
-    else:
-        raw = None
-    value = default
-    if isinstance(raw, bool):
-        pass
-    elif isinstance(raw, int):
-        value = raw
-    elif isinstance(raw, float) and raw.is_integer():
-        value = int(raw)
-    elif isinstance(raw, str):
-        try:
-            number = float(raw.strip())
-            if number.is_integer():
-                value = int(number)
-        except ValueError:
-            pass
-    if lo is not None:
-        value = max(lo, value)
-    if hi is not None:
-        value = min(hi, value)
-    return value
+            return int_value(args[key], default, lo, hi)
+    return int_value(None, default, lo, hi)
 
 
 def _list_arg(args: Dict, key: str) -> List:
@@ -307,7 +298,7 @@ def _ellipsis(prompt: str) -> str:
 
 async def _web_fetch(args, ctx: ToolContext) -> ToolOutcome:
     url = args.get("url", "")
-    max_chars = args.get("max_chars", 80000)
+    max_chars = _int_arg(args, "max_chars", 80000, lo=1)
     print(f"{ctx.profile.tag} Executing web fetch: {url}")
     result = await _blocking(ctx, ctx.services.perform_web_fetch, url, max_chars)
     return ToolOutcome(result, [{"type": "tool_result", "data": f"Fetched content from: {url}"}])
@@ -615,7 +606,8 @@ _LABELLED_ARGS: Dict[str, Callable[[Dict], Dict]] = {
 _LABELLED_EVENTS: Dict[str, Callable] = {"use_computer": _browser_task_event}
 
 
-def _label(name: str, result: str, profile: LoopProfile) -> str:
+def _label(name: str, result, profile: LoopProfile) -> str:
+    result = _as_text(result)
     if name == "send_sms":
         return f"SMS: {result[:100]}"
     if name == "make_phone_call":

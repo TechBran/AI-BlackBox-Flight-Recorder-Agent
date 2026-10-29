@@ -7,10 +7,9 @@ because no index entry has operator ""):
 
   Orchestrator/providers/tool_dispatch.py
     1. _search_snapshots   (the search_snapshots branch every chat loop shares:
-                            call_anthropic, call_gemini and the five streams;
+                            call_anthropic, call_gemini, the five streams and
+                            the Anthropic CU driver's run_anthropic_cu_loop;
                             until audit rank 74 each loop inlined its own copy)
-  Orchestrator/browser/driver_anthropic.py
-    2. run_anthropic_cu_loop           (search_snapshots branch)
 
 Test seams:
 
@@ -22,12 +21,13 @@ Test seams:
 
   * The five STREAMING loops share the same dispatcher branch (the provider
     goldens in tests/golden/providers replay each stream's search_snapshots
-    call with the session operator), and the CU loop needs a live session
-    object, so the AST structural test below covers the sites: EVERY
+    call with the session operator, and test_cu_driver_dispatch runs the CU
+    loop's search with it), so the AST structural test below covers the sites: EVERY
     hybrid_retrieve call site must pass ``operator=operator`` — the session
     operator variable each holds under exactly that name, never a literal or
     some other variable (and the site counts are pinned so a new unscoped
-    site, or an inline copy back in chat_routes.py, cannot slip in unseen).
+    site, or an inline copy back in chat_routes.py or the CU driver, cannot
+    slip in unseen).
 
   * One live-store integration test (skip-guarded, never fake-pass — pattern
     from test_retrieval_golden.py) proves a real operator gets results, gets
@@ -153,7 +153,7 @@ def test_call_gemini_scopes_retrieval_to_session_operator(monkeypatch, _cr, _rec
 
 
 # --------------------------------------------------------------------------- #
-# AST structural test: ALL 8 call sites (covers the 5 SSE loops + CU driver)   #
+# AST structural test: the one shared call site (every chat loop + CU driver) #
 # --------------------------------------------------------------------------- #
 
 def _refs_hybrid_retrieve(node: ast.AST) -> bool:
@@ -186,7 +186,7 @@ def _hybrid_retrieve_call_sites(path: Path):
     (_CHAT_ROUTES, 0),   # the provider loops dispatch through tool_dispatch
     *[(part, 0) for part in _CHAT_PARTS],
     (_TOOL_DISPATCH, 1),  # _search_snapshots, shared by every chat loop
-    (_CU_DRIVER, 1),     # run_anthropic_cu_loop
+    (_CU_DRIVER, 0),     # run_anthropic_cu_loop dispatches through tool_dispatch
 ], ids=lambda v: getattr(v, "name", str(v)))
 def test_every_hybrid_retrieval_site_passes_operator(path, expected_count):
     """Every tool-loop hybrid_retrieve site passes operator=<variable>.

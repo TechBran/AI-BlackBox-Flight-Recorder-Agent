@@ -431,7 +431,8 @@ def test_the_shared_dispatcher_is_name_agnostic():
 
 @pytest.mark.parametrize("loop", ["stream_openai", "stream_anthropic", "stream_gemini",
                                   "stream_xai", "stream_custom", "call_openai",
-                                  "call_anthropic", "call_gemini", "call_xai", "call_custom"])
+                                  "call_anthropic", "call_gemini", "call_xai", "call_custom",
+                                  "cu_anthropic"])
 def test_every_loop_profile_reaches_the_executor_with_the_origin_device(monkeypatch, loop):
     """Origin-aware routing only works if the catch-all builds the executor with the turn's
     origin device — otherwise a phone-originated 'navigate me there' targets the primary."""

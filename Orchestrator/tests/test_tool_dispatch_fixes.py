@@ -259,3 +259,70 @@ def test_a_non_stream_tool_call_with_unparseable_arguments_still_runs(monkeypatc
     result = getattr(cr, fn)([{"role": "user", "content": "time?"}], "model-x", operator="op-fix")
     assert result[0] == "It is noon."
     assert executed == [("get_current_time", {})]
+
+
+# --------------------------------------------------------------------------- #
+# Review follow-ups: arguments that are not an object, web_fetch's max_chars,  #
+# and a non-str result on a labelled tool                                       #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("raw", ["null", "[]", "[1]", "5", '"x"', "true", "", "{not json", None])
+def test_tool_call_arguments_are_always_an_object(raw):
+    """JSON that parses to something other than an object (null, a list, a
+    number, a string) was passed on as-is, and the native branches' args.get
+    ended the turn."""
+    from Orchestrator.providers import openai_compat
+    assert openai_compat._tool_args(raw) == {}
+
+
+def test_tool_call_arguments_keep_a_real_object():
+    from Orchestrator.providers import openai_compat
+    assert openai_compat._tool_args('{"sides": 6}') == {"sides": 6}
+    assert openai_compat._tool_args({"sides": 6}) == {"sides": 6}   # a server that sends the object
+
+
+@pytest.mark.parametrize("loop", sorted(td.PROFILES))
+@pytest.mark.parametrize("args", [None, [], "x", 5])
+@pytest.mark.parametrize("name", ["search_snapshots", "gemini_image", "list_media", "roll_dice"])
+def test_dispatch_runs_a_tool_whose_arguments_are_not_an_object(rec, loop, args, name):
+    """A Gemini functionCall with "args": null (or any adapter handing over a
+    non-dict) runs the tool with {} instead of raising AttributeError."""
+    out = _dispatch(rec, loop, name, args)
+    assert out.result is not None
+    if name == "roll_dice":
+        assert rec["executor"] == [("roll_dice", {})]
+
+
+@pytest.mark.parametrize("loop", sorted(td.PROFILES))
+@pytest.mark.parametrize("raw, expected", [("5000", 5000), (" 5000 ", 5000), (5000.0, 5000),
+                                           ("lots", 80000), (None, 80000), (0, 1)])
+def test_web_fetch_reads_a_stringified_max_chars_as_a_number(rec, monkeypatch, loop, raw, expected):
+    fetched = []
+
+    def fetch(url, max_chars):
+        fetched.append(max_chars)
+        return "page"
+
+    rec["services"] = td.ToolServices(**{**rec["services"].__dict__, "perform_web_fetch": fetch})
+    args = {"url": "https://example.com/"}
+    if raw is not None:
+        args["max_chars"] = raw
+    assert _dispatch(rec, loop, "web_fetch", args).result == "page"
+    assert fetched == [expected]
+
+
+@pytest.mark.parametrize("loop", STREAMS)
+@pytest.mark.parametrize("name", ["send_sms", "make_phone_call", "save_contact", "create_cron_job",
+                                  "search_cron_jobs", "use_computer"])
+def test_a_labelled_tools_non_string_result_never_breaks_the_label(rec, monkeypatch, loop, name):
+    class _Executor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def execute(self, tool, args):
+            return ToolResult(success=True, result={"ok": 1})
+
+    monkeypatch.setattr(tools_pkg, "BlackBoxToolExecutor", _Executor)
+    out = _dispatch(rec, loop, name, {"phone_number": "+10000000000"})
+    assert out.result == {"ok": 1}
+    assert any("{'ok': 1}" in e["data"] for e in out.events if e["type"] == "tool_result")

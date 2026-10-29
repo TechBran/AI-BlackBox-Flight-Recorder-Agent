@@ -3,9 +3,9 @@ body-only results.
 
 These are the AI-facing SEARCH surfaces that build results inline (not via the
 ToolVault executor / context_builder): the chat-provider tool loops (anthropic,
-gemini, openai, xai, custom + the two non-stream call_* paths, which share one
-branch in providers/tool_dispatch.py since audit rank 74), the Anthropic CU
-driver, and the 3 voice-agent routes. Each appends
+gemini, openai, xai, custom + the two non-stream call_* paths) and the
+Anthropic CU driver, which share one branch in providers/tool_dispatch.py
+since audit rank 74, and the 3 voice-agent routes. Each appends
 `--- Result {i} ---\\n{snap_text}` — M15.4 wraps every such site in
 `format_snapshot_for_delivery(...)` so the model sees content, not the
 ~1,000-char bookkeeping envelope.
@@ -13,7 +13,7 @@ driver, and the 3 voice-agent routes. Each appends
 The structural test is an AST gate (mirrors M1's operator-scoping gate): it
 walks each source file, finds every `--- Result {i} ---` f-string, asserts the
 formatted value is `format_snapshot_for_delivery(snap_text)` (never a bare
-`snap_text`), and PINS the site count at 5 so a new unformatted site — or a
+`snap_text`), and PINS the site count at 4 so a new unformatted site — or a
 removed one — fails loudly.
 
 Deliberately NOT matched (different surfaces, correctly full-envelope):
@@ -46,7 +46,7 @@ INLINE_SEARCH_FILES = [
     "Orchestrator/routes/gemini_live_routes.py",
     "Orchestrator/routes/realtime_routes.py",
 ]
-EXPECTED_RESULT_SITES = 5  # 1 shared chat-loop branch + 1 CU driver + 3 voice routes
+EXPECTED_RESULT_SITES = 4  # 1 shared chat-loop + CU-driver branch + 3 voice routes
 
 
 def _result_fstrings(tree):

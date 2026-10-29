@@ -37,8 +37,10 @@ from bs4 import BeautifulSoup, FeatureNotFound
 # puts both the repo root and Orchestrator/ on sys.path.
 try:
     from Orchestrator.utils import safe_fetch
+    from Orchestrator.utils.tool_args import int_value
 except ImportError:
     from utils import safe_fetch
+    from utils.tool_args import int_value
 
 # Provider API configuration
 # Handles both Orchestrator context (from Orchestrator.config) and MCP context (from config directly)
@@ -484,6 +486,10 @@ def perform_web_fetch(url: str, max_chars: int = MAX_CONTENT_CHARS, use_cache: b
     # Validate URL
     if not url.startswith(('http://', 'https://')):
         return f"❌ Invalid URL: {url} (must start with http:// or https://)"
+    # max_chars is the model's on every surface: "5000" is 5000, and an
+    # unreadable one is the default instead of a TypeError at the length check
+    # below that told the model not to retry a readable page.
+    max_chars = int_value(max_chars, MAX_CONTENT_CHARS, lo=1)
 
     # Check cache first
     cache_key = f"fetch:{url}:{max_chars}"

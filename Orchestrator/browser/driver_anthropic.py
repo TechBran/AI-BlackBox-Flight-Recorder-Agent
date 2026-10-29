@@ -109,19 +109,15 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
         screenshot_to_base64, save_screenshot_to_uploads
     )
     from Orchestrator.browser.actions import execute_remote_action
+    from Orchestrator.providers.tool_dispatch import dispatch_tool
     # Names that previously resolved from chat_routes module scope.
     # Imported lazily (at call time) so this module never imports
-    # chat_routes at module level (no import cycle).
-    from Orchestrator.fossils import format_snapshot_for_delivery, hybrid_retrieve
-    from Orchestrator.models import TaskType
-    from Orchestrator.image_providers import IMAGE_TOOL_PROVIDERS
-    from Orchestrator.tasks import create_task, generate_prompt_slug
-    from Orchestrator.utils.async_helpers import run_blocking
-    from Orchestrator.web_tools import perform_web_fetch
+    # chat_routes at module level (no import cycle). _tool_context hands the
+    # dispatcher the chat routes' own helpers, so a stub set on chat_routes
+    # reaches this loop's tools as it reaches every chat loop's.
     from Orchestrator.routes.chat_routes import (
-        _cu_safe_params, _cu_save_to_blackbox,
+        _cu_safe_params, _cu_save_to_blackbox, _tool_context,
         execute_bash_command, execute_text_editor,
-        execute_get_media, execute_list_media, execute_search_media,
     )
 
     # This loop runs as a task on the server's event loop (the chat path), so
@@ -539,121 +535,25 @@ async def run_anthropic_cu_loop(session, history, system_prompt, tools, headers,
                         "is_error": result.get("error", False)
                     })
 
-                # ─── BlackBox tools (reuse execution logic) ───
-                elif tool_name == "web_fetch":
-                    url = tool_input.get("url", "")
-                    max_chars = tool_input.get("max_chars", 80000)
-                    print(f"[CU-BG]   web_fetch: {url}")
-                    fetch_result = await run_blocking(perform_web_fetch, url, max_chars)
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": fetch_result})
-
-                elif tool_name in IMAGE_TOOL_PROVIDERS:
-                    provider = IMAGE_TOOL_PROVIDERS[tool_name]
-                    prompt = tool_input.get("prompt", "")
-                    num_images = tool_input.get("numberOfImages", 1)
-                    task = create_task(TaskType.IMAGE_GENERATION, operator=operator, prompt=prompt,
-                                       result_data={"options": {
-                                           "aspectRatio": tool_input.get("aspectRatio", "16:9"),
-                                           "resolution": tool_input.get("resolution", "1K"),
-                                           "numberOfImages": num_images,
-                                           "provider": provider
-                                       }})
-                    slug = generate_prompt_slug(prompt)
-                    predicted_url = f"/ui/uploads/{slug}_{task.task_id}.png"
-                    result_msg = f"Image generation started for: {prompt[:100]}. URL: {predicted_url}"
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
-                    await emit({"type": "image_task", "data": {"task_id": task.task_id, "prompt": prompt, "count": num_images}})
-
-                elif tool_name == "generate_video":
-                    prompt = tool_input.get("prompt", "")
-                    duration = tool_input.get("duration", 8)
-                    task = create_task(TaskType.VIDEO_GENERATION, operator=operator, prompt=prompt,
-                                       result_data={"options": {
-                                           "aspectRatio": tool_input.get("aspectRatio", "16:9"),
-                                           "duration": duration,
-                                           "resolution": tool_input.get("resolution", "720p")
-                                       }})
-                    slug = generate_prompt_slug(prompt)
-                    predicted_url = f"/ui/uploads/{slug}_{task.task_id}.mp4"
-                    result_msg = f"Video generation started for: {prompt[:100]}. URL: {predicted_url}"
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
-                    await emit({"type": "video_task", "data": {"task_id": task.task_id, "prompt": prompt, "duration": duration}})
-
-                elif tool_name == "lyria_music":
-                    prompt = tool_input.get("prompt", "")
-                    sample_count = tool_input.get("sampleCount", 1)
-                    task = create_task(TaskType.LYRIA_MUSIC, operator=operator, prompt=prompt,
-                                       result_data={"prompt": prompt, "operator": operator})
-                    result_msg = f"Music generation started for: {prompt[:100]}. 30-second track."
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
-                    await emit({"type": "music_task", "data": {"task_id": task.task_id, "prompt": prompt, "sample_count": sample_count}})
-
-                elif tool_name == "get_media":
-                    result = await run_blocking(execute_get_media, url=tool_input.get("url", ""), task_id=tool_input.get("task_id", ""))
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
-
-                elif tool_name == "list_media":
-                    result = await run_blocking(execute_list_media, media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 20))
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
-
-                elif tool_name == "search_media":
-                    result = await run_blocking(execute_search_media, query=tool_input.get("query", ""), media_type=tool_input.get("media_type"), limit=tool_input.get("limit", 10))
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": json.dumps(result, indent=2)})
-
-                elif tool_name == "search_snapshots":
-                    query = tool_input.get("query", "")
-                    k = min(tool_input.get("k", 3), 5)
-                    if not query:
-                        result_msg = "Error: No search query provided."
-                    else:
-                        try:
-                            # hybrid_retrieve ignores its vol_txt argument (retrieve()
-                            # reads the ledger itself), so no 58 MB read here.
-                            search_results = await run_blocking(hybrid_retrieve, "", query, k=k, operator=operator)
-                            if not search_results:
-                                result_msg = f"No snapshots found matching: {query}"
-                            else:
-                                output_parts = [f"Found {len(search_results)} relevant snapshot(s) for: {query}\n"]
-                                for i, snap_text in enumerate(search_results, 1):
-                                    if len(snap_text) > 10000:
-                                        snap_text = snap_text[:3000] + "\n... [truncated]"
-                                    output_parts.append(f"--- Result {i} ---\n{format_snapshot_for_delivery(snap_text)}")
-                                result_msg = "\n\n".join(output_parts)
-                        except Exception as e:
-                            result_msg = f"Search failed: {str(e)}"
-                    tool_results.append({"type": "tool_result", "tool_use_id": tool_id, "content": result_msg})
-
-                elif tool_name in ("send_sms", "make_phone_call", "make_voice_call",
-                                   "search_contacts", "save_contact",
-                                   "create_cron_job", "edit_cron_job", "search_cron_jobs",
-                                   "use_computer",
-                                   "get_task_status", "get_snapshot", "list_recent_snapshots",
-                                   "get_current_time",
-                                   "analyze_image", "analyze_audio", "analyze_video",
-                                   "speech_to_text", "text_to_speech", "list_tts_voices",
-                                   "gemini_pro_tts", "extend_video",
-                                   "list_devices", "control_android_device",
-                                   "gmail_search", "gmail_read", "gmail_send", "gmail_reply", "gmail_labels"):
-                    from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
-                    tool_result = await executor.execute(tool_name, tool_input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_id,
-                        "content": tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
-                    })
-
+                # ─── BlackBox tools: the dispatcher every chat loop shares ───
                 else:
-                    # Catch-all: route ANY other tool (incl. the per-provider web
-                    # search tools and dynamically-injected ToolVault tools) through
-                    # BlackBoxToolExecutor instead of reporting "Unknown tool".
-                    from Orchestrator.tools import BlackBoxToolExecutor
-                    executor = BlackBoxToolExecutor(operator=operator)
-                    tool_result = await executor.execute(tool_name, tool_input)
+                    # web_fetch, the native media / snapshot-search / media-lookup
+                    # branches, the executor tools and the ToolVault catch-all
+                    # (audit rank 74). This loop kept its own copy of that table
+                    # after the chat loops moved to dispatch_tool, and the copy
+                    # drifted: a stringified k ended the whole run, extend_video
+                    # got no placeholder, the executor never learned the request's
+                    # origin device (X05-architecture-11, O02-chat-routes-A-10,
+                    # O03-chat-routes-B-07). Its events (progress labels, the
+                    # {kind}_task placeholders, cli_task) go out like any other.
+                    outcome = await dispatch_tool(
+                        tool_name, tool_input, _tool_context(operator, "cu_anthropic"))
+                    for event in outcome.events:
+                        await emit(event)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
-                        "content": tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
+                        "content": outcome.result
                     })
 
             # Never leave a tool_use unanswered (the 3-screenshot-failure break above
