@@ -987,8 +987,12 @@ harden_tree_permissions() {
     files="$( { ${as_owner[@]+"${as_owner[@]}"} find "$BLACKBOX_ROOT" -xdev -type f -user "$owner" \
                     -perm -002 -print -exec chmod o-w {} + || true; } | wc -l)"
     for d in Manifest credentials; do
-        ${as_owner[@]+"${as_owner[@]}"} mkdir -p "$BLACKBOX_ROOT/$d"
-        ${as_owner[@]+"${as_owner[@]}"} chmod 0700 "$BLACKBOX_ROOT/$d"
+        # Not fatal: one owned by someone else (an old root run) is reported,
+        # and the service's [PERMS] warning keeps naming it.
+        if ! { ${as_owner[@]+"${as_owner[@]}"} mkdir -p "$BLACKBOX_ROOT/$d" \
+                && ${as_owner[@]+"${as_owner[@]}"} chmod 0700 "$BLACKBOX_ROOT/$d"; }; then
+            echo "[install] WARN: could not make $BLACKBOX_ROOT/$d 0700 as $owner (owned by $(stat -c %U "$BLACKBOX_ROOT/$d" 2>/dev/null || echo '?'))" >&2
+        fi
     done
     echo "[install] Checkout permissions: removed group/other write from $dirs directories and other write from $files files; Manifest/ and credentials/ are 0700"
 }

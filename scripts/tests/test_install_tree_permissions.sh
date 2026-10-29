@@ -43,7 +43,15 @@ chmod 0666 "$BLACKBOX_ROOT/Orchestrator/routes/mod.py"
 chmod 0664 "$BLACKBOX_ROOT/Orchestrator/routes/shared.py"
 ln -s "$OUTSIDE" "$BLACKBOX_ROOT/Portal/linked"
 
-OUT="$(harden_tree_permissions 2>&1)" || fail "harden_tree_permissions failed: $OUT"
+# As install.sh runs it: a plain statement under set -euo pipefail (a call used
+# as a condition, or inside $( ), would run with errexit off).
+harden() {
+    ( set -euo pipefail; harden_tree_permissions ) > "$WORK/harden.out" 2>&1
+    RC=$?
+    OUT="$(cat "$WORK/harden.out")"
+}
+harden
+[[ "$RC" -eq 0 ]] || fail "harden_tree_permissions failed ($RC): $OUT"
 
 # ── 1. no group/other write on any directory; no other write on any file ──────
 BAD="$(find "$BLACKBOX_ROOT" -type d -perm /022 -print)"
@@ -68,9 +76,19 @@ done
 # ── 4. idempotent ────────────────────────────────────────────────────────────
 grep -q 'from [1-9][0-9]* directories and other write from 1 files' <<< "$OUT" \
     || fail "the first run does not report what it changed: $OUT"
-OUT2="$(harden_tree_permissions 2>&1)" || fail "second run failed: $OUT2"
-grep -q 'from 0 directories and other write from 0 files' <<< "$OUT2" \
-    || fail "a second run changed something: $OUT2"
+FIRST="$OUT"
+harden
+[[ "$RC" -eq 0 ]] || fail "second run failed ($RC): $OUT"
+grep -q 'from 0 directories and other write from 0 files' <<< "$OUT" \
+    || fail "a second run changed something: $OUT"
+# A private directory it cannot fix is reported, never fatal (errexit is on).
+rmdir "$BLACKBOX_ROOT/credentials"
+ln -s "$WORK/nowhere" "$BLACKBOX_ROOT/credentials"
+harden
+[[ "$RC" -eq 0 ]] || fail "an unfixable credentials/ aborted the install ($RC): $OUT"
+grep -q "WARN: could not make $BLACKBOX_ROOT/credentials 0700" <<< "$OUT" || fail "an unfixable credentials/ is not reported: $OUT"
+rm "$BLACKBOX_ROOT/credentials"
+OUT="$FIRST"
 
 # ── 5. as the owner, never root; before Step 1 ───────────────────────────────
 grep -qE '^[[:space:]]*sudo (find|chmod|mkdir)' "$FUNC_FILE" && fail "harden_tree_permissions runs find/chmod as root"
