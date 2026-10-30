@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import secrets
 import threading
 import time
@@ -196,6 +197,18 @@ def refusal_for(tool: str, ctx) -> Optional[object]:
 
 # ------------------------------------------------------------------ the prompt text
 
+# The system prompt template's placeholders ({TOOL_INSTRUCTIONS}, {PERSONA}):
+# the tool instructions fill the template BEFORE the persona does
+# (tasks.build_core_system_prompt), so operator-written text in them (the
+# instinct prompt, a model server's alias) must never spell one.
+_PLACEHOLDER = re.compile(r"\{([A-Z][A-Z0-9_]*)\}")
+
+
+def inert(text: str) -> str:
+    """``text`` with any {PLACEHOLDER} token turned into a harmless [PLACEHOLDER]."""
+    return _PLACEHOLDER.sub(r"[\1]", text or "")
+
+
 def wellness_block(operator: str) -> str:
     """The WELLNESS RULES, then this operator's instinct prompt (spec §5, §10)."""
     try:
@@ -203,7 +216,7 @@ def wellness_block(operator: str) -> str:
         instinct = enroll.instinct_prompt(operator)
     except Exception:  # noqa: BLE001 - the rules never go out without an instinct text
         instinct = catalog.DEFAULT_INSTINCT_PROMPT
-    return catalog.WELLNESS_RULES + "\n\n" + (instinct or catalog.DEFAULT_INSTINCT_PROMPT)
+    return catalog.WELLNESS_RULES + "\n\n" + inert(instinct or catalog.DEFAULT_INSTINCT_PROMPT)
 
 
 def allowed_labels(operator: str) -> List[str]:
@@ -238,7 +251,7 @@ def not_shared_line(operator: str) -> str:
         allowed = allowed_labels(operator)
     except Exception:  # noqa: BLE001 - never more than the plain sentence
         allowed = []
-    return NOT_SHARED.format(allowed=_join(allowed)) if allowed else NOT_SHARED_NONE
+    return inert(NOT_SHARED.format(allowed=_join(allowed))) if allowed else NOT_SHARED_NONE
 
 
 def instructions(entries: Iterable[dict], ctx) -> str:

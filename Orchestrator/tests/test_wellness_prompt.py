@@ -57,6 +57,23 @@ def test_the_operators_own_instinct_prompt_replaces_the_default(box):
     assert system.index(own) > system.index(catalog.WELLNESS_RULES)
 
 
+def test_an_instinct_prompt_can_never_spell_a_template_placeholder(box):
+    """The tool instructions fill the system prompt template BEFORE the persona
+    (build_core_system_prompt): an operator-written {PERSONA} or
+    {TOOL_INSTRUCTIONS} stays inert text, it never expands."""
+    from Orchestrator.behavioral_core import get_persona
+    from Orchestrator.tasks import build_core_system_prompt
+    edit_record(instinct_prompt="MY INSTINCT {PERSONA} and {TOOL_INSTRUCTIONS} END")
+    with stamped(_turn(signed=SIGNED)):
+        system = _system()
+    assert "MY INSTINCT [PERSONA] and [TOOL_INSTRUCTIONS] END" in system
+    built = build_core_system_prompt(access.wellness_block(OPERATOR), operator=OPERATOR)
+    assert "MY INSTINCT [PERSONA] and [TOOL_INSTRUCTIONS] END" in built
+    persona = get_persona(OPERATOR, "chat")
+    assert built.count(persona) == build_core_system_prompt("x", operator=OPERATOR).count(persona)
+    assert access.inert("a {b} {Lower} {X1_Y}") == "a {b} {Lower} [X1_Y]"
+
+
 def test_the_not_shared_line_names_the_allowed_ais(box):
     custom_server()                              # a model server on this network
     with stamped(_turn("openai", signed=SIGNED)):
