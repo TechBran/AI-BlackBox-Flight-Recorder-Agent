@@ -28,6 +28,7 @@ Time is injected (`now_ms`); nothing here reads the clock except the default.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import secrets
@@ -46,6 +47,7 @@ MAX_CUSTOM_DAYS = 92
 MAX_SERIES_DAYS = 365
 MAX_POINTS = 120
 MAX_SESSIONS = 20
+MAX_COARSEN_STEPS = 40
 NOTABLE_SESSIONS = 5
 
 PERIODS = ("today", "last_night", "yesterday", "this_week", "last_week", "last_7_days",
@@ -80,6 +82,15 @@ NOTE_STAGES = "Sleep stages are device estimates; one night is noisy."
 NOTE_SLEEPING_HR = "Sleeping heart rate is a BlackBox estimate from 5-minute averages."
 NOTE_PAUSED = "Health collection is paused; these are the stored numbers."
 NOTE_COARSENED = "Shown at a coarser resolution to fit; ask for a shorter range for detail."
+NOTE_OMITTED = ("Some metrics were left out to fit (metrics_omitted); ask about one of them "
+                "for its numbers.")
+# When a summary still does not fit once compacted, metrics leave it in this
+# order (the least asked-about first); sleep, sleeping heart rate, resting
+# heart rate and steps stay longest.
+DROP_ORDER = ("total_calories", "distance", "sleeping_hr_p10", "respiratory_rate",
+              "active_calories", "heart_rate", "spo2", "hrv", "exercise", "sleep_stages",
+              "bp_diastolic", "bp_systolic", "steps", "resting_hr", "sleeping_hr_median",
+              "sleep_duration")
 
 
 class ApiError(Exception):
@@ -116,12 +127,28 @@ class Ctx:
 
 # ------------------------------------------------------------------ helpers
 
+NOT_ENROLLED_FIX = "Health isn't set up. Set it up in Settings, Health, on your phone."
+
+
+def _erased_reads_as_not_enrolled(tool: str):
+    """A store erased while an answer was being read (Stop & erase from the
+    phone, an operator delete) reads as not set up, never as an exception."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def inner(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except store_mod.StoreGone:
+                return error_envelope(tool, "not_enrolled", NOT_ENROLLED_FIX)
+        return inner
+    return wrap
+
+
 def _ctx(operator: str, now_ms: Optional[int], categories: Optional[Iterable[str]]) -> Ctx:
     rec = enroll.get_enrollment(operator)
     st = enroll.store_for(rec, create=False) if rec else None
     if not rec or st is None or rec.get("state") in (None, "awaiting_phone"):
-        raise ApiError("not_enrolled", "Health isn't set up. Set it up in Settings, Health, "
-                                       "on your phone.")
+        raise ApiError("not_enrolled", NOT_ENROLLED_FIX)
     consented = [c for c in catalog.CATEGORIES
                  if (rec.get("categories") or {}).get(c) in catalog.CONSENTED]
     cats = consented if categories is None else [c for c in categories if c in consented]
@@ -411,6 +438,7 @@ def _notable_sessions(ctx: Ctx, first: str, last: str) -> List[dict]:
     return sorted(out, key=lambda s: s["start"])
 
 
+@_erased_reads_as_not_enrolled("wellness_summary")
 def summary(operator: str, period: str, categories: Optional[Iterable[str]] = None, *,
             start: Optional[str] = None, end: Optional[str] = None,
             now_ms: Optional[int] = None, delivery: Optional[Delivery] = None,
@@ -518,6 +546,7 @@ def _period_key(day: str, gran: str) -> str:
     return day
 
 
+@_erased_reads_as_not_enrolled("wellness_series")
 def series(operator: str, metric: str, range: Optional[str] = None, *,  # noqa: A002
            start: Optional[str] = None, end: Optional[str] = None, granularity: str = "auto",
            stat: str = "auto", categories: Optional[Iterable[str]] = None,
@@ -674,6 +703,7 @@ def _session_row(ctx: Ctx, s: dict, brief: bool = False) -> dict:
     return row
 
 
+@_erased_reads_as_not_enrolled("wellness_sessions")
 def sessions(operator: str, kind: str, range: Optional[str] = None, *,  # noqa: A002
              start: Optional[str] = None, end: Optional[str] = None,
              exercise_type: Optional[str] = None, limit: int = 10,
@@ -711,6 +741,7 @@ def sessions(operator: str, kind: str, range: Optional[str] = None, *,  # noqa: 
 
 # ------------------------------------------------------------------ history
 
+@_erased_reads_as_not_enrolled("wellness_history")
 def history(operator: str, start: str, end: str, *, categories: Optional[Iterable[str]] = None,
             now_ms: Optional[int] = None, delivery: Optional[Delivery] = None,
             budget_tokens: Optional[int] = None) -> dict:
@@ -750,6 +781,7 @@ def history(operator: str, start: str, end: str, *, categories: Optional[Iterabl
 
 # ------------------------------------------------------------------ sources
 
+@_erased_reads_as_not_enrolled("wellness_sources")
 def sources(operator: str, *, now_ms: Optional[int] = None, delivery: Optional[Delivery] = None,
             budget_tokens: Optional[int] = None) -> dict:
     tool = "wellness_sources"
@@ -854,13 +886,61 @@ def _drop_detail(env: dict) -> bool:
     return changed
 
 
+def _compact_metrics(env: dict) -> bool:
+    """A summary's metrics in their shortest whole form: the value and its
+    display, the usual range, how it compares and the coverage (pct and
+    label) stay; counts that the coverage already says, and labels the
+    metric id already names, go."""
+    changed = False
+    for m in env.get("metrics") or []:
+        if m.get("compact"):
+            continue
+        for k in ("label", "unit", "days_with_data", "total", "readings", "sessions",
+                  "min", "max", "method"):
+            m.pop(k, None)
+        if not m.get("flags"):
+            m.pop("flags", None)
+        usual = m.get("usual")
+        if isinstance(usual, dict):
+            m["usual"] = {k: usual[k] for k in ("low", "high") if k in usual}
+        vs = m.get("vs_usual")
+        if isinstance(vs, dict):
+            m["vs_usual"] = vs.get("label")
+        c = m.get("coverage")
+        if isinstance(c, dict):
+            m["coverage"] = {k: c[k] for k in ("pct", "label") if k in c}
+        m["compact"] = True
+        changed = True
+    if env.get("gaps"):
+        env["gaps_count"] = len(env["gaps"])
+        env["gaps"] = []
+        changed = True
+    return changed
+
+
+def _drop_one_metric(env: dict) -> bool:
+    """Leave out the next metric in DROP_ORDER, saying so (never silently)."""
+    metrics = env.get("metrics") or []
+    if len(metrics) <= 1:
+        return False
+    rank = {m: i for i, m in enumerate(DROP_ORDER)}
+    victim = min(metrics, key=lambda m: rank.get(m.get("metric"), -1))
+    metrics.remove(victim)
+    env.setdefault("metrics_omitted", []).append(victim.get("metric"))
+    if NOTE_OMITTED not in env.setdefault("notes", []):
+        env["notes"].append(NOTE_OMITTED)
+    return True
+
+
 def coarsen(env: dict, token_budget: int) -> dict:
     """Fit `env` into `token_budget` by reducing resolution, never by cutting
-    the JSON. Each step keeps the answer whole and says it was coarsened."""
+    the JSON. Each step keeps the answer whole and says it was coarsened; a
+    summary that still does not fit leaves out its least-asked metrics by
+    name. If nothing more can go, the answer says over_budget."""
     if estimate_tokens(env) <= token_budget:
         return env
     env = json.loads(json.dumps(env))
-    for _ in range(12):
+    for _ in range(MAX_COARSEN_STEPS):
         if estimate_tokens(env) <= token_budget:
             break
         if env.get("points") and len(env["points"]) > 1:
@@ -873,9 +953,15 @@ def coarsen(env: dict, token_budget: int) -> dict:
         elif env.get("sessions") and len(env["sessions"]) > 1:
             env["sessions"] = env["sessions"][: max(1, len(env["sessions"]) // 2)]
             env["sessions_shown"] = len(env["sessions"])
+        elif _compact_metrics(env):
+            pass
+        elif _drop_one_metric(env):
+            pass
         else:
             break
         if NOTE_COARSENED not in env.setdefault("notes", []):
             env["notes"].append(NOTE_COARSENED)
         env["coarsened"] = True
+    if estimate_tokens(env) > token_budget:
+        env["over_budget"] = True
     return env

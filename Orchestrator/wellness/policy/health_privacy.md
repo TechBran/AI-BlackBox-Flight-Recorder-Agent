@@ -44,7 +44,8 @@ BlackBox reads in the background only if you grant Health Connect's background p
 
 - **In Health Connect:** when you delete a record there, BlackBox removes its copy on the next sync. Deleting old step or heart-rate detail that was imported in bulk may not be mirrored for data older than 90 days.
 - **Pause:** collection stops; BlackBox can still answer from what it already stored and says that it is paused.
-- **Disconnect:** collection stops, and you choose to keep or delete what was stored.
+- **Disconnect:** collection stops, and you choose to keep or delete what was stored. Kept history comes back if you set up Health again on the same phone; a different phone starts with a new, empty store, and Stop & erase removes both.
+- **Moving to a new phone:** while your current phone is set up, it is asked to approve the move. If it cannot be reached, the move goes ahead, your stored history moves with it, and the old phone is told and stops sending.
 - **Stop & erase:** from your enrolled phone, BlackBox deletes your health store, revokes your phone's key and tells the phone to forget its health settings. Your past health conversations stay in your BlackBox memory, but they contain no health numbers.
 - **If your operator is removed from the box,** your health store is erased the same way.
 

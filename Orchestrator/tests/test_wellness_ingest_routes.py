@@ -226,3 +226,30 @@ def test_sync_now_nudges_the_phone(box):
     box.phone.down = True
     assert box.post("/wellness/sync-now", {"operator": OPERATOR}).json() == {"nudged": False}
     assert "source_unreachable" in enroll.get_enrollment(OPERATOR)["phone_troubles"]
+
+
+def test_the_kill_switch_stops_capability_reports(box):
+    from Orchestrator.utils.config_ini import update_config_ini
+
+    def off(p):
+        if not p.has_section("wellness"):
+            p.add_section("wellness")
+        p.set("wellness", "enabled", "false")
+    update_config_ini(off)
+    rep = json.dumps(FX.load("continuous_120")["capabilities"]).encode()
+    r = box.post("/wellness/capabilities", raw=rep, signed=True)
+    assert r.status_code == 503 and r.json() == {"error": "wellness_disabled"}
+    assert box.post("/wellness/sync-now", {"operator": OPERATOR}).status_code == 503
+
+
+def test_a_push_clears_a_failed_nudge(box):
+    """A nudge the phone did not answer marks it unreachable (needs
+    attention); the next batch from it proves otherwise."""
+    box.phone.down = True
+    assert box.post("/wellness/sync-now", {"operator": OPERATOR}).json() == {"nudged": False}
+    assert box.get(f"/wellness/status?operator={OPERATOR}").json()["state"] == \
+        "needs_attention"
+    box.phone.down = False
+    assert box.push(_batch(box)).status_code == 200
+    assert "source_unreachable" not in enroll.get_enrollment(OPERATOR)["phone_troubles"]
+    assert box.get(f"/wellness/status?operator={OPERATOR}").json()["state"] == "active"

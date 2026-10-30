@@ -83,3 +83,10 @@ def test_a_broken_store_never_breaks_the_devices_view(client, monkeypatch):
     monkeypatch.setattr(enroll, "get_enrollment", lambda op: 1 / 0)
     row = _rows(client, OWNER)["fixture-phone"]
     assert row["health_source"] is False
+
+
+def test_the_kill_switch_shows_on_the_badge(client, monkeypatch):
+    from Orchestrator import config
+    monkeypatch.setattr(config, "wellness_enabled", lambda: False)
+    row = _rows(client, OWNER)["fixture-phone"]
+    assert row["health_source"] is True and row["health_state"] == "disabled"

@@ -189,6 +189,33 @@ def test_coarsening_never_truncates(box):
     assert big["coarsened"] and len(big["points"]) < 120 and api.estimate_tokens(big) <= 400
 
 
+def test_a_summary_fits_the_on_device_cap(box):
+    """A 30-day summary of every category is over 1,500 tokens whole; it is
+    compacted (still whole JSON, every metric with its coverage), and at a
+    tiny budget it names what it left out instead of being cut."""
+    full = api.summary(OPERATOR, "last_30_days", now_ms=NOW, budget_tokens=100_000)
+    assert api.estimate_tokens(full) > api.CAP_TOKENS["on_device"]
+    env = api.summary(OPERATOR, "last_30_days", now_ms=NOW,
+                      budget_tokens=api.CAP_TOKENS["on_device"])
+    assert api.estimate_tokens(env) <= api.CAP_TOKENS["on_device"]
+    assert env["coarsened"] is True and "over_budget" not in env
+    assert {m["metric"] for m in env["metrics"]} == {m["metric"] for m in full["metrics"]}
+    for m in env["metrics"]:
+        assert m["display"] and isinstance(m["coverage"], dict) and m["coverage"]["label"]
+    tiny = api.summary(OPERATOR, "last_30_days", now_ms=NOW, budget_tokens=300)
+    json.loads(json.dumps(tiny))
+    assert tiny["metrics_omitted"] and api.NOTE_OMITTED in tiny["notes"]
+    kept = [m["metric"] for m in tiny["metrics"]]
+    assert "sleep_duration" in kept and "total_calories" not in kept
+    assert api.estimate_tokens(tiny) <= 300 or tiny["over_budget"] is True
+
+
+def test_an_answer_that_cannot_fit_says_so(box):
+    env = api.history(OPERATOR, DAY(-91), DAY(0), now_ms=NOW, budget_tokens=50)
+    json.loads(json.dumps(env))
+    assert env["over_budget"] is True and env["rows"]
+
+
 def test_caps_by_destination():
     assert api.budget_for("anthropic") == 8000
     assert api.budget_for("local") == 1500
@@ -219,3 +246,12 @@ def test_stale_and_paused_are_stated(tmp_path, monkeypatch):
     assert env["paused"] is True and api.NOTE_PAUSED in env["notes"]
     assert env["stale"] is True
     assert any(t["code"] == "stale_sync" for t in env["troubles"]) is False  # paused, not stale
+
+
+def test_a_store_erased_mid_answer_reads_as_not_set_up(box, monkeypatch):
+    def gone(*a, **k):
+        raise api.store_mod.StoreGone("x")
+    monkeypatch.setattr(api.store_mod.Store, "coverage_days", gone)
+    env = api.summary(OPERATOR, "last_7_days", now_ms=NOW)
+    assert env == {"ok": False, "tool": "wellness_summary", "error": "not_enrolled",
+                   "fix": api.NOT_ENROLLED_FIX}

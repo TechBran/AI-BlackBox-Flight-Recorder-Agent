@@ -58,9 +58,11 @@ _KEY_SHAPES = re.compile(
 _URL_KEY_PARAM = re.compile(r"([?&](?:key|api_key|apikey|access_token)=)[^&#\s\"'<>]+", re.IGNORECASE)
 _BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/-]{16,}=*")
 # Health tracking (Orchestrator/wellness): a device key as it is stored and
-# sent at bind ("k": "<43 base64url>"), the origin-proof signature (sig=<64
-# hex>) and an approved-surface token (wbx_s_...).
-_WELLNESS_KEY = re.compile(r"""(["']k["']\s*:\s*["'])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])""")
+# sent at bind ("k": "<43 base64url>", also inside an escaped JSON string as
+# \"k\": \"...\", or as k=<43>), the origin-proof signature (sig=<64 hex>)
+# and an approved-surface token (wbx_s_...).
+_WELLNESS_KEY = re.compile(
+    r"""(\\?["']k\\?["']\s*:\s*\\?["']|(?<![A-Za-z0-9_])k=)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])""")
 _WELLNESS_SIG = re.compile(r"(\bsig=)[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 _WELLNESS_TOKEN = re.compile(r"\bwbx_s_[A-Za-z0-9_-]{8,}")
 

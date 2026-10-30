@@ -124,3 +124,49 @@ def test_erase_is_idempotent_and_never_raises_from_the_hook(box, monkeypatch):
     assert erase.erase_operator("never-enrolled") == {"erased": False, "files": 0, "tasks": 0}
     monkeypatch.setattr(erase, "erase_operator", lambda *a, **k: 1 / 0)
     erase.on_operator_deleted(OPERATOR)       # logged, not raised
+
+
+def test_an_erase_that_races_a_batch_leaves_no_store(box, monkeypatch):
+    """The batch's signature was checked before the erase; when it reaches
+    the store the key is gone and the file unlinked, so it is refused (410)
+    and no orphan store holding its rows appears."""
+    from Orchestrator.wellness import ingest
+    op_key = enroll.get_enrollment(OPERATOR)["op_key"]
+    real = ingest.decompress
+    fired = []
+
+    def racing(raw, enc):
+        if not fired:
+            fired.append(1)
+            erase.erase_operator(OPERATOR, reason="erase", unbind=False)
+        return real(raw, enc)
+    monkeypatch.setattr(ingest, "decompress", racing)
+    r = box.push(dict(FX.load("days_10")["batches"][1], enrollment_id=box.enr, epoch=1))
+    assert fired and r.status_code == 410 and r.json() == {"error": "revoked"}
+    assert enroll.get_enrollment(OPERATOR) is None
+    assert _files(op_key) == []
+
+
+def test_erase_revokes_before_it_tells_the_phone(box, monkeypatch):
+    """The key is gone (and the store with it) before the 5 s unbind call,
+    which runs with no lock held."""
+    import threading
+    seen = {}
+
+    def lock_free():
+        # From another thread: the lock is reentrant for the erasing one.
+        got = enroll._ENROLL_LOCK.acquire(blocking=False)
+        if got:
+            enroll._ENROLL_LOCK.release()
+        seen["lock_free"] = got
+
+    def unbind(rec):
+        seen["key"] = enroll.key_for(rec["enrollment_id"])
+        seen["files"] = _files(rec["op_key"])
+        t = threading.Thread(target=lock_free)
+        t.start()
+        t.join()
+        return 200
+    monkeypatch.setattr(enroll, "unbind_phone", unbind)
+    assert erase.erase_operator(OPERATOR)["erased"]
+    assert seen == {"key": None, "files": [], "lock_free": True}

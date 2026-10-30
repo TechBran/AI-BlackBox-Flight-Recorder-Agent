@@ -112,3 +112,54 @@ def test_disclosures_and_refs_need_the_phone(box):
     ref = box.get(f"/wellness/ref/{env['ref']}", signed=True).json()
     assert ref["payload"]["ref"] == env["ref"]
     assert box.get("/wellness/ref/w-20990101-0000", signed=True).status_code == 404
+
+
+def test_troubles_are_codes_with_their_wording_alongside(box):
+    """`troubles` is the code list the phone matches on (spec §3.5's
+    vocabulary); `trouble_details` carries the wording for the same codes."""
+    from Orchestrator.wellness import enroll
+    with enroll.editing() as data:
+        data[OPERATOR]["phone_troubles"] = ["permission_revoked:sleep", "foreground_only"]
+    body = box.get(f"/wellness/status?operator={OPERATOR}", signed=True).json()
+    assert body["troubles"][:2] == ["permission_revoked:sleep", "foreground_only"]
+    assert all(isinstance(t, str) for t in body["troubles"])
+    assert [t["code"] for t in body["trouble_details"]] == body["troubles"]
+    assert {"code", "title", "body", "fix"} <= set(body["trouble_details"][0])
+
+
+def test_a_replacement_awaiting_approval_reads_only_the_minimal_status(box):
+    from Orchestrator.device_registry import pairing
+    from Orchestrator.tests.wellness_support import FakePhone, add_device
+    new = FakePhone()
+    add_device("fixture-phone-2", "100.100.7.9", OPERATOR)
+    pairing.register("fixture-phone-2", "100.100.7.9", new.secret, "Phone two", "phone")
+    box.ports["100.100.7.9"] = new.port
+    old = box.phone
+    box.phone = new
+    try:
+        r = box.enroll(ip="100.100.7.9", replace=True)
+        assert r.json()["state"] == "replace_pending"
+        pending = box.get(f"/wellness/status?operator={OPERATOR}", signed=True)
+        assert pending.status_code == 200 and set(pending.json()) == MINIMAL
+    finally:
+        box.phone = old
+    assert MINIMAL | FULL_EXTRA <= set(box.get(f"/wellness/status?operator={OPERATOR}",
+                                               signed=True).json())
+    new.close()
+
+
+def test_the_kill_switch_shows_in_the_status(box):
+    """With [wellness] enabled=false every caller, the phone included, gets
+    the four fields with state "disabled" (still enrolled as stored)."""
+    from Orchestrator.utils.config_ini import update_config_ini
+
+    def off(p):
+        if not p.has_section("wellness"):
+            p.add_section("wellness")
+        p.set("wellness", "enabled", "false")
+    update_config_ini(off)
+    for signed in (False, True):
+        body = box.get(f"/wellness/status?operator={OPERATOR}", signed=signed).json()
+        assert set(body) == MINIMAL and body["state"] == "disabled" and body["enrolled"] is True
+    assert box.get(f"/wellness/status?operator={OTHER}").json()["state"] == "disabled"
+    assert box.get("/wellness/disclosures", signed=True).status_code == 503

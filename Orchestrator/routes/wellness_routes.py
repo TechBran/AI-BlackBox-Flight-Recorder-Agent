@@ -7,7 +7,10 @@ Phone -> box (JSON; every error is {"error": <code>, ...}):
   POST /wellness/capabilities    signed; the capability report (counts only)
   GET  /wellness/status          ?operator=; unsigned = {state, source_label,
                                  last_sync, enrolled} only; signed by that
-                                 operator's phone = the full settings view
+                                 operator's ACTIVE phone = the full settings
+                                 view (a replacement awaiting approval gets the
+                                 four fields); with the kill switch off, the
+                                 four fields with state "disabled"
   POST /wellness/select          the Portal's "Use for health" (unsigned)
   POST /wellness/pause           narrowing: any surface for that operator
   POST /wellness/resume          widening: signed
@@ -22,10 +25,12 @@ Phone -> box (JSON; every error is {"error": <code>, ...}):
   GET  /wellness/disclosures     signed: who saw the data, newest first
 
 "Signed" = the X-BlackBox-Origin proof keyed with the phone's device key
-(Orchestrator/wellness/origin_proof.py). The operator is always the one the
-proof or the body names for THIS operator's own data; no route takes another
-operator as a target, and the unsigned status says nothing beyond its four
-fields (rule W17).
+(Orchestrator/wellness/origin_proof.py). The kill switch ([wellness] enabled,
+read fresh) stops collection and every answer that carries health
+information; pause, disconnect, erase and narrowing settings still work.
+The operator is always the one the proof or the body names for THIS
+operator's own data; no route takes another operator as a target, and the
+unsigned status says nothing beyond its four fields (rule W17).
 
 Every handler is a plain `def`, so FastAPI runs it in the threadpool (the
 store writes, the bind call to the phone and the recompute never block the
@@ -48,6 +53,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from Orchestrator.wellness import (api, catalog, enroll, erase, ingest, origin_proof, schema)
+from Orchestrator.wellness import store as store_mod
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +134,7 @@ def _signed(request: Request, raw: RawBody, required: bool = True):
 
 
 def _disabled() -> Optional[JSONResponse]:
-    from Orchestrator import config
-    if config.wellness_enabled():
+    if _enabled():
         return None
     return _json(503, {"error": "wellness_disabled"}, {"Retry-After": str(RETRY_DISABLED_S)})
 
@@ -164,10 +169,16 @@ def _now_ms() -> int:
 
 # ------------------------------------------------------------------ status
 
+def _enabled() -> bool:
+    from Orchestrator import config
+    return config.wellness_enabled()
+
+
 def _minimal_status(operator: str) -> dict:
     rec = enroll.get_enrollment(operator)
     if not rec:
-        return {"state": "not_set_up", "source_label": None, "last_sync": None, "enrolled": False}
+        return {"state": "not_set_up" if _enabled() else "disabled", "source_label": None,
+                "last_sync": None, "enrolled": False}
     label = rec.get("source_label")
     if not label and rec.get("device_id"):
         try:
@@ -175,12 +186,15 @@ def _minimal_status(operator: str) -> dict:
             label = dev.name if dev is not None else None
         except Exception:  # noqa: BLE001
             label = None
-    return {"state": enroll.effective_state(rec), "source_label": label,
-            "last_sync": rec.get("last_push_at"),
+    return {"state": enroll.effective_state(rec) if _enabled() else "disabled",
+            "source_label": label, "last_sync": rec.get("last_push_at"),
             "enrolled": rec.get("state") in enroll.STORED_LIVE}
 
 
 def full_status(operator: str, *, now_ms: Optional[int] = None) -> dict:
+    """The settings view. `troubles` is the list of trouble codes (spec §3.5's
+    vocabulary, e.g. "stale_sync", "permission_revoked:sleep");
+    `trouble_details` carries the same troubles with their wording."""
     now_ms = _now_ms() if now_ms is None else now_ms
     rec = enroll.get_enrollment(operator) or {}
     out = _minimal_status(operator)
@@ -189,19 +203,15 @@ def full_status(operator: str, *, now_ms: Optional[int] = None) -> dict:
     sync = {"last_push_at": rec.get("last_push_at"), "outbox_hint":
             {"next_min_interval_s": ingest.NEXT_MIN_INTERVAL_S, "batches_received": 0}}
     disclosures = 0
-    if st is not None:
-        today = enroll.iso(now_ms)[:10]
-        from Orchestrator.wellness.store import add_days
-        days = st.coverage_days(add_days(today, -7), today)
-        if days:
-            wear["hr_mode"] = days[max(days)].get("hr_mode")
-            wear["nights_worn_7"] = sum(1 for k in range(7)
-                                        if (days.get(add_days(today, -k)) or {}).get(
-                                            "night_worn") == 1)
-        sync["outbox_hint"]["batches_received"] = st.ingest_stats()["batches"]
-        disclosures = st.disclosures_count()
+    try:
+        _store_view(st, now_ms, wear, sync)
+        disclosures = st.disclosures_count() if st is not None else 0
+    except store_mod.StoreGone:
+        pass
+    details = enroll.troubles_for(rec, now_ms) if rec else []
     out.update({
-        "troubles": enroll.troubles_for(rec, now_ms) if rec else [],
+        "troubles": [t["code"] for t in details],
+        "trouble_details": details,
         "categories": rec.get("categories") or dict(catalog.DEFAULT_CONSENT),
         "local_only": rec.get("local_only") or dict(catalog.DEFAULT_LOCAL_ONLY),
         "providers_allowed": rec.get("providers_allowed") or [],
@@ -217,6 +227,22 @@ def full_status(operator: str, *, now_ms: Optional[int] = None) -> dict:
     return out
 
 
+def _store_view(st, now_ms: int, wear: dict, sync: dict) -> None:
+    """Fill the wear profile and the batch count from the store (may raise
+    StoreGone when an erase got there first)."""
+    if st is None:
+        return
+    add_days = store_mod.add_days
+    today = enroll.iso(now_ms)[:10]
+    days = st.coverage_days(add_days(today, -7), today)
+    if days:
+        wear["hr_mode"] = days[max(days)].get("hr_mode")
+        wear["nights_worn_7"] = sum(1 for k in range(7)
+                                    if (days.get(add_days(today, -k)) or {}).get(
+                                        "night_worn") == 1)
+    sync["outbox_hint"]["batches_received"] = st.ingest_stats()["batches"]
+
+
 @router.get("/status")
 def wellness_status(request: Request, operator: str = "",
                     raw: RawBody = Depends(_capped(SMALL_BODY))):
@@ -224,10 +250,14 @@ def wellness_status(request: Request, operator: str = "",
         schema.OperatorBody(operator=operator)
     except ValidationError:
         return _json(400, {"error": "invalid_operator"})
+    if not _enabled():
+        return _minimal_status(operator)
     signed, refusal = _signed(request, raw, required=False)
     if refusal is not None:
         return refusal
-    if signed is not None and signed.operator == operator:
+    # Only the operator's ACTIVE phone reads the settings view: a replacement
+    # still waiting for the old phone's tap gets what anyone gets (W17).
+    if signed is not None and signed.operator == operator and signed.which == "active":
         return full_status(operator)
     return _minimal_status(operator)
 
@@ -303,15 +333,22 @@ def wellness_ingest(request: Request,
     try:
         data = ingest.decompress(raw.data or b"", request.headers.get("content-encoding"))
         batch = ingest.parse_batch(ingest.parse_json(data))
-        st = enroll.store_for(rec)
+        # Never create the store here: it exists from the bind on, and one
+        # that is gone was erased (a batch must not bring it back).
+        st = enroll.store_for(rec, create=False)
+        if st is None:
+            raise ingest.IngestError(410, "revoked")
         result = ingest.process_batch(st, batch, enrollment_id=signed.enrollment_id,
                                       epoch=int(rec.get("epoch") or 0), now_ms=now_ms,
                                       device_id=rec.get("device_id"),
-                                      earliest_available=enroll.earliest_available(rec))
+                                      earliest_available=enroll.earliest_available(rec),
+                                      still_enrolled=lambda: enroll.still_active(signed))
     except ingest.IngestError as e:
         logger.info("[WELLNESS] ingest refused: %s", e.code)
         if e.status == 413:
             return _too_large()
+        if e.status == 410:
+            return _json(410, {"error": "revoked"})
         return _invalid(e.detail or e.code)
     enroll.note_push(signed.operator, now_ms=now_ms)
     return result.response()
@@ -321,6 +358,9 @@ def wellness_ingest(request: Request,
 def wellness_capabilities(request: Request, raw: RawBody = Depends(_capped(REPORT_BODY))):
     if raw.too_large:
         return _too_large()
+    refusal = _disabled()
+    if refusal is not None:
+        return refusal
     signed, refusal = _signed(request, raw)
     if refusal is not None:
         return refusal
@@ -400,6 +440,9 @@ def wellness_erase(request: Request, raw: RawBody = Depends(_capped(SMALL_BODY))
 
 @router.post("/sync-now")
 def wellness_sync_now(raw: RawBody = Depends(_capped(SMALL_BODY))):
+    refusal = _disabled()
+    if refusal is not None:
+        return refusal
     body, refusal = _parse(schema.OperatorBody, raw)
     if refusal is not None:
         return refusal
@@ -452,7 +495,10 @@ def wellness_ref(ref: str, request: Request, raw: RawBody = Depends(_capped(SMAL
     if signed.which != "active":
         return _json(403, {"error": "not_allowed"})
     st = enroll.store_for(signed.record, create=False)
-    row = st.get_delivery(ref) if st is not None else None
+    try:
+        row = st.get_delivery(ref) if st is not None else None
+    except store_mod.StoreGone:
+        row = None
     if row is None:
         return _json(404, {"error": "unknown_ref"})
     return {"ref": row["ref"], "ts": row["ts"], "tool": row["tool"],
@@ -461,14 +507,20 @@ def wellness_ref(ref: str, request: Request, raw: RawBody = Depends(_capped(SMAL
 
 @router.get("/disclosures")
 def wellness_disclosures(request: Request, raw: RawBody = Depends(_capped(SMALL_BODY))):
+    refusal = _disabled()
+    if refusal is not None:
+        return refusal
     signed, refusal = _signed(request, raw)
     if refusal is not None:
         return refusal
     if signed.which != "active":
         return _json(403, {"error": "not_allowed"})
     st = enroll.store_for(signed.record, create=False)
-    rows = st.disclosures(limit=200) if st is not None else []
-    offset = st.offsets().latest() if st is not None else 0
+    try:
+        rows = st.disclosures(limit=200) if st is not None else []
+        offset = st.offsets().latest() if st is not None else 0
+    except store_mod.StoreGone:
+        rows, offset = [], 0
     return {"disclosures": [{"time": api.local_iso(r["ts"], offset), "surface": r["surface"],
                              "provider": r["provider"], "model": r["model"], "tool": r["tool"],
                              "categories": r["categories"]} for r in rows]}

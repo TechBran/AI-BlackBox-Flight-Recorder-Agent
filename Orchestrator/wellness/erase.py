@@ -1,11 +1,12 @@
 """Stop & erase, and the operator-delete hook (spec §3.6).
 
-erase_operator() revokes the device key (and a pending one), tells the phone
-to forget (best effort), scrubs the tasks.db rows the store listed in
-task_ref, unlinks the operator's DB with its -wal/-shm, and removes the
-enrollment. What it never touches: the ledger (health turns are minted with
-their numbers masked, so the UI says "Your past health conversations stay in
-your BlackBox memory, but they contain no health numbers").
+erase_operator() revokes the device key (and a pending one), scrubs the
+tasks.db rows the store listed in task_ref, unlinks the operator's DB with
+its -wal/-shm (and any detached store a phone change left behind), removes
+the enrollment, and tells the phone to forget (best effort). What it never
+touches: the ledger (health turns are minted with their numbers masked, so
+the UI says "Your past health conversations stay in your BlackBox memory,
+but they contain no health numbers").
 
 Called by POST /wellness/erase and /wellness/disconnect (keep_history=false),
 both signed by the enrolled phone, and by DELETE /operator/{name}. Counts only
@@ -48,29 +49,39 @@ def _scrub_tasks(task_ids: List[str], operator: str) -> int:
 
 def erase_operator(operator: str, *, reason: str = "erase", unbind: bool = True,
                    now_ms: Optional[int] = None) -> dict:
-    """Erase everything BlackBox stored for this operator's health. Idempotent."""
+    """Erase everything BlackBox stored for this operator's health. Idempotent.
+
+    Order matters against a batch already in flight: the keys go first (so
+    the batch's re-check under the store's write lock fails), then each store
+    file is unlinked under that same write lock (so a batch that got in first
+    finishes before the unlink), then the record. Nothing reopens a store
+    once its file is gone (store connections are mode=rw). The phone is told
+    last, with no lock held."""
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
-    rec = enroll.get_enrollment(operator)
-    if not rec:
-        return {"erased": False, "files": 0, "tasks": 0}
+    with enroll._ENROLL_LOCK:
+        rec = enroll.get_enrollment(operator)
+        if not rec:
+            return {"erased": False, "files": 0, "tasks": 0}
+        enroll.revoke_key(rec.get("enrollment_id"), "revoked", now_ms)
+        if rec.get("pending"):
+            enroll.revoke_key(rec["pending"].get("enrollment_id"), "revoked", now_ms)
+        tasks = files = 0
+        op_keys = [rec.get("op_key"), *(rec.get("detached_op_keys") or [])]
+        for op_key in dict.fromkeys(k for k in op_keys if paths.valid_op_key(k)):
+            with store.write_lock(op_key):
+                st = enroll.store_for({"op_key": op_key}, create=False)
+                if st is not None:
+                    try:
+                        tasks += _scrub_tasks(st.task_refs(), operator)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[WELLNESS] erase: task scrub failed (%s)",
+                                       type(e).__name__)
+                files += len(store.delete_store_files(op_key))
+        with enroll.editing() as data:
+            data.pop(operator, None)
     unbound = None
     if unbind and rec.get("state") in enroll.STORED_LIVE:
         unbound = enroll.unbind_phone(rec)
-    enroll.revoke_key(rec.get("enrollment_id"), "revoked", now_ms)
-    if rec.get("pending"):
-        enroll.revoke_key(rec["pending"].get("enrollment_id"), "revoked", now_ms)
-    tasks = files = 0
-    op_key = rec.get("op_key")
-    if paths.valid_op_key(op_key):
-        st = enroll.store_for(rec, create=False)
-        if st is not None:
-            try:
-                tasks = _scrub_tasks(st.task_refs(), operator)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[WELLNESS] erase: task scrub failed (%s)", type(e).__name__)
-        files = len(store.delete_store_files(op_key))
-    with enroll.editing() as data:
-        data.pop(operator, None)
     logger.info("[WELLNESS] erase (%s): files=%d tasks=%d unbind=%s", reason, files, tasks,
                 unbound)
     return {"erased": True, "files": files, "tasks": tasks}

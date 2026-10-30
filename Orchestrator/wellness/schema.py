@@ -441,6 +441,11 @@ class EnrollmentRecord(BaseModel):
     briefing: Dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
     source_label: Optional[str] = None
     pending: Optional[Dict[str, Any]] = None
+    # {device_id, tailnet_ip, epoch, at} of the last bind (or approved
+    # replacement): the address the history is bound to (enroll.source_ip).
+    last_source: Optional[Dict[str, Any]] = None
+    # Stores a change of phone left behind (never readable; erase removes them).
+    detached_op_keys: List[str] = Field(default_factory=list)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     last_push_at: Optional[str] = None

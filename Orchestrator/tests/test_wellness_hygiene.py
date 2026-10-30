@@ -7,6 +7,7 @@ Writes into the checkout itself are refused by the root conftest's write
 guard for every test, these included."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import stat
@@ -179,3 +180,8 @@ def test_redaction_masks_the_wellness_secrets():
     assert sig not in redact(header) and "enr=en_0a1b2c3d" in redact(header)
     assert "wbx_s_" not in redact("token wbx_s_abcdefghijklmnop0123")
     assert redact("sig=short and k=1") == "sig=short and k=1"
+    # The same key inside an escaped JSON string, as a repr, and as k=.
+    assert key not in redact(json.dumps({"payload": json.dumps({"k": key})}))
+    assert key not in redact(repr({"k": key}))
+    assert key not in redact(f"bind k={key} epoch=2")
+    assert redact(f"kk={key}") == f"kk={key}"

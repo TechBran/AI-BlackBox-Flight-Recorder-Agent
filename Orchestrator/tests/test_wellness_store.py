@@ -283,3 +283,70 @@ def test_day_bounds_and_local_day():
     assert store.local_day(start, -14400) == "2026-10-20"
     assert store.local_day(end - 1, -14400) == "2026-10-20"
     assert store.local_day(end, -14400) == "2026-10-21"
+
+
+def test_an_erased_store_is_never_brought_back(tmp_path, monkeypatch):
+    """Only open_store(create=True) makes the file. A Store left over from
+    before an erase (a request in flight) gets StoreGone on read and on
+    write, and nothing re-creates the file or a sidecar."""
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "w")
+    s = store.open_store("cccccccccccccccc")
+    with s.write() as conn:
+        conn.execute("INSERT INTO meta(key, value) VALUES ('a', 'b')")
+    store.delete_store_files("cccccccccccccccc")
+    with pytest.raises(store.StoreGone):
+        s.meta_get("a")
+    with pytest.raises(store.StoreGone):
+        s.meta_set("a", "c")
+    with pytest.raises(store.StoreGone):
+        store.open_store("cccccccccccccccc", create=False)
+    with pytest.raises(store.StoreGone):
+        store.Store("cccccccccccccccc").init(create=False)
+    assert list((tmp_path / "w").iterdir()) == []
+    assert store.open_store("cccccccccccccccc").meta_get("a") is None   # a NEW one, empty
+
+
+def test_a_flagged_multi_year_session_touches_one_day(tmp_path, monkeypatch):
+    """A bogus sleep session reaching back years is stored flagged; it marks
+    only its end day dirty and never stretches the span coverage rows are
+    back-filled over."""
+    import time as _time
+
+    from Orchestrator.wellness import ingest, schema
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "w")
+    s = store.open_store("dddddddddddddddd")
+    now = store.day_bounds(DAY, OFF)[0] + 12 * 3_600_000
+    batch = {"schema": "bbx.wellness.ingest/1", "batch_id": "b-long",
+             "enrollment_id": "en_0000000a", "epoch": 1, "origins": [{"key": "o1", "package": "com.example.app",
+                                      "device_type": "WATCH"}],
+             "sessions": [{"kind": "sleep", "hc_id": "s-bogus", "origin": "o1",
+                           "start": now - 20 * 365 * 86_400_000, "end": now - 3_600_000,
+                           "offset_s": OFF, "stages": []}]}
+    t0 = _time.monotonic()
+    res = ingest.process_batch(s, schema.IngestBatch.model_validate(batch),
+                               enrollment_id="en_0000000a", epoch=1, now_ms=now)
+    assert res.flagged == 1 and res.dirty_days == [DAY]
+    assert s.data_span() is None
+    assert _time.monotonic() - t0 < 2.0
+
+
+def test_the_span_ignores_flagged_rows(st):
+    with st.write() as conn:
+        st.set_day_offset(conn, DAY, OFF)
+        oid = st.ensure_origin(conn, {"package": "p"})
+        st.upsert_buckets(conn, "steps", "1h", oid, 1, [[T0 + 3_600_000, 100.0]], [0])
+        st.upsert_buckets(conn, "steps", "1h", oid, 1,
+                          [[T0 - 900 * 86_400_000, 999_999.0]], [1])
+        st.upsert_reading(conn, 1, {"hc_id": "r-old", "metric": "spo2",
+                                    "t": T0 - 400 * 86_400_000, "offset_s": OFF,
+                                    "origin_id": oid, "v": 12.0, "flags": 1})
+    assert st.data_span() == (DAY, DAY)
+
+
+def test_unreferenced_store_files_are_counted(tmp_path, monkeypatch):
+    from Orchestrator.tests.wellness_support import sandbox, write_record
+    sandbox(tmp_path, monkeypatch)
+    write_record(op_key="1111111111111111", detached_op_keys=["2222222222222222"])
+    for k in ("1111111111111111", "2222222222222222", "3333333333333333"):
+        store.open_store(k)
+    assert store.unreferenced_dbs() == ["3333333333333333"]

@@ -335,3 +335,311 @@ def test_notify_device_never_raises(monkeypatch):
     monkeypatch.setattr(bus, "_post_to_device", dead)
     res = asyncio.run(bus.notify_device(OPERATOR, "fixture-phone", PHONE_IP, "t", "b"))
     assert res.delivered == [] and res.unreachable == ["fixture-phone"]
+
+
+# ------------------------------------------------------------------ hostile enrollment
+#
+# Every /devices route that touches the registry or the pairing rows is open
+# inside the perimeter, so none of it may decide which phone holds an
+# operator's history. These are the reviewed takeover paths; each must end
+# with the operator's history still bound to the phone that last received a
+# bind, and no new key able to read it.
+
+ATT_IP = "100.100.8.8"
+MINIMAL = {"state", "source_label", "last_sync", "enrolled"}
+
+
+def _node(box, ip=ATT_IP, *, device="att-dev", owner=""):
+    """Another tailnet node: its own listener and pairing row (POST
+    /devices/pairing is open), and optionally a registry row of its own."""
+    from Orchestrator.device_registry import pairing
+    phone = FakePhone()
+    box.ports[ip] = phone.port
+    pairing.register(device or "att", ip, phone.secret, "Another phone", "phone")
+    if device:
+        add_device(device, ip, owner)
+    return phone
+
+
+def _as(box, phone, fn, *a, **kw):
+    old = box.phone
+    box.phone = phone
+    try:
+        return fn(*a, **kw)
+    finally:
+        box.phone = old
+
+
+@pytest.mark.parametrize("update", [{"metadata": {"tailnet_ips": [ATT_IP]}},
+                                    {"tailscale_ip": ATT_IP}])
+def test_a_rewritten_registry_address_is_not_the_same_phone(box, update):
+    """PUT /devices/{id} can point the source phone's row at any address, so
+    a re-enroll from another address is a replacement: the source phone,
+    which answers, must approve it, and until then the new key gets nothing."""
+    assert box.enroll().status_code == 200
+    victim = box.phone
+    att = _node(box, device=None)
+    assert box.client.put("/devices/fixture-phone", json=update).status_code == 200
+    r = _enroll_from(box, att, ATT_IP, replace=True)
+    assert r.status_code == 200 and r.json()["state"] == "replace_pending"
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["enrollment_id"] == victim.enrollment_id and rec["tailnet_ip"] == PHONE_IP
+    assert ("GET", "/healthz", None) in victim.calls
+    assert any(n[2] == enroll.NOTICE_REPLACE_ASK[0] for n in box.notices)
+    assert box.push(_batch(victim.enrollment_id, 1)).status_code == 200
+    status = _as(box, att, box.get, f"/wellness/status?operator={OPERATOR}", signed=True)
+    assert set(status.json()) == MINIMAL
+    widen = _as(box, att, box.post, "/wellness/settings",
+                {"operator": OPERATOR, "categories": {"blood_pressure": "proactive"},
+                 "providers_allowed": ["anthropic"]}, signed=True, method="PUT")
+    assert widen.status_code == 403
+    assert enroll.get_enrollment(OPERATOR)["categories"]["blood_pressure"] == "off"
+    att.close()
+
+
+def test_a_deleted_pairing_row_does_not_make_the_source_look_offline(box):
+    """DELETE /devices/pairing/{ip} is open; the probe needs no pairing (the
+    phone serves GET /healthz without it), so the online phone still answers
+    and the replacement waits for its tap."""
+    from Orchestrator.device_registry import pairing
+    assert box.enroll().status_code == 200
+    victim = box.phone
+    att = _node(box)
+    assert pairing.forget(PHONE_IP)
+    r = _enroll_from(box, att, ATT_IP, replace=True, assign_to_me=True)
+    assert r.status_code == 200 and r.json()["state"] == "replace_pending"
+    assert ("GET", "/healthz", None) in victim.calls
+    assert enroll.get_enrollment(OPERATOR)["device_id"] == "fixture-phone"
+    att.close()
+
+
+def test_kept_history_never_moves_to_another_phone_without_a_live_key(box):
+    """After a keep-history disconnect (unsigned, from any surface) no phone
+    holds a key that could approve a move, so another phone starts EMPTY and
+    the kept store stays detached until erase removes it too."""
+    assert box.enroll().status_code == 200
+    victim = box.phone
+    assert box.push(_batch(victim.enrollment_id, 1)).status_code == 200
+    kept = enroll.get_enrollment(OPERATOR)["op_key"]
+    att = _node(box)
+    r = box.post("/wellness/disconnect", {"operator": OPERATOR, "keep_history": True})
+    assert r.status_code == 200
+    r = _enroll_from(box, att, ATT_IP, assign_to_me=True)
+    assert r.status_code == 200 and r.json()["state"] == "active"
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["device_id"] == "att-dev" and rec["op_key"] != kept
+    assert rec["detached_op_keys"] == [kept] and paths.db_path(kept).exists()
+    status = _as(box, att, box.get, f"/wellness/status?operator={OPERATOR}", signed=True).json()
+    assert status["sync"]["outbox_hint"]["batches_received"] == 0
+    assert _as(box, att, box.post, "/wellness/erase", {"operator": OPERATOR},
+               signed=True).status_code == 200
+    assert not paths.db_path(kept).exists() and not paths.db_path(rec["op_key"]).exists()
+    att.close()
+
+
+def test_the_same_phone_gets_its_kept_history_back(box):
+    assert box.enroll().status_code == 200
+    assert box.push(_batch(box.phone.enrollment_id, 1)).status_code == 200
+    kept = enroll.get_enrollment(OPERATOR)["op_key"]
+    assert box.post("/wellness/disconnect", {"operator": OPERATOR,
+                                             "keep_history": True}).status_code == 200
+    r = box.enroll()
+    assert r.status_code == 200 and r.json()["epoch"] == 2
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["op_key"] == kept and not rec.get("detached_op_keys")
+
+
+def test_a_rehomed_source_never_hands_its_history_to_another_node(box):
+    """Unassign (open) flips the enrollment to ownership_changed; claiming
+    another node for the operator (open) and enrolling it gets an empty
+    store, and the old phone's key now answers 410 source_moved."""
+    assert box.enroll().status_code == 200
+    victim = box.phone
+    assert box.push(_batch(victim.enrollment_id, 1)).status_code == 200
+    kept = enroll.get_enrollment(OPERATOR)["op_key"]
+    att = _node(box)
+    assert box.client.post("/devices/fixture-phone/unassign",
+                           json={"operator": OTHER}).status_code == 200
+    assert box.push(_batch(victim.enrollment_id, 1, i=1)).status_code == 409
+    assert box.client.post("/devices/att-dev/operator",
+                           json={"operator": OPERATOR}).status_code == 200
+    r = _enroll_from(box, att, ATT_IP)
+    assert r.status_code == 200 and r.json()["state"] == "active"
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["device_id"] == "att-dev" and rec["op_key"] != kept
+    assert box.push(_batch(victim.enrollment_id, 1, i=1)).json() == {"error": "source_moved"}
+    att.close()
+
+
+def test_reenrolling_from_ownership_changed_revokes_the_old_key(box):
+    assert box.enroll().status_code == 200
+    old_enr, old_key = box.phone.enrollment_id, box.phone.key
+    box.client.post("/devices/fixture-phone/unassign", json={"operator": OTHER})
+    assert box.push(_batch(old_enr, 1)).status_code == 409
+    box.client.post("/devices/fixture-phone/operator", json={"operator": OPERATOR})
+    r = box.enroll()
+    assert r.status_code == 200 and r.json()["epoch"] == 2
+    assert old_enr not in _keys() and enroll.tombstone_reason(old_enr) == "revoked"
+    box.phone.key, box.phone.enrollment_id = old_key, old_enr
+    assert box.push(_batch(old_enr, 1, i=1)).json() == {"error": "revoked"}
+
+
+def test_a_superseded_replacement_is_revoked(box, monkeypatch):
+    assert box.enroll().status_code == 200
+    new = _second_phone(box, monkeypatch)
+    pend = _enroll_from(box, new, "100.100.7.9", replace=True).json()
+    assert pend["state"] == "replace_pending"
+    r = box.enroll(replace=True)                  # the source phone re-enrolls itself
+    assert r.status_code == 200 and r.json()["state"] == "active"
+    assert enroll.get_enrollment(OPERATOR)["pending"] is None
+    assert enroll.tombstone_reason(pend["enrollment_id"]) == "revoked"
+    box.phone = new
+    assert box.push(_batch(new.enrollment_id, pend["epoch"])).json() == {"error": "revoked"}
+    new.close()
+
+
+def test_a_pending_replacement_leaves_the_source_alone_until_approved(box, monkeypatch):
+    import copy
+    assert box.enroll().status_code == 200
+    rec = enroll.get_enrollment(OPERATOR)
+    label = rec["source_label"]
+    new = _second_phone(box, monkeypatch)
+    report = copy.deepcopy(FX.load("continuous_120")["capabilities"])
+    report["phone"].update({"device_name": "Phone two", "model": "SM-TEST2"})
+    r = _enroll_from(box, new, "100.100.7.9", replace=True, capability_report=report)
+    assert r.json()["state"] == "replace_pending"
+    st = enroll.store_for(enroll.get_enrollment(OPERATOR), create=False)
+    assert enroll.get_enrollment(OPERATOR)["source_label"] == label
+    assert st.meta_get("capabilities")["phone"]["model"] == "SM-TEST1"
+    assert box.post("/wellness/replace-approve", {"operator": OPERATOR, "approve": True},
+                    signed=True).status_code == 200
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["source_label"] == "Phone two (SM-TEST2)"
+    assert rec["last_source"]["tailnet_ip"] == "100.100.7.9"
+    assert st.meta_get("capabilities")["phone"]["model"] == "SM-TEST2"
+    new.close()
+
+
+def test_enroll_refuses_a_device_that_is_not_android(box):
+    from Orchestrator.device_registry import pairing
+    add_device("a-laptop", "100.100.7.21", OPERATOR, kind="linux")
+    pairing.register("a-laptop", "100.100.7.21", "c" * 64, "Laptop", "laptop")
+    r = box.enroll(ip="100.100.7.21")
+    assert r.status_code == 422 and r.json()["error"] == "not_android"
+    assert "100.100.7.21" not in box.dialed
+
+
+def test_owner_spelling_is_compared_like_the_device_routes_do(box):
+    from Orchestrator.device_registry import get_registry
+    get_registry().update_device("fixture-phone", owner=OPERATOR.upper())
+    r = box.post("/wellness/select", {"operator": OPERATOR, "device_id": "fixture-phone"})
+    assert r.status_code == 200
+    body = box.enroll().json()
+    assert body["state"] == "active"
+    assert box.push(_batch(body["enrollment_id"], 1)).status_code == 200
+    assert enroll.get_enrollment(OPERATOR)["state"] == "active"
+
+
+# ------------------------------------------------------------------ slow phones
+
+def _drip_listener(seconds=6.0, step=0.25):
+    """A listener that answers one header byte every `step` seconds: no
+    single read ever times out, so only a total deadline stops it."""
+    import socket
+    import threading
+    import time
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+
+    def run():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                c.recv(65536)
+                c.sendall(b"HTTP/1.1 200 OK\r\nX-Pad: ")
+                for _ in range(int(seconds / step)):
+                    time.sleep(step)
+                    c.sendall(b"a")
+                c.sendall(b"\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            finally:
+                c.close()
+    threading.Thread(target=run, daemon=True).start()
+    return srv
+
+
+def test_a_phone_call_has_a_total_deadline(box, monkeypatch):
+    import time
+    from Orchestrator.device_registry import pairing
+    srv = _drip_listener()
+    box.ports[ATT_IP] = srv.getsockname()[1]
+    pairing.register("att", ATT_IP, "d" * 64, "Slow", "phone")
+    t0 = time.monotonic()
+    assert enroll.call_phone(ATT_IP, "POST", "/wellness/sync", {}, timeout=1.0) is None
+    assert time.monotonic() - t0 < 2.5
+    srv.close()
+
+
+def test_a_slow_phone_holds_up_nobody_else(box, monkeypatch):
+    """The bind runs outside the enrollment lock: a phone that drips its
+    answer delays only its own enroll (cut off at the deadline), never
+    another operator's pause, and a second enroll for the same operator is
+    told one is in progress instead of queueing behind it."""
+    import threading
+    import time
+    from Orchestrator.device_registry import pairing
+    monkeypatch.setattr(enroll, "BIND_TIMEOUT_S", 1.5)
+    srv = _drip_listener()
+    box.ports[ATT_IP] = srv.getsockname()[1]
+    add_device("att-dev", ATT_IP, "")
+    pairing.register("att-dev", ATT_IP, "e" * 64, "Slow", "phone")
+    write_record(OTHER, op_key="a" * 16, enrollment_id="en_aaaaaaaa", device_id="x",
+                 tailnet_ip="100.100.7.30")
+    out = {}
+
+    def others():
+        time.sleep(0.4)
+        t = time.monotonic()
+        enroll.pause(OTHER)
+        out["pause_s"] = time.monotonic() - t
+        out["second"] = box.enroll()             # the same operator, meanwhile
+    th = threading.Thread(target=others)
+    th.start()
+    t0 = time.monotonic()
+    r = box.post("/wellness/enroll", {"operator": OPERATOR, "install_id": "i",
+                                      "nonce": "ab" * 16, "assign_to_me": True}, ip=ATT_IP)
+    took = time.monotonic() - t0
+    th.join()
+    assert r.status_code == 502 and took < 3.5
+    assert out["pause_s"] < 0.5
+    assert out["second"].status_code == 409
+    assert out["second"].json()["error"] == "enroll_in_progress"
+    assert out["second"].headers["Retry-After"]
+    assert enroll.get_enrollment(OPERATOR) is None
+    srv.close()
+
+
+def test_a_record_that_changed_during_the_bind_persists_nothing(box, monkeypatch):
+    """The record is re-read before anything is written: a pause (or an
+    erase, a select, another phone's push flipping ownership) that landed
+    while the bind was out means a 409, and the old key stays the key."""
+    first = box.enroll().json()
+    real = enroll.call_phone
+
+    def bind_then_pause(ip, method, path, body, *, timeout):
+        status = real(ip, method, path, body, timeout=timeout)
+        if path == "/wellness/bind":
+            enroll.pause(OPERATOR)
+        return status
+    monkeypatch.setattr(enroll, "call_phone", bind_then_pause)
+    r = box.enroll(replace=True)
+    assert r.status_code == 409 and r.json()["error"] == "enroll_conflict"
+    rec = enroll.get_enrollment(OPERATOR)
+    assert rec["enrollment_id"] == first["enrollment_id"] and rec["state"] == "paused"
+    assert list(_keys()) == [first["enrollment_id"]]
+    assert OPERATOR not in enroll._INFLIGHT

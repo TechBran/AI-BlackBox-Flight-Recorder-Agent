@@ -7,6 +7,12 @@ Classes are derived LIVE, never hard-coded:
              loopback, RFC 1918, link-local, 100.64.0.0/10 (the tailnet),
              fc00::/7 (which holds the tailnet ULA fd7a:115c:a1e0::/48). Every
              resolved address must qualify; a resolution failure is cloud.
+             The host must also be unambiguous: the box's HTTP clients
+             (requests/urllib3 and httpx) parse odd authorities differently
+             ("http://a.example\\@10.0.0.5/" is 10.0.0.5 to urlsplit and
+             httpx but a.example to urllib3), so a base URL with a backslash,
+             userinfo, whitespace or a control character, or one the parsers
+             read as different hosts, is cloud.
   on_device  the `local` provider (Gemma on the source phone; M7.5)
   cloud      anthropic, openai, google, xai, and any custom server on a
              public address (OpenRouter, a rented GPU), shown as its own
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import ipaddress
+import re
 import socket
 from typing import Callable, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -41,6 +48,7 @@ _ALIASES = {"gemini": "google", "gemini_rest": "google", "claude": "anthropic",
 
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 _ULA = ipaddress.ip_network("fc00::/7")
+_AMBIGUOUS = re.compile(r"[\\\s\x00-\x1f\x7f]")
 
 Resolver = Callable[..., list]
 
@@ -99,6 +107,46 @@ def host_is_local(host: str, port: Optional[int] = None,
     return bool(addrs) and all(address_is_local(a) for a in addrs)
 
 
+def _other_parsers_hosts(url: str) -> List[Optional[str]]:
+    """The host as the box's HTTP clients would dial it (None = that client
+    is not installed here)."""
+    out: List[Optional[str]] = []
+    try:
+        from urllib3.util import parse_url
+        out.append(parse_url(url).host)
+    except ImportError:
+        out.append(None)
+    try:
+        import httpx
+        out.append(httpx.URL(url).host)
+    except ImportError:
+        out.append(None)
+    return out
+
+
+def dial_target(base_url) -> Optional[Tuple[str, Optional[int]]]:
+    """(host, port) every HTTP client agrees a base URL dials, or None when
+    the URL is ambiguous or malformed (then it is never classed local)."""
+    if not isinstance(base_url, str) or not base_url or _AMBIGUOUS.search(base_url):
+        return None
+    parts = urlsplit(base_url)
+    if parts.scheme not in ("http", "https") or "@" in parts.netloc or not parts.hostname:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    host = parts.hostname.strip("[]").lower()
+    try:
+        others = _other_parsers_hosts(base_url)
+    except Exception:  # noqa: BLE001 - a URL a client cannot parse is not trusted
+        return None
+    for other in others:
+        if other is not None and other.strip("[]").lower() != host:
+            return None
+    return host, port
+
+
 def _servers() -> List[dict]:
     from Orchestrator.onboarding import custom_servers
     return custom_servers.list_servers(enabled_only=True)
@@ -133,12 +181,10 @@ def destination(provider, model: Optional[str] = None,
         if srv is None:
             return Destination(None, None, "an unknown model server", "unknown_custom_server")
         alias = srv.get("alias") or ""
-        parts = urlsplit(srv.get("base_url") or "")
-        try:
-            port = parts.port
-        except ValueError:
-            port = None
-        local = host_is_local(parts.hostname or "", port, resolver)
+        target = dial_target(srv.get("base_url"))
+        if target is None:
+            return Destination(f"custom:{alias}", CLOUD, alias, "ambiguous_url")
+        local = host_is_local(target[0], target[1], resolver)
         return Destination(f"custom:{alias}", LOCAL if local else CLOUD, alias,
                            None if local else "public_address")
     return Destination(None, None, "an unknown AI", "unknown_provider")

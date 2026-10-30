@@ -31,25 +31,44 @@ live nonce, and WireGuard binds each tailnet address to its node key, so a
 peer that planted a pairing secret for someone else's address can never
 receive the bind. Only a 200 from the bind persists anything.
 
-Replacing a source: the old phone is probed (30 s). If it answers, the new
-enrollment waits as `pending` until the old phone approves with a signed POST
-/wellness/replace-approve; if it does not answer, the replacement proceeds and
-the old phone is told. Either way the old key is revoked and its next push
-gets 410 source_moved. Stored data belongs to the operator and stays.
+Which phone holds the history. The registry is NOT evidence of that: any
+tailnet peer can rewrite a device's address, metadata or owner through the
+open /devices routes, and delete its pairing row. What the box can trust is
+the address a bind actually reached, so every bind (and every approved
+replacement) records it as the record's `last_source`. A later enroll from
+that same address is the same phone (a re-enroll: same store, epoch+1).
+From any other address it is a CHANGE of source:
+
+  the record is live (active/paused)  the replace flow: the old phone is
+        probed (GET /healthz, which the phone serves without pairing, so a
+        deleted pairing row cannot make it look offline; any HTTP answer is
+        "up", only no answer within 30 s is "down"). Up: the new enrollment
+        waits as `pending` until the old phone approves with a signed POST
+        /wellness/replace-approve. Down: the replacement proceeds, the store
+        moves with it, and the old phone is told. Either way the old key is
+        revoked and its next push gets 410 source_moved.
+  the record is not live (revoked by a keep-history disconnect, ownership
+        changed, awaiting a phone)  there is no live key left to approve
+        with, so the new phone gets a FRESH store; the kept one is detached
+        (listed in `detached_op_keys`, never readable, removed by erase).
+
+Phones are called outside the enrollment lock, under a total deadline (a
+listener that drips its answer cannot hold anything up), and the record is
+re-checked before anything is persisted.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import dataclasses
+import http.client
 import ipaddress
 import json
 import logging
 import secrets
+import socket
 import threading
 import time
-import urllib.error
-import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -78,8 +97,14 @@ NOTICE_MOVED = ("Health moved to another phone", "Open BlackBox, Settings, Healt
 NOT_PAIRED_FIX = "Open the BlackBox app once on this phone"
 UNKNOWN_DEVICE_FIX = ("Open the BlackBox app once on this phone so it appears in Devices, "
                       "then try again")
+NOT_ANDROID_FIX = "Health tracking needs the BlackBox Android app with Health Connect"
+RETRY_IN_PROGRESS_S = 15
 
+# Guards enrollments.json read-modify-writes and the in-flight table. Held
+# only for local work (files, the registry, the store's schema); never across
+# a call to a phone.
 _ENROLL_LOCK = threading.RLock()
+_INFLIGHT: Dict[str, str] = {}      # operator -> token of the enroll talking to a phone
 
 
 class EnrollError(Exception):
@@ -227,17 +252,44 @@ def device_owner(device_id: Optional[str]) -> str:
     return (dev.owner or "").strip() if dev is not None else ""
 
 
+def same_operator(owner: Optional[str], operator: Optional[str]) -> bool:
+    """A registry owner names this operator. Case-insensitive, the way the
+    device registry and the /devices routes compare owners."""
+    a, b = (owner or "").strip(), (operator or "").strip()
+    return bool(a) and a.casefold() == b.casefold()
+
+
 def resolve_device_by_ip(ip: str):
-    """The registry device at this address (tailscale_ip, or one of the
-    addresses its metadata records). Deterministic on duplicates: Android
-    rows first, then by id."""
-    matches = []
+    """The registry device at this address: its tailscale_ip first, then one of
+    the addresses its metadata records. Deterministic on duplicates: Android
+    rows first, then by id. (Who answers at the address is what WireGuard
+    proves; the row only says whose device it is. Nothing here decides that a
+    caller is the phone that holds an operator's history; source_ip() does.)"""
+    exact, listed = [], []
     for d in _registry().get_all_devices():
-        known = {d.tailscale_ip} | set((d.metadata or {}).get("tailnet_ips") or [])
-        if ip in known:
-            matches.append(d)
-    matches.sort(key=lambda d: (d.device_type.value != "android", d.id))
-    return matches[0] if matches else None
+        if d.tailscale_ip == ip:
+            exact.append(d)
+        elif ip in set((d.metadata or {}).get("tailnet_ips") or []):
+            listed.append(d)
+    for matches in (exact, listed):
+        if matches:
+            matches.sort(key=lambda d: (d.device_type.value != "android", d.id))
+            return matches[0]
+    return None
+
+
+def source_ip(record: Optional[dict]) -> Optional[str]:
+    """The tailnet address the operator's stored history is bound to: where
+    the last successful bind (or approved replacement) reached. Never taken
+    from the registry, which any peer can rewrite."""
+    if not record:
+        return None
+    src = record.get("last_source") or {}
+    if src.get("tailnet_ip"):
+        return src["tailnet_ip"]
+    if record.get("enrollment_id") and record.get("state") in STORED_LIVE:
+        return record.get("tailnet_ip")
+    return None
 
 
 def _is_ip(text) -> bool:
@@ -305,33 +357,53 @@ def pairing_headers(ip: str) -> Optional[Dict[str, str]]:
     return {"Authorization": f"Bearer {secret}"} if secret else None
 
 
+def _exchange(ip: str, method: str, path: str, body: Optional[dict],
+              headers: Dict[str, str], deadline_s: float) -> Optional[int]:
+    """One HTTP exchange with the phone's listener, bounded by a TOTAL
+    deadline. A socket timeout alone bounds each read, so a listener that
+    sends its answer a byte at a time could hold the caller indefinitely;
+    here the exchange runs in a worker and is cut off at the deadline.
+    http.client never uses an environment proxy and never follows a
+    redirect. Returns the status, or None (no answer in time). Never logs."""
+    host, port = phone_address(ip)
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    hdrs = dict(headers)
+    if data is not None:
+        hdrs["Content-Type"] = "application/json"
+    conn = http.client.HTTPConnection(host, port, timeout=deadline_s)
+    out: Dict[str, int] = {}
+
+    def run() -> None:
+        try:
+            conn.request(method, path, body=data, headers=hdrs)
+            out["status"] = conn.getresponse().status
+        except (OSError, http.client.HTTPException, ValueError):
+            pass
+
+    worker = threading.Thread(target=run, name="wellness-phone-call", daemon=True)
+    worker.start()
+    worker.join(deadline_s)
+    if worker.is_alive():
+        sock = conn.sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+        conn.close()
+        worker.join(1.0)
+        return None
+    conn.close()
+    return out.get("status")
+
+
 def call_phone(ip: str, method: str, path: str, body: Optional[dict], *,
                timeout: float) -> Optional[int]:
-    """One call to the phone's :8765 listener with its pairing bearer. Returns
-    the HTTP status, or None when it could not be reached. Never logs a body."""
+    """One call to the phone's :8765 listener with its pairing bearer, within
+    `timeout` seconds in total. Returns the HTTP status, or None when it never
+    paired or could not be reached in time. Never logs a body."""
     headers = pairing_headers(ip)
     if headers is None:
         return None
-    host, port = phone_address(ip)
-    netloc = f"[{host}]" if ":" in host else host
-    data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(f"http://{netloc}:{port}{path}", data=data, method=method,
-                                 headers={**headers, "Content-Type": "application/json"})
-    # Straight to the phone: never through an environment HTTP proxy, never
-    # following a redirect anywhere else.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-    try:
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):  # never follow a phone's redirect anywhere
-        return None
+    return _exchange(ip, method, path, body, headers, timeout)
 
 
 def send_device_notice(operator: str, device_id: str, ip: str, title: str, body: str) -> None:
@@ -386,9 +458,13 @@ def troubles_for(record: dict, now_ms: Optional[int] = None) -> List[dict]:
             record.get("last_push_at") or record.get("created_at"), now_ms):
         codes.append("stale_sync")
     st = store_for(record, create=False)
+    days = {}
     if st is not None:
         today = iso(now_ms)[:10]
-        days = st.coverage_days(store.add_days(today, -14), today)
+        try:
+            days = st.coverage_days(store.add_days(today, -14), today)
+        except store.StoreGone:
+            days = {}
         if days:
             latest = days[max(days)]
             if latest.get("hr_mode") == coverage.MODE_MANUAL:
@@ -406,12 +482,24 @@ def troubles_for(record: dict, now_ms: Optional[int] = None) -> List[dict]:
 
 
 def store_for(record: Optional[dict], create: bool = True) -> Optional[store.Store]:
+    """The record's store. create=False never makes one: None when it is not
+    there (erased, or no phone ever bound)."""
     key = (record or {}).get("op_key")
     if not paths.valid_op_key(key):
         return None
-    if not create and not paths.db_path(key).exists():
+    try:
+        return store.open_store(key, create=create)
+    except store.StoreGone:
         return None
-    return store.open_store(key)
+
+
+def referenced_op_keys() -> set:
+    """Every store file name an enrollment points at (attached or detached)."""
+    keys = set()
+    for rec in all_enrollments().values():
+        keys.add(rec.get("op_key"))
+        keys.update(rec.get("detached_op_keys") or [])
+    return {k for k in keys if paths.valid_op_key(k)}
 
 
 # ------------------------------------------------------------------ select (Portal)
@@ -424,11 +512,10 @@ def select(operator: str, device_id: str, *, now_ms: Optional[int] = None) -> di
     dev = _registry().get_device(device_id)
     if dev is None:
         raise EnrollError(404, "unknown_device")
-    if (dev.owner or "").strip() != operator:
+    if not same_operator(dev.owner, operator):
         raise EnrollError(403, "not_owner")
     if dev.device_type.value != "android":
-        raise EnrollError(422, "not_android",
-                          fix="Health tracking needs the BlackBox Android app with Health Connect")
+        raise EnrollError(422, "not_android", fix=NOT_ANDROID_FIX)
     with _ENROLL_LOCK:
         for op, rec in all_enrollments().items():
             if op != operator and rec.get("device_id") == device_id and \
@@ -440,6 +527,8 @@ def select(operator: str, device_id: str, *, now_ms: Optional[int] = None) -> di
                 raise EnrollError(409, "already_enrolled")
             base = rec or {"operator": operator, "op_key": store.new_op_key(),
                            "created_at": iso(now_ms)}
+            # device_id / tailnet_ip say which row the Portal badge marks; the
+            # history stays bound to last_source, which select never changes.
             base.update({"operator": operator, "state": "awaiting_phone", "device_id": device_id,
                          "tailnet_ip": dev.tailscale_ip, "updated_at": iso(now_ms)})
             data[operator] = _normalize(base)
@@ -466,10 +555,48 @@ def _expire_pending(rec: dict, now_ms: int) -> dict:
 
 
 def _probe(ip: Optional[str]) -> bool:
+    """Is the phone at `ip` up? GET /healthz needs no pairing on the phone, so
+    none is sent (a deleted pairing row must never make a phone look
+    offline). Any HTTP answer is "up"; only no answer in time is "down"."""
     if not ip:
         return False
-    status = call_phone(ip, "GET", "/healthz", None, timeout=REPLACE_PROBE_TIMEOUT_S)
-    return status is not None and 200 <= status < 300
+    return _exchange(ip, "GET", "/healthz", None, {}, REPLACE_PROBE_TIMEOUT_S) is not None
+
+
+def _retire(enr: Optional[str], reason: str, now_ms: int) -> None:
+    """Revoke a superseded enrollment id unless that already happened."""
+    if enr and (key_for(enr) is not None or tombstone_reason(enr) is None):
+        revoke_key(enr, reason, now_ms)
+
+
+def _fingerprint(rec: Optional[dict]) -> tuple:
+    """What an enroll decided on; anything else may change while it talks to
+    the phone (a push, a capability report)."""
+    rec = rec or {}
+    return (rec.get("enrollment_id"), rec.get("epoch"), rec.get("state"), rec.get("op_key"),
+            (rec.get("pending") or {}).get("enrollment_id"), source_ip(rec))
+
+
+def _in_use_elsewhere(operator: str, dev_id: str, ip: str) -> bool:
+    """E2: the device (by registry id, or by the address a bind reached) is
+    another operator's live source."""
+    for op, rec in all_enrollments().items():
+        if op != operator and rec.get("state") in STORED_LIVE and \
+                (rec.get("device_id") == dev_id or source_ip(rec) == ip):
+            return True
+    return False
+
+
+def _plan_mode(existing: Optional[dict], ip: str, replace: bool) -> str:
+    """new | same | replace | fresh (see the module docstring)."""
+    if not existing or not (existing.get("enrollment_id") or existing.get("last_source")):
+        return "new"
+    live = existing.get("state") in STORED_LIVE
+    if live and not replace:
+        raise EnrollError(409, "already_enrolled")
+    if source_ip(existing) == ip:
+        return "same"
+    return "replace" if live else "fresh"
 
 
 def enroll(body: schema.EnrollBody, ip: Optional[str], *,
@@ -487,8 +614,10 @@ def enroll(body: schema.EnrollBody, ip: Optional[str], *,
     dev = resolve_device_by_ip(ip)
     if dev is None:
         raise EnrollError(404, "unknown_device", fix=UNKNOWN_DEVICE_FIX)
+    if dev.device_type.value != "android":
+        raise EnrollError(422, "not_android", fix=NOT_ANDROID_FIX)
     owner = (dev.owner or "").strip()
-    if owner and owner != operator:
+    if owner and not same_operator(owner, operator):
         raise EnrollError(409, "owner_mismatch",
                           detail="This phone is assigned to someone else in Devices")
     if not owner and not body.assign_to_me:
@@ -496,32 +625,31 @@ def enroll(body: schema.EnrollBody, ip: Optional[str], *,
                           detail="This phone is not assigned to anyone yet; tick "
                                  "\"Assign this phone to me\"")
     report = body.capability_report.model_dump() if body.capability_report else None
-    # Probe a replaced phone (up to 30 s) before taking the lock, so a replace
-    # never holds up anyone else's enrollment, pause or settings change.
-    before = get_enrollment(operator) or {}
-    old_online = None
-    if body.replace and before.get("state") in STORED_LIVE and before.get("device_id") != dev.id:
-        old_online = _probe(before.get("tailnet_ip"))
+
+    # 1. Check and reserve (local work only, under the lock).
     with _ENROLL_LOCK:
+        if operator in _INFLIGHT:
+            raise EnrollError(409, "enroll_in_progress", retry_after=RETRY_IN_PROGRESS_S)
         existing = get_enrollment(operator)
         if existing:
             existing = _expire_pending(existing, now_ms)
-        live = existing and existing.get("state") in STORED_LIVE
-        if live and not body.replace:
-            raise EnrollError(409, "already_enrolled")
-        for op, rec in all_enrollments().items():
-            if op != operator and rec.get("device_id") == dev.id and \
-                    rec.get("state") in STORED_LIVE:
-                raise EnrollError(409, "device_in_use")
+        mode = _plan_mode(existing, ip, body.replace)
+        if _in_use_elsewhere(operator, dev.id, ip):
+            raise EnrollError(409, "device_in_use")
         if pairing_headers(ip) is None:
             raise EnrollError(424, "not_paired", fix=NOT_PAIRED_FIX)
-        same_device = bool(live and existing.get("device_id") == dev.id)
-        if live and not same_device and old_online is None:
-            old_online = _probe(existing.get("tailnet_ip"))   # the source changed meanwhile
-        pending = bool(live and not same_device and old_online)
+        token = secrets.token_hex(8)
+        _INFLIGHT[operator] = token
+        seen = _fingerprint(existing)
+    notices: List[tuple] = []
+    try:
+        # 2. Talk to the phones (no lock held; each call has a total deadline).
+        if mode == "replace":
+            mode = "pending" if _probe(source_ip(existing)) else "moved"
         epoch = int((existing or {}).get("epoch") or 0) + 1
-        if pending and (existing.get("pending") or {}).get("epoch"):
-            epoch = max(epoch, int(existing["pending"]["epoch"]) + 1)
+        prior_pending = (existing or {}).get("pending") or {}
+        if prior_pending.get("epoch"):
+            epoch = max(epoch, int(prior_pending["epoch"]) + 1)
         enr = "en_" + secrets.token_hex(4)
         key = origin_proof.new_key()
         status = call_phone(ip, "POST", "/wellness/bind",
@@ -531,61 +659,117 @@ def enroll(body: schema.EnrollBody, ip: Optional[str], *,
         if status != 200:
             logger.info("[WELLNESS] enroll: bind failed (status=%s)", status)
             raise EnrollError(502, "bind_failed")
-        # ---- the phone holds K: persist
-        if not owner:
-            _registry().update_device(dev.id, owner=operator, is_primary=False)
-        store_key(enr, key, epoch, now_ms)
-        label = source_label(report) or dev.name
-        categories = dict(catalog.DEFAULT_CONSENT)
-        categories.update((existing or {}).get("categories") or {})
-        if body.categories:
-            categories.update(body.categories)
-        with editing() as data:
-            rec = dict(data.get(operator) or {"operator": operator,
-                                              "op_key": store.new_op_key(),
-                                              "created_at": iso(now_ms)})
-            if pending:
-                rec["pending"] = {"enrollment_id": enr, "epoch": epoch, "device_id": dev.id,
-                                  "tailnet_ip": ip, "install_id": body.install_id,
-                                  "source_label": label, "categories": categories,
-                                  "created_at": iso(now_ms),
-                                  "expires_at_ms": now_ms + REPLACE_PENDING_TTL_S * 1000}
-            else:
-                rec.update({"enrollment_id": enr, "epoch": epoch, "state": "active",
-                            "device_id": dev.id, "tailnet_ip": ip,
-                            "install_id": body.install_id, "categories": categories,
-                            "source_label": label, "pending": None, "last_push_at": None,
-                            "created_at": rec.get("created_at") or iso(now_ms),
-                            "policy_version": catalog.POLICY_VERSION})
-            rec["updated_at"] = iso(now_ms)
-            if not paths.valid_op_key(rec.get("op_key")):
-                rec["op_key"] = store.new_op_key()
-            data[operator] = _normalize(rec)
-            final = data[operator]
-        if not pending:
-            if existing and existing.get("enrollment_id") and live:
-                reason = "revoked" if same_device else "source_moved"
-                revoke_key(existing["enrollment_id"], reason, now_ms)
-                if not same_device:
-                    send_device_notice(operator, existing.get("device_id") or "",
-                                       existing.get("tailnet_ip") or "", *NOTICE_MOVED)
-        else:
-            send_device_notice(operator, existing.get("device_id") or "",
-                               existing.get("tailnet_ip") or "", *NOTICE_REPLACE_ASK)
-    st = store_for(final)
-    with st.write() as conn:
-        st.record_epoch(conn, epoch, enr, dev.id, (report or {}).get("phone", {}).get("model"),
-                        now_ms)
-    st.consent_event(at=now_ms, change={"enroll": {"categories": categories,
-                                                   "replace": bool(body.replace)}},
-                     surface="android", policy_version=catalog.POLICY_VERSION)
-    if report:
+        # 3. Re-check and persist (local work only, under the lock).
+        with _ENROLL_LOCK:
+            current = get_enrollment(operator)
+            if _fingerprint(current) != seen:
+                raise EnrollError(409, "enroll_conflict",
+                                  detail="Health changed while this phone was being set up; "
+                                         "try again")
+            if _in_use_elsewhere(operator, dev.id, ip):
+                raise EnrollError(409, "device_in_use")
+            fresh_dev = _registry().get_device(dev.id)
+            now_owner = (fresh_dev.owner or "").strip() if fresh_dev is not None else ""
+            if (now_owner and not same_operator(now_owner, operator)) or \
+                    (not now_owner and not body.assign_to_me):
+                raise EnrollError(409, "owner_mismatch",
+                                  detail="This phone's owner changed in Devices while it was "
+                                         "being set up; try again")
+            # ---- the phone holds K: persist
+            if not now_owner:
+                _registry().update_device(dev.id, owner=operator, is_primary=False)
+            store_key(enr, key, epoch, now_ms)
+            final = _persist(operator, current, mode, dev, ip, body, report, enr, epoch, now_ms)
+            notices = _retire_superseded(operator, current, mode, enr, now_ms)
+            # The store exists before the lock is let go, so an erase can
+            # never interleave with its creation.
+            st = store.open_store(final["op_key"])
+            with st.write() as conn:
+                st.record_epoch(conn, epoch, enr, dev.id,
+                                (report or {}).get("phone", {}).get("model"), now_ms)
+    finally:
+        with _ENROLL_LOCK:
+            if _INFLIGHT.get(operator) == token:
+                del _INFLIGHT[operator]
+    for args in notices:
+        send_device_notice(operator, *args)
+    _consent(final, {"enroll": {"categories": final["categories"] if mode != "pending"
+                                else final["pending"]["categories"],
+                                "replace": bool(body.replace)}}, "android", now_ms)
+    if report and mode != "pending":
         record_capabilities(operator, report, now_ms=now_ms, record=final)
+    pending = mode == "pending"
     logger.info("[WELLNESS] enroll: %s epoch=%d", "replace_pending" if pending else "active",
                 epoch)
     return {"enrollment_id": enr, "epoch": epoch,
             "state": "replace_pending" if pending else "active", "op_key_hint": None,
             "sync_interval_min": SYNC_INTERVAL_MIN, "policy_version": catalog.POLICY_VERSION}
+
+
+def _persist(operator: str, current: Optional[dict], mode: str, dev, ip: str,
+             body: schema.EnrollBody, report: Optional[dict], enr: str, epoch: int,
+             now_ms: int) -> dict:
+    label = source_label(report) or dev.name
+    categories = dict(catalog.DEFAULT_CONSENT)
+    categories.update((current or {}).get("categories") or {})
+    if body.categories:
+        categories.update(body.categories)
+    with editing() as data:
+        rec = dict(data.get(operator) or {"operator": operator,
+                                          "op_key": store.new_op_key(),
+                                          "created_at": iso(now_ms)})
+        if mode == "pending":
+            rec["pending"] = {"enrollment_id": enr, "epoch": epoch, "device_id": dev.id,
+                              "tailnet_ip": ip, "install_id": body.install_id,
+                              "source_label": label, "categories": categories,
+                              "capabilities": report, "created_at": iso(now_ms),
+                              "expires_at_ms": now_ms + REPLACE_PENDING_TTL_S * 1000}
+        else:
+            if mode == "fresh":
+                # A different phone, and no live key left to approve the move:
+                # it starts empty, and the kept history stays detached.
+                old = rec.get("op_key")
+                if paths.valid_op_key(old) and paths.db_path(old).exists():
+                    rec["detached_op_keys"] = sorted(set(rec.get("detached_op_keys") or [])
+                                                     | {old})
+                rec["op_key"] = store.new_op_key()
+            rec.update({"enrollment_id": enr, "epoch": epoch, "state": "active",
+                        "device_id": dev.id, "tailnet_ip": ip,
+                        "install_id": body.install_id, "categories": categories,
+                        "source_label": label, "pending": None, "last_push_at": None,
+                        "phone_troubles": [],
+                        "last_source": {"device_id": dev.id, "tailnet_ip": ip, "epoch": epoch,
+                                        "at": iso(now_ms)},
+                        "created_at": rec.get("created_at") or iso(now_ms),
+                        "policy_version": catalog.POLICY_VERSION})
+        rec["updated_at"] = iso(now_ms)
+        if not paths.valid_op_key(rec.get("op_key")):
+            rec["op_key"] = store.new_op_key()
+        data[operator] = _normalize(rec)
+        return dict(data[operator])
+
+
+def _retire_superseded(operator: str, current: Optional[dict], mode: str, enr: str,
+                       now_ms: int) -> List[tuple]:
+    """Revoke every enrollment id this enroll replaced (whatever state the
+    record was in), and say which notices to send: (device_id, ip, title, body)."""
+    cur = current or {}
+    old_enr = cur.get("enrollment_id")
+    old_pending = (cur.get("pending") or {}).get("enrollment_id")
+    src = cur.get("last_source") or {}
+    old_dev = src.get("device_id") or cur.get("device_id") or ""
+    old_ip = source_ip(cur) or ""
+    notices = []
+    if old_pending and old_pending != enr:
+        _retire(old_pending, "revoked", now_ms)
+    if mode == "pending":
+        notices.append((old_dev, old_ip, *NOTICE_REPLACE_ASK))
+        return notices
+    if old_enr and old_enr != enr:
+        _retire(old_enr, "revoked" if mode == "same" else "source_moved", now_ms)
+    if mode in ("moved", "fresh") and old_ip:
+        notices.append((old_dev, old_ip, *NOTICE_MOVED))
+    return notices
 
 
 def approve_replace(operator: str, approve: bool, *, now_ms: Optional[int] = None) -> dict:
@@ -606,17 +790,24 @@ def approve_replace(operator: str, approve: bool, *, now_ms: Optional[int] = Non
                             "tailnet_ip": pend["tailnet_ip"], "install_id": pend["install_id"],
                             "source_label": pend.get("source_label"),
                             "categories": pend.get("categories") or cur.get("categories"),
-                            "last_push_at": None})
+                            "last_push_at": None, "phone_troubles": [],
+                            "last_source": {"device_id": pend["device_id"],
+                                            "tailnet_ip": pend["tailnet_ip"],
+                                            "epoch": pend["epoch"], "at": iso(now_ms)}})
             cur["pending"] = None
             cur["updated_at"] = iso(now_ms)
             data[operator] = _normalize(cur)
+            final = dict(data[operator])
         if approve:
             revoke_key(old_enr, "source_moved", now_ms)
-            st = store_for(rec)
-            with st.write() as conn:
-                st.end_epoch(conn, int(old_epoch or 0), now_ms)
+            st = store_for(rec, create=False)
+            if st is not None:
+                with contextlib.suppress(store.StoreGone), st.write() as conn:
+                    st.end_epoch(conn, int(old_epoch or 0), now_ms)
         else:
             revoke_key(pend["enrollment_id"], "revoked", now_ms)
+    if approve and pend.get("capabilities"):
+        record_capabilities(operator, pend["capabilities"], now_ms=now_ms, record=final)
     return {"state": "active"}
 
 
@@ -661,7 +852,7 @@ def verify_signed_request(header, method: str, path: str, body: bytes, *,
         if (rec.get("pending") or {}).get("expires_at_ms", 0) < now_ms:
             raise EnrollError(410, "revoked")
         device_id = rec["pending"].get("device_id")
-    if device_owner(device_id) != operator:
+    if not same_operator(device_owner(device_id), operator):
         if which == "active":
             with editing() as data:
                 cur = dict(data.get(operator) or rec)
@@ -673,15 +864,30 @@ def verify_signed_request(header, method: str, path: str, body: bytes, *,
     return Signed(operator=operator, record=rec, which=which, enrollment_id=enr)
 
 
+def still_active(signed: Signed) -> bool:
+    """The enrollment a request was signed for is still the operator's live
+    source with the same store and key (asked again under the store's write
+    lock, so an erase or a revocation that raced the request wins)."""
+    rec = get_enrollment(signed.operator)
+    return bool(rec and rec.get("enrollment_id") == signed.enrollment_id
+                and rec.get("op_key") == (signed.record or {}).get("op_key")
+                and rec.get("state") in STORED_LIVE
+                and key_for(signed.enrollment_id) is not None)
+
+
 # ------------------------------------------------------------------ pushes and reports
 
 def note_push(operator: str, *, now_ms: Optional[int] = None) -> None:
+    """A batch arrived: the phone is reachable again, whatever a failed nudge
+    said."""
     now_ms = _now_ms(now_ms)
     with editing() as data:
         rec = data.get(operator)
         if rec:
             rec["last_push_at"] = iso(now_ms)
-            rec.pop("source_unreachable", None)
+            troubles = rec.get("phone_troubles") or []
+            if "source_unreachable" in troubles:
+                rec["phone_troubles"] = [t for t in troubles if t != "source_unreachable"]
 
 
 def record_capabilities(operator: str, report: dict, *, now_ms: Optional[int] = None,
@@ -692,7 +898,9 @@ def record_capabilities(operator: str, report: dict, *, now_ms: Optional[int] = 
     rec = record or get_enrollment(operator)
     if not rec:
         return
-    st = store_for(rec)
+    st = store_for(rec, create=False)
+    if st is None:
+        return
     granted = {g.split(".")[-1] for g in ((report.get("health_connect") or {}).get("granted")
                                           or []) if isinstance(g, str)}
     earliest = None
@@ -701,15 +909,18 @@ def record_capabilities(operator: str, report: dict, *, now_ms: Optional[int] = 
         created = (rec.get("created_at") or iso(now_ms))[:10]
         earliest = (date.fromisoformat(created) -
                     timedelta(days=HISTORY_DAYS_WITHOUT_GRANT)).isoformat()
-    with st.write() as conn:
-        st.meta_set("capabilities", report, conn=conn)
-        st.meta_set("capabilities_at", now_ms, conn=conn)
-        st.meta_set("earliest_available", earliest, conn=conn)
+    try:
+        with st.write() as conn:
+            st.meta_set("capabilities", report, conn=conn)
+            st.meta_set("capabilities_at", now_ms, conn=conn)
+            st.meta_set("earliest_available", earliest, conn=conn)
+    except store.StoreGone:
+        return
     troubles = coverage.phone_troubles(report, rec.get("categories") or {})
     label = source_label(report)
     with editing() as data:
         cur = data.get(operator)
-        if cur:
+        if cur and cur.get("op_key") == rec.get("op_key"):
             cur["phone_troubles"] = troubles
             if label:
                 cur["source_label"] = label
@@ -718,7 +929,10 @@ def record_capabilities(operator: str, report: dict, *, now_ms: Optional[int] = 
 
 def earliest_available(record: dict) -> Optional[str]:
     st = store_for(record, create=False)
-    return st.meta_get("earliest_available") if st is not None else None
+    try:
+        return st.meta_get("earliest_available") if st is not None else None
+    except store.StoreGone:
+        return None
 
 
 # ------------------------------------------------------------------ pause / resume / disconnect
@@ -766,7 +980,6 @@ def disconnect_keep_history(operator: str, *, surface: str = "any",
         rec = get_enrollment(operator)
         if not rec or rec.get("state") in ("revoked",):
             raise EnrollError(409, "not_enrolled")
-        unbind_phone(rec)
         revoke_key(rec.get("enrollment_id"), "revoked", now_ms)
         if rec.get("pending"):
             revoke_key(rec["pending"].get("enrollment_id"), "revoked", now_ms)
@@ -774,6 +987,9 @@ def disconnect_keep_history(operator: str, *, surface: str = "any",
             cur = dict(data.get(operator) or rec)
             cur.update({"state": "revoked", "pending": None, "updated_at": iso(now_ms)})
             data[operator] = _normalize(cur)
+    # The key is already gone; telling the phone (5 s at most) happens with
+    # no lock held.
+    unbind_phone(rec)
     _consent(rec, {"disconnect": {"keep_history": True}}, surface, now_ms)
     return {"state": "revoked"}
 
@@ -808,8 +1024,9 @@ _RANK = {"off": 0, "ask": 1, "proactive": 2}
 def _consent(rec: dict, change: dict, surface: str, now_ms: int) -> None:
     st = store_for(rec, create=False)
     if st is not None:
-        st.consent_event(at=now_ms, change=change, surface=surface,
-                         policy_version=catalog.POLICY_VERSION)
+        with contextlib.suppress(store.StoreGone):
+            st.consent_event(at=now_ms, change=change, surface=surface,
+                             policy_version=catalog.POLICY_VERSION)
 
 
 def widening(rec: dict, body: schema.SettingsBody, providers: Optional[List[str]]) -> List[str]:
@@ -890,18 +1107,23 @@ def instinct_prompt(operator: str) -> str:
     return rec.get("instinct_prompt") or catalog.DEFAULT_INSTINCT_PROMPT
 
 
-def mesh_health(operator: Optional[str]) -> Optional[Tuple[str, str]]:
-    """(device_id, state) of `operator`'s own health source, for the Devices
-    view's owner-only badge, or None (rule W17: never about anyone else)."""
+def mesh_health(operator: Optional[str]) -> Optional[Tuple[str, str, bool]]:
+    """(device_id, state, is_source) of `operator`'s own health device, for the
+    Devices view's owner-only badge, or None (rule W17: never about anyone
+    else). With the kill switch off the state reads "disabled"."""
     if not operator:
         return None
     try:
         rec = get_enrollment(operator)
+        if not rec or not rec.get("device_id"):
+            return None
+        state = effective_state(rec)
+        if state in ("revoked", "not_set_up"):
+            return None
+        source = state in LIVE_STATES
+        from Orchestrator import config
+        if not config.wellness_enabled():
+            state = "disabled"
     except Exception:  # noqa: BLE001 - the Devices view never fails over health
         return None
-    if not rec or not rec.get("device_id"):
-        return None
-    state = effective_state(rec)
-    if state in ("revoked", "not_set_up"):
-        return None
-    return rec["device_id"], state
+    return rec["device_id"], state, source

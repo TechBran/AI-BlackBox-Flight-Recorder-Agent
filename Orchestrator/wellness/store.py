@@ -19,6 +19,10 @@ Writers hold the operator's write lock (one RLock per op_key, shared by every
 Store object of that operator) and one BEGIN IMMEDIATE transaction. Every
 connection is opened per operation and closed after it, so nothing holds the
 file when erase unlinks it.
+
+Only open_store(op_key) (create=True) ever creates the file. Every connection
+opens it with SQLite's mode=rw, so a store that erase unlinked is never
+brought back by a late writer or reader: they get StoreGone instead.
 """
 from __future__ import annotations
 
@@ -169,7 +173,6 @@ def delete_store_files(op_key: str) -> List[str]:
     """Unlink the operator's DB and its sidecars. Returns what was removed."""
     db = paths.db_path(op_key)
     removed = []
-    _INITIALIZED.discard(str(db))
     with write_lock(op_key):
         for p in (db, *(db.with_name(db.name + s) for s in SIDECARS)):
             try:
@@ -177,6 +180,7 @@ def delete_store_files(op_key: str) -> List[str]:
                 removed.append(str(p))
             except FileNotFoundError:
                 pass
+        _INITIALIZED.discard(str(db))
     return removed
 
 
@@ -206,6 +210,19 @@ def secure_all() -> Dict[str, int]:
     return {"dirs": 1, "dbs": dbs, "files": files}
 
 
+def unreferenced_dbs() -> List[str]:
+    """op_keys of store files in data/wellness/ that no enrollment points at
+    (attached or detached). Boot reports them; nothing deletes them blindly,
+    since an unreadable enrollments.json would make every store look so."""
+    from Orchestrator.wellness import enroll
+    d = paths.data_dir()
+    if not d.is_dir():
+        return []
+    known = enroll.referenced_op_keys()
+    return sorted(p.stem for p in d.iterdir()
+                  if p.is_file() and p.suffix == ".db" and p.stem not in known)
+
+
 def _dumps(value) -> Optional[str]:
     if value is None:
         return None
@@ -223,6 +240,10 @@ def _loads(text):
 
 # ------------------------------------------------------------------ store
 
+class StoreGone(Exception):
+    """The operator's store file is not there (erased, or never created)."""
+
+
 class Store:
     """One operator's store. Cheap to construct; holds no open connection."""
 
@@ -233,21 +254,43 @@ class Store:
     # -- connections ---------------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        # mode=rw: SQLite may add the -wal/-shm sidecars but never creates the
+        # database itself, so a connection after erase fails instead of
+        # quietly starting an orphan store.
+        if not self.path.exists():
+            raise StoreGone(self.op_key)
+        try:
+            conn = sqlite3.connect(Path(self.path).absolute().as_uri() + "?mode=rw", uri=True,
+                                   timeout=30, isolation_level=None)
+        except sqlite3.OperationalError:
+            if not self.path.exists():
+                raise StoreGone(self.op_key) from None
+            raise
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.OperationalError:
+            conn.close()
+            if not self.path.exists():
+                raise StoreGone(self.op_key) from None
+            raise
         return conn
 
-    def init(self) -> "Store":
+    def init(self, create: bool = True) -> "Store":
+        """Apply the schema (idempotent). create=False never makes the file:
+        a missing store raises StoreGone."""
         from Orchestrator.migrations.tasks_db_location import secure_db_files
         key = str(self.path)
         if key in _INITIALIZED and self.path.exists():
             return self
+        if not create and not self.path.exists():
+            raise StoreGone(self.op_key)
         paths.ensure_private_dir()
         with write_lock(self.op_key):
-            _create_private(self.path)
+            if create:
+                _create_private(self.path)
             conn = self._connect()
             try:
                 conn.executescript(DDL)
@@ -471,12 +514,15 @@ class Store:
         return _effective(rows, offsets, "ts")
 
     def data_span(self, conn=None) -> Optional[Tuple[str, str]]:
-        """(first, last) local day holding any bucket, session or reading."""
+        """(first, last) local day holding any bucket, session or reading that
+        is not flagged implausible (one bogus multi-year record must not
+        stretch the span every coverage row is back-filled over)."""
         def load(c):
             lo, hi = None, None
-            for sql in ("SELECT MIN(ts), MAX(ts) FROM bucket",
-                        "SELECT MIN(start_ts), MAX(end_ts) FROM session",
-                        "SELECT MIN(ts), MAX(ts) FROM reading"):
+            for sql in ("SELECT MIN(ts), MAX(ts) FROM bucket WHERE COALESCE(flags, 0)=0",
+                        "SELECT MIN(start_ts), MAX(end_ts) FROM session "
+                        "WHERE COALESCE(json_extract(attrs, '$.flags'), 0)=0",
+                        "SELECT MIN(ts), MAX(ts) FROM reading WHERE COALESCE(flags, 0)=0"):
                 a, b = c.execute(sql).fetchone()
                 if a is not None:
                     lo = a if lo is None else min(lo, a)
@@ -705,6 +751,7 @@ def _effective(rows: List[dict], offsets: Offsets, ts_key: str, key: str = "metr
     return [r for r, day in zip(rows, days) if r["epoch"] == best[(day, r.get(key))]]
 
 
-def open_store(op_key: str) -> Store:
-    """The operator's store, created (0600, schema applied) on first use."""
-    return Store(op_key).init()
+def open_store(op_key: str, create: bool = True) -> Store:
+    """The operator's store, created (0600, schema applied) on first use, or
+    with create=False only if it exists (else StoreGone)."""
+    return Store(op_key).init(create=create)

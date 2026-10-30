@@ -140,3 +140,31 @@ def test_allow_list_validation_and_rows(servers):
         dst.ensure_known(["custom:nowhere"])
     rows = {r["id"]: r for r in dst.rows()}
     assert rows["custom:lan"]["class"] == dst.LOCAL and rows["google"]["terms"]
+
+
+@pytest.mark.parametrize("url", [
+    "http://evil.example\\@10.0.0.5:8080/v1",        # urllib3: evil.example; httpx: 10.0.0.5
+    "http://10.0.0.5\\@evil.example/v1",
+    "http://user@10.0.0.5:8080/v1",                   # userinfo
+    "http://10.0.0.5:8080@evil.example/v1",
+    "http://10.0.0.5 /v1",
+    "http://10.0.0.5\t:8080/v1",
+])
+def test_an_ambiguous_base_url_is_never_local(servers, url):
+    """The box's clients disagree on odd authorities, so the class must not
+    rest on one parser: such a server is cloud (needs a tick, never gets a
+    local-only category)."""
+    servers("odd", url)
+    d = dst.destination("custom:odd", resolver=_resolver({}))
+    assert d.cls == dst.CLOUD and d.reason == "ambiguous_url"
+    enrollment = dict(ENR, providers_allowed=[])
+    assert dst.allowed("custom:odd", "blood_pressure", enrollment,
+                       resolver=_resolver({})) == (False, "local_only")
+
+
+def test_plain_urls_have_one_dial_target():
+    assert dst.dial_target("http://10.0.0.5:8080/v1") == ("10.0.0.5", 8080)
+    assert dst.dial_target("http://[fd7a:115c:a1e0::5]:9098/v1") == ("fd7a:115c:a1e0::5", 9098)
+    assert dst.dial_target("https://LanBox.local/v1") == ("lanbox.local", None)
+    assert dst.dial_target("ftp://10.0.0.5/") is None
+    assert dst.dial_target("") is None and dst.dial_target(None) is None

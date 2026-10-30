@@ -22,7 +22,7 @@ import json
 import logging
 import time
 import zlib
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 from pydantic import ValidationError
 
@@ -168,8 +168,15 @@ def _reading_flag(metric: str, v: float, v2: Optional[float]) -> int:
 
 def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, epoch: int,
                   now_ms: int, device_id: Optional[str] = None, model: Optional[str] = None,
-                  earliest_available: Optional[str] = None) -> IngestResult:
-    """Store one validated batch and recompute what it touched."""
+                  earliest_available: Optional[str] = None,
+                  still_enrolled: Optional[Callable[[], bool]] = None) -> IngestResult:
+    """Store one validated batch and recompute what it touched.
+
+    `still_enrolled` is asked under the operator's write lock, before
+    anything is written: a batch whose signature was checked before an erase
+    or a revocation must not land after it (410 revoked). Erase unlinks the
+    store under that same lock, and a store that is gone raises StoreGone,
+    which is answered the same way; nothing ever re-creates it."""
     t0 = time.monotonic()
     if batch.enrollment_id != enrollment_id:
         raise IngestError(422, "invalid", "enrollment_id does not match the signature")
@@ -185,163 +192,172 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
     future = now_ms + FUTURE_SLACK_MS
     dirty: Set[str] = set()
     with store_mod.write_lock(st.op_key):
-        with st.write() as conn:
-            if st.has_batch(conn, batch.batch_id):
-                res.duplicate = True
-            else:
-                st.record_epoch(conn, epoch, enrollment_id, device_id, model, now_ms)
-                offsets = st.offsets(conn)
-                ids = {}
-                for o in batch.origins:
-                    ids[o.key] = st.ensure_origin(conn, o.model_dump(), now=now_ms)
+        if still_enrolled is not None and not still_enrolled():
+            raise IngestError(410, "revoked")
+        try:
+            with st.write() as conn:
+                if st.has_batch(conn, batch.batch_id):
+                    res.duplicate = True
+                else:
+                    st.record_epoch(conn, epoch, enrollment_id, device_id, model, now_ms)
+                    offsets = st.offsets(conn)
+                    ids = {}
+                    for o in batch.origins:
+                        ids[o.key] = st.ensure_origin(conn, o.model_dump(), now=now_ms)
 
-                def origin_id(key: str) -> Optional[int]:
-                    if key == HC_MERGED:
-                        if HC_MERGED not in ids:
-                            ids[HC_MERGED] = st.ensure_origin(conn, {"package": HC_MERGED},
-                                                              now=now_ms)
-                        return ids[HC_MERGED]
-                    return ids.get(key)
+                    def origin_id(key: str) -> Optional[int]:
+                        if key == HC_MERGED:
+                            if HC_MERGED not in ids:
+                                ids[HC_MERGED] = st.ensure_origin(conn, {"package": HC_MERGED},
+                                                                  now=now_ms)
+                            return ids[HC_MERGED]
+                        return ids.get(key)
 
-                def note_offset(day: str, off: Optional[int]):
-                    if off is not None and offsets.by_day.get(day) != off:
-                        st.set_day_offset(conn, day, off)
-                        offsets.set(day, off)
+                    def note_offset(day: str, off: Optional[int]):
+                        if off is not None and offsets.by_day.get(day) != off:
+                            st.set_day_offset(conn, day, off)
+                            offsets.set(day, off)
 
-                # ---- buckets
-                for g in batch.buckets:
-                    kind = catalog.BUCKET_METRICS.get(g.metric)
-                    if kind is None:
-                        drop("unknown_metric", len(g.rows))
-                        continue
-                    if (kind == "hr") != (g.grain in ("1min", "5min")):
-                        drop("bad_grain", len(g.rows))
-                        continue
-                    oid = origin_id(g.origin)
-                    if oid is None:
-                        drop("unknown_origin", len(g.rows))
-                        continue
-                    want = 5 if kind == "hr" else 2
-                    rows, flags = [], []
-                    for row in g.rows:
-                        if len(row) != want:
-                            drop("bad_row")
+                    # ---- buckets
+                    for g in batch.buckets:
+                        kind = catalog.BUCKET_METRICS.get(g.metric)
+                        if kind is None:
+                            drop("unknown_metric", len(g.rows))
                             continue
-                        if row[0] > future:
+                        if (kind == "hr") != (g.grain in ("1min", "5min")):
+                            drop("bad_grain", len(g.rows))
+                            continue
+                        oid = origin_id(g.origin)
+                        if oid is None:
+                            drop("unknown_origin", len(g.rows))
+                            continue
+                        want = 5 if kind == "hr" else 2
+                        rows, flags = [], []
+                        for row in g.rows:
+                            if len(row) != want:
+                                drop("bad_row")
+                                continue
+                            if row[0] > future:
+                                drop("future")
+                                continue
+                            rows.append([int(row[0])] + list(row[1:]))
+                            flags.append(_bucket_flag(g.metric, g.grain, row))
+                        if g.replace_day:
+                            note_offset(g.replace_day, g.offset_s)
+                            off = g.offset_s if g.offset_s is not None else \
+                                offsets.for_day(g.replace_day)
+                            st.replace_bucket_day(conn, g.metric, g.grain, oid, epoch,
+                                                  g.replace_day, off, rows, flags)
+                            dirty.add(g.replace_day)
+                        else:
+                            st.upsert_buckets(conn, g.metric, g.grain, oid, epoch, rows, flags)
+                        days = {offsets.day_of(r[0]) for r in rows}
+                        if g.metric == "heart_rate":
+                            # A day's evening heart rate belongs to the night that
+                            # ends the next morning (rollups read 12 h back).
+                            days |= {add_days(d, 1) for d in days | (
+                                {g.replace_day} if g.replace_day else set())}
+                        dirty |= days
+                        res.accepted += len(rows)
+                        res.flagged += sum(flags)
+
+                    # ---- sessions
+                    for s in batch.sessions:
+                        oid = origin_id(s.origin)
+                        if oid is None:
+                            drop("unknown_origin")
+                            continue
+                        if s.end > future or s.start > future:
                             drop("future")
                             continue
-                        rows.append([int(row[0])] + list(row[1:]))
-                        flags.append(_bucket_flag(g.metric, g.grain, row))
-                    if g.replace_day:
-                        note_offset(g.replace_day, g.offset_s)
-                        off = g.offset_s if g.offset_s is not None else \
-                            offsets.for_day(g.replace_day)
-                        st.replace_bucket_day(conn, g.metric, g.grain, oid, epoch,
-                                              g.replace_day, off, rows, flags)
-                        dirty.add(g.replace_day)
-                    else:
-                        st.upsert_buckets(conn, g.metric, g.grain, oid, epoch, rows, flags)
-                    days = {offsets.day_of(r[0]) for r in rows}
-                    if g.metric == "heart_rate":
-                        # A day's evening heart rate belongs to the night that
-                        # ends the next morning (rollups read 12 h back).
-                        days |= {add_days(d, 1) for d in days | (
-                            {g.replace_day} if g.replace_day else set())}
-                    dirty |= days
-                    res.accepted += len(rows)
-                    res.flagged += sum(flags)
+                        flag = 0
+                        hours = (s.end - s.start) / 3_600_000
+                        if s.end <= s.start or hours > SESSION_MAX_H[s.kind]:
+                            flag = 1
+                        stages = []
+                        for a, b, code in s.stages or ():
+                            if b <= a or not 0 <= code <= 7 or b < s.start - 3_600_000 or \
+                                    a > s.end + 3_600_000:
+                                drop("bad_stage")
+                                continue
+                            stages.append((a, b, code))
+                        attrs = {}
+                        if s.kind == "exercise":
+                            code = s.exercise_type if s.exercise_type is not None else s.subtype
+                            attrs["type"] = catalog.exercise_type_name(code)
+                            if s.attrs is not None:
+                                attrs.update({k: v for k, v in s.attrs.model_dump().items()
+                                              if v is not None})
+                        if flag:
+                            attrs["flags"] = 1
+                        subtype = s.subtype if s.subtype is not None else (
+                            s.exercise_type if isinstance(s.exercise_type, int) else None)
+                        off = s.offset_s if s.offset_s is not None else offsets.for_day(
+                            local_day(s.end, offsets.latest()))
+                        end_day = local_day(s.end, off)
+                        note_offset(end_day, s.offset_s)
+                        st.upsert_session(conn, epoch, {
+                            "kind": s.kind, "hc_id": s.hc_id, "origin_id": oid, "start": s.start,
+                            "end": s.end, "offset_s": s.offset_s, "subtype": subtype,
+                            "attrs": attrs or None, "stages": stages,
+                            "last_modified": s.last_modified})
+                        if s.end > s.start and not flag:
+                            dirty.update(day_range(local_day(s.start, off), end_day))
+                        else:
+                            # A flagged session feeds no rollup: only its end day
+                            # is touched, however far back a bogus start reaches.
+                            dirty.add(end_day)
+                        res.accepted += 1
+                        res.flagged += flag
 
-                # ---- sessions
-                for s in batch.sessions:
-                    oid = origin_id(s.origin)
-                    if oid is None:
-                        drop("unknown_origin")
-                        continue
-                    if s.end > future or s.start > future:
-                        drop("future")
-                        continue
-                    flag = 0
-                    hours = (s.end - s.start) / 3_600_000
-                    if s.end <= s.start or hours > SESSION_MAX_H[s.kind]:
-                        flag = 1
-                    stages = []
-                    for a, b, code in s.stages or ():
-                        if b <= a or not 0 <= code <= 7 or b < s.start - 3_600_000 or \
-                                a > s.end + 3_600_000:
-                            drop("bad_stage")
+                    # ---- readings
+                    for r in batch.readings:
+                        if r.metric not in catalog.READING_METRICS:
+                            drop("unknown_metric")
                             continue
-                        stages.append((a, b, code))
-                    attrs = {}
-                    if s.kind == "exercise":
-                        code = s.exercise_type if s.exercise_type is not None else s.subtype
-                        attrs["type"] = catalog.exercise_type_name(code)
-                        if s.attrs is not None:
-                            attrs.update({k: v for k, v in s.attrs.model_dump().items()
-                                          if v is not None})
-                    if flag:
-                        attrs["flags"] = 1
-                    subtype = s.subtype if s.subtype is not None else (
-                        s.exercise_type if isinstance(s.exercise_type, int) else None)
-                    off = s.offset_s if s.offset_s is not None else offsets.for_day(
-                        local_day(s.end, offsets.latest()))
-                    end_day = local_day(s.end, off)
-                    note_offset(end_day, s.offset_s)
-                    st.upsert_session(conn, epoch, {
-                        "kind": s.kind, "hc_id": s.hc_id, "origin_id": oid, "start": s.start,
-                        "end": s.end, "offset_s": s.offset_s, "subtype": subtype,
-                        "attrs": attrs or None, "stages": stages,
-                        "last_modified": s.last_modified})
-                    if s.end > s.start:
-                        dirty.update(day_range(local_day(s.start, off), end_day))
-                    else:
-                        dirty.add(end_day)
-                    res.accepted += 1
-                    res.flagged += flag
+                        oid = origin_id(r.origin)
+                        if oid is None:
+                            drop("unknown_origin")
+                            continue
+                        if r.t > future:
+                            drop("future")
+                            continue
+                        flag = _reading_flag(r.metric, r.v, r.v2)
+                        off = r.offset_s if r.offset_s is not None else offsets.for_day(
+                            local_day(r.t, offsets.latest()))
+                        day = local_day(r.t, off)
+                        note_offset(day, r.offset_s)
+                        attrs = {k: v for k, v in (r.attrs.model_dump() if r.attrs else {}).items()
+                                 if v is not None}
+                        st.upsert_reading(conn, epoch, {
+                            "hc_id": r.hc_id, "metric": r.metric, "t": r.t, "offset_s": r.offset_s,
+                            "origin_id": oid, "v": r.v, "v2": r.v2, "attrs": attrs or None,
+                            "flags": flag, "last_modified": r.last_modified})
+                        dirty.add(day)
+                        res.accepted += 1
+                        res.flagged += flag
 
-                # ---- readings
-                for r in batch.readings:
-                    if r.metric not in catalog.READING_METRICS:
-                        drop("unknown_metric")
-                        continue
-                    oid = origin_id(r.origin)
-                    if oid is None:
-                        drop("unknown_origin")
-                        continue
-                    if r.t > future:
-                        drop("future")
-                        continue
-                    flag = _reading_flag(r.metric, r.v, r.v2)
-                    off = r.offset_s if r.offset_s is not None else offsets.for_day(
-                        local_day(r.t, offsets.latest()))
-                    day = local_day(r.t, off)
-                    note_offset(day, r.offset_s)
-                    attrs = {k: v for k, v in (r.attrs.model_dump() if r.attrs else {}).items()
-                             if v is not None}
-                    st.upsert_reading(conn, epoch, {
-                        "hc_id": r.hc_id, "metric": r.metric, "t": r.t, "offset_s": r.offset_s,
-                        "origin_id": oid, "v": r.v, "v2": r.v2, "attrs": attrs or None,
-                        "flags": flag, "last_modified": r.last_modified})
-                    dirty.add(day)
-                    res.accepted += 1
-                    res.flagged += flag
+                    # ---- deletions
+                    if batch.deleted_ids:
+                        dirty |= st.delete_hc_ids(conn, batch.deleted_ids)
+                        res.deleted = len(batch.deleted_ids)
 
-                # ---- deletions
-                if batch.deleted_ids:
-                    dirty |= st.delete_hc_ids(conn, batch.deleted_ids)
-                    res.deleted = len(batch.deleted_ids)
-
-                log_dropped = dict(dropped)
-                if res.flagged:
-                    log_dropped["flagged"] = res.flagged
-                st.log_batch(conn, batch.batch_id, now_ms, epoch, res.accepted, res.deleted,
-                             "ok", log_dropped or None)
-        if not res.duplicate and dirty:
-            rollups.recompute(st, dirty, now_ms=now_ms, earliest_available=earliest_available)
-        res.dirty_days = sorted(dirty)
-    notices = st.pending_notices(now=now_ms)
-    if notices:
-        st.mark_notices_delivered([n["id"] for n in notices], now=now_ms)
-    res.pending_notices = notices
+                    log_dropped = dict(dropped)
+                    if res.flagged:
+                        log_dropped["flagged"] = res.flagged
+                    st.log_batch(conn, batch.batch_id, now_ms, epoch, res.accepted, res.deleted,
+                                 "ok", log_dropped or None)
+            if not res.duplicate and dirty:
+                rollups.recompute(st, dirty, now_ms=now_ms, earliest_available=earliest_available)
+            res.dirty_days = sorted(dirty)
+            # Notices are read under the lock too, so an erase never finds
+            # this batch still reading the store it unlinks.
+            notices = st.pending_notices(now=now_ms)
+            if notices:
+                st.mark_notices_delivered([n["id"] for n in notices], now=now_ms)
+            res.pending_notices = notices
+        except store_mod.StoreGone:
+            raise IngestError(410, "revoked") from None
     res.ms = int((time.monotonic() - t0) * 1000)
     logger.info("[WELLNESS] ingest op=%s rows=%d flagged=%d dropped=%d deleted=%d days=%d%s ms=%d",
                 st.op_key[:4], res.accepted, res.flagged, res.dropped, res.deleted,

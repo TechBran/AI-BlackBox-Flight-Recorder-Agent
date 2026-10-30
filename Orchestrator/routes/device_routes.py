@@ -94,9 +94,9 @@ def _match_node_to_device(node: mesh.Node, registry) -> Optional[Device]:
 
 
 def _health_view(operator: Optional[str]):
-    """(operator, device_id, state) of the viewing operator's OWN health source,
-    or None. Read once per request; never raises (the Devices view must not
-    fail over health)."""
+    """(operator, device_id, state, is_source) of the viewing operator's OWN
+    health device, or None. Read once per request; never raises (the Devices
+    view must not fail over health)."""
     if not operator:
         return None
     try:
@@ -119,9 +119,7 @@ def _mesh_entry(node: Optional[mesh.Node], device: Optional[Device], health=None
         source, state = False, None
         if health is not None and (device.owner or "").lower() == health[0].lower() \
                 and device.id == health[1]:
-            from Orchestrator.wellness import enroll
-            state = health[2]
-            source = state in enroll.LIVE_STATES
+            state, source = health[2], bool(health[3])
         return {
             "id": device.id,
             "name": device.name,
