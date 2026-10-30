@@ -111,6 +111,9 @@ def _forms_of_number(x) -> Set[str]:
     out = {str(int(round(x))), f"{x:g}"}
     if not x.is_integer():
         out |= {f"{x:.1f}", f"{x:.2f}"}
+    elif 0 < x < 1000:
+        w = catalog.number_words(int(x))   # "1 min" is also "one minute"
+        out |= {w, w.replace("-", " ")}
     return out
 
 
@@ -121,6 +124,9 @@ def _strings_numbers(text: str) -> Set[str]:
         tok = m.group(0)
         if tok.strip("0.,"):
             out.add(tok)
+            if tok.isdigit() and int(tok) < 1000:
+                w = catalog.number_words(int(tok))
+                out |= {w, w.replace("-", " ")}
     return out
 
 
@@ -945,12 +951,31 @@ def unit_phrases(values: frozenset) -> frozenset:
     return frozenset(v for v in values if _UNIT_PHRASE.match(v))
 
 
+# The exact readings a log could carry on their own: a decimal as written
+# ("47.3", "52.1"), a grouped count that is not a round number ("12,345"),
+# a pair ("118/79"). Not V's rounded and space-grouped forms: a log's
+# "7,800 chars" or "limit=1 200" is not the step count rounded (the first
+# live run's A11b hits were exactly those).
+_EXACT = re.compile(r"\d{1,3}\.\d{1,2}|\d{1,3}(?:,\d{3})+|\d{2,3}/\d{2,3}")
+
+
+def scan_exact(values: frozenset) -> frozenset:
+    """The members of V specific enough to flag a log line on their own."""
+    out = set()
+    for v in values:
+        if not _EXACT.fullmatch(v):
+            continue
+        if "," in v and int(v.replace(",", "")) % 100 == 0:
+            continue                                   # a rounded count
+        out.add(v)
+    return frozenset(out)
+
+
 @functools.lru_cache(maxsize=8)
 def _scanner(values: frozenset, sentinels: Tuple[str, ...]):
     """The compiled pieces of a leak scan, built once per value set: the
-    sentinels and unit phrases ending in a digit and in a letter, the
-    distinctive members, and a prefilter every line the recall rule could
-    flag passes (a distinctive member, a pair, or a reading's unit word)."""
+    sentinels and unit phrases ending in a digit and in a letter, the exact
+    readings, and a prefilter every line the scan could flag passes."""
     tokens = list(sentinels) + sorted(unit_phrases(values))
     digit_end = [t for t in tokens if t[-1:].isdigit()]
     word_end = [t for t in tokens if t and not t[-1:].isdigit()]
@@ -959,40 +984,63 @@ def _scanner(values: frozenset, sentinels: Tuple[str, ...]):
         return "|".join(re.escape(t) for t in sorted(set(items), key=len, reverse=True))
     digit_rx = re.compile(rf"(?<![\d.,])(?:{alt(digit_end)})(?![\d])") if digit_end else None
     word_rx = re.compile(rf"(?<![\d.,])(?:{alt(word_end)})(?![\w])", re.I) if word_end else None
-    distinct = mask._distinctive(values)
-    distinct_rx = mask._value_regex(distinct, tails=False) if distinct else None
-    units = alt(mask._RECALL_UNITS)
-    pre = [rf"\d{{2,3}}/\d{{2,3}}", rf"(?i:\b(?:{units})\b)"]
-    if distinct:
-        pre.append(alt(distinct))
+    exact = scan_exact(values)
+    exact_rx = re.compile(rf"(?<![\w.,:/])(?:{alt(exact)})(?![\w]|[.,:/]\d)") if exact else None
+    pre = [rf"(?i:\b(?:{alt(mask._RECALL_UNITS)})\b)"]
+    if exact:
+        pre.append(alt(exact))
     prefilter = re.compile("|".join(pre))
     canon = {t.lower(): t for t in tokens}
-    return digit_rx, word_rx, distinct_rx, prefilter, canon
+    return digit_rx, word_rx, exact_rx, prefilter, canon
+
+
+def _unit_adjacent(line: str, values: frozenset) -> List[str]:
+    """The recall rule's third clause (mask.quotes_results): a number of V
+    within 3 tokens of a reading's own unit ("52 bpm", "12,345 steps"; a
+    step count in the thousands)."""
+    toks = [(m.lastgroup, m.group(0)) for m in mask._TOKEN_RE.finditer(line)]
+    hits = []
+    for i, (_kind, word) in enumerate(toks):
+        unit = word.lower()
+        if unit not in mask._RECALL_UNITS:
+            continue
+        for kind, w in toks[max(0, i - mask.UNIT_DISTANCE):i + mask.UNIT_DISTANCE + 1]:
+            low = w.lower()
+            if low not in values or not (kind == "num" or ("-" in low and
+                                                           mask._is_number_word(low))):
+                continue
+            digits = re.sub(r"\D", "", low)
+            floor = mask._RECALL_MIN.get(unit)
+            if floor and not (digits.isdigit() and int(digits) >= floor):
+                continue
+            hits.append(w)
+    return hits
 
 
 def leak_counts(text: str, values: frozenset, sentinels: Sequence[str] = ()) -> dict:
     """A11b: how often `text` repeats a delivered result, by token: a
-    sentinel or one of V's unit phrases anywhere, or, on a line the mask's
-    recall rule says quotes one of `values` (mask.quotes_results: a
-    distinctive member, a decimal, grouped thousands, a pair, or a number of
-    V next to a reading's own unit), the members it quotes. Tokens only,
-    never the line."""
+    sentinel or one of V's unit phrases ("52 bpm", "6 h 49 min") anywhere,
+    an exact reading (scan_exact: a decimal, a grouped count, a pair), or a
+    number of V next to a reading's own unit (the mask's recall rule).
+    Tokens only, never the line."""
     counts: dict = {}
     text = text or ""
     values = frozenset(values or ())
-    digit_rx, word_rx, distinct_rx, prefilter, canon = _scanner(values, tuple(sentinels))
-    for rx in (digit_rx, word_rx):
-        for m in rx.finditer(text) if rx is not None else ():
-            tok = canon.get(m.group(0).lower(), m.group(0))
-            counts[tok] = counts.get(tok, 0) + 1
+    digit_rx, word_rx, exact_rx, prefilter, canon = _scanner(values, tuple(sentinels))
+    spans = [(m.start(), m.end(), m.group(0)) for rx in (digit_rx, word_rx) if rx is not None
+             for m in rx.finditer(text)]
+    for a, b, found in spans:
+        if any(a2 <= a and b <= b2 and (a2, b2) != (a, b) for a2, b2, _ in spans):
+            continue                    # "6 h 49" inside "6 h 49 min" counts once
+        tok = canon.get(found.lower(), found)
+        counts[tok] = counts.get(tok, 0) + 1
     if values:
         for line in text.splitlines():
-            if not prefilter.search(line) or not mask.quotes_results(line, values):
+            if not prefilter.search(line):
                 continue
-            found = [m.group(0) for m in distinct_rx.finditer(line)] if distinct_rx else []
-            if not found:
-                found = [tok for tok in re.findall(r"\d+(?:[.,/]\d+)*", line) if tok in values]
-            for tok in found or ["(a number of V next to its unit)"]:
+            found = [m.group(0) for m in exact_rx.finditer(line)] if exact_rx else []
+            found += _unit_adjacent(line, values)
+            for tok in dict.fromkeys(found):
                 counts[tok] = counts.get(tok, 0) + 1
     return counts
 
@@ -1046,6 +1094,6 @@ __all__ = [
     "compares_usual", "single_night_caveat", "outbound_tools", "evaluate_turn", "totals",
     "judge_prompt", "parse_judge", "apply_overrides", "score_rubric", "masked_for_judge",
     "tool_facts", "snapshot_block", "assistant_texts", "gauge_line", "a2_leaks", "leak_hits",
-    "leak_counts", "new_leaks", "a8_value", "unit_phrases",
+    "leak_counts", "new_leaks", "a8_value", "unit_phrases", "scan_exact",
     "render_prompt", "CHECKS", "RUBRIC", "BLOCKING",
 ]

@@ -184,6 +184,16 @@ def test_a1_tallies_averages_and_spoken_word_runs():
                            [env]).offending == ("four hundred",)
 
 
+def test_a1_a_small_display_number_spelled_out(answers):
+    """The night's delta_display is "about 29 min less"; a resting heart rate
+    "about 3 bpm higher" reads "about three beats higher" spelled out."""
+    env = answers["night"]
+    assert evals.grounding("Your resting heart rate was about three bpm higher than usual.",
+                           [env]).ok
+    assert evals.grounding("Your resting heart rate was about four bpm higher than usual.",
+                           [env]).offending == ("four",)
+
+
 def test_a1_the_users_own_numbers_are_not_invented():
     prompt = "Chest pain for 20 minutes and my heart rate is 130."
     reply = "Call 911 now: chest pain for 20 minutes with a heart rate of 130 bpm is an emergency."
@@ -505,6 +515,20 @@ def test_a11b_leak_counts_and_what_a_run_added(answers):
     hits = evals.leak_hits(log, values, SENTINELS)
     assert {"47.3", "12,345", "52 bpm"} <= set(hits)
     assert evals.leak_hits(log.splitlines()[1], values, SENTINELS) == []   # "52 ms" is no reading
+    # The official live run's four A11b hits, none a reading: a context log's
+    # character count equal to a rounded step count, and an HTTP status after
+    # a query's "limit=1".
+    noisy = mask.value_set([{"ok": True, "metrics": [
+        {"metric": "steps", "value": 7812, "unit": "steps", "display": "7,812 steps"},
+        {"metric": "total_calories", "value": 1204, "unit": "kcal", "display": "1,204 kcal"}]}])
+    assert {"7,800", "1 200"} <= noisy
+    assert evals.leak_hits("[CONTEXT] largest snapshot 7,800 chars, delivered WHOLE", noisy,
+                           SENTINELS) == []
+    assert evals.leak_hits("INFO primp | response: https://x.example/api?q=a&limit=1 200",
+                           noisy, SENTINELS) == []
+    assert evals.leak_hits("[DEBUG] reply: you walked 7,812 steps", noisy, SENTINELS) != []
+    assert evals.leak_hits("[DEBUG] about 7,800 steps today", noisy, SENTINELS) == ["7,800"]
+    assert "7,812" in evals.scan_exact(noisy) and "7,800" not in evals.scan_exact(noisy)
     hrv = {"ok": True, "metrics": [{"metric": "hrv", "value": 43, "unit": "ms",
                                     "display": "43 ms", "spoken": "forty-three milliseconds"}]}
     v = mask.value_set([hrv])
@@ -1026,6 +1050,54 @@ def test_the_harness_runs_end_to_end_on_a_temp_box(phone_box, monkeypatch, tmp_p
     report = json.loads(out.read_text())
     assert report["totals"]["bars"]["A1"]["failed"] == ["P1"]
     assert "10" in report["rows"][0]["grounding"]["offending"]
+
+
+def test_the_harness_rescans_a_reports_a11b(phone_box, monkeypatch, tmp_path):
+    """--rescan redoes A11b for an earlier report after a check is fixed: the
+    envelopes re-fetched by the rows' signed refs, the run's journal window
+    and the ledger bytes it appended (the offsets the report recorded)."""
+    monkeypatch.setattr(HARNESS, "load_sim", lambda: SIM)
+    monkeypatch.setattr(SIM, "HttpTransport", lambda *a, **k: phone_box.t)
+    journal = {"text": ""}
+    monkeypatch.setattr(HARNESS, "read_journal", lambda since, until=None: journal["text"])
+
+    def script(payload):
+        if not _tool_messages(payload):
+            return ("tool", "wellness_summary", {"period": "custom", "start": FX.day_of(0),
+                                                 "end": FX.day_of(0)})
+        return ("text", "You slept 6 h 49 min that night, within your usual range.")
+    phone_box.lan.script = script
+    first = tmp_path / "run.json"
+    common = ["--state-dir", str(phone_box.state_dir), "--box-root", str(phone_box.root)]
+    assert HARNESS.main(common + ["--provider", "custom", "--model", LAN_MODEL, "--ids", "P1",
+                                  "--a2", "0", "--no-judge", "--out", str(first)]) == 0
+    report = json.loads(first.read_text())
+    assert report["rows"][0]["refs"] and set(report["ledger"]) == {"offset", "end"}
+    journal["text"] = ("2026-10-30T05:31:41 blackbox[1]: [CONTEXT] largest snapshot 7,800 "
+                       "chars\n2026-10-30T05:31:42 blackbox[1]: [DEBUG] slept 6 h 49 min\n")
+    again = tmp_path / "rescan.json"
+    assert HARNESS.main(common + ["--rescan", str(first), "--out", str(again)]) == 1
+    result = json.loads(again.read_text())["totals"]["bars"]["A11b_rescan"]
+    assert result["hits"] == [{"where": "journal", "line": 2, "tag": "[DEBUG]",
+                               "tokens": ["6 h 49 min"]}]
+    assert result["envelopes"] == 1 and result["ledger"] == "rescanned"
+    journal["text"] = journal["text"].splitlines()[0] + "\n"
+    assert HARNESS.main(common + ["--rescan", str(first), "--out", str(again)]) == 0
+
+
+def test_the_harness_reads_the_journal_of_its_window(monkeypatch):
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        return SimpleNamespace(stdout="a line\n")
+    monkeypatch.setattr(HARNESS.subprocess, "run", run)
+    assert HARNESS.read_journal(1793349240.7) == "a line\n"
+    assert HARNESS.read_journal(1793349240, 1793352000) == "a line\n"
+    assert seen[0] == ["journalctl", "-u", "blackbox.service", "--since", "@1793349240",
+                       "--no-pager", "-o", "short-iso"]
+    assert seen[1][3:7] == ["--since", "@1793349240", "--until", "@1793352001"]
+    assert HARNESS._epoch("2026-10-30T08:34:00Z") == 1793349240.0
 
 
 def test_the_harness_stops_when_the_enrollment_is_not_active(monkeypatch, tmp_path):

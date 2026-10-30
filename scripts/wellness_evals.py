@@ -47,6 +47,7 @@ the box; every request waits up to --timeout (300 s: a cold model load).
 from __future__ import annotations
 
 import argparse
+import calendar
 import importlib.util
 import json
 import os
@@ -321,25 +322,12 @@ class Scan:
                 yield p
 
     def journal(self) -> str:
-        since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.started))
-        try:
-            r = subprocess.run(["journalctl", "-u", JOURNAL_UNIT, "--since", since, "--no-pager",
-                                "-o", "short-iso"], capture_output=True, text=True, timeout=120)
-            return r.stdout
-        except (OSError, subprocess.SubprocessError):
-            return ""
+        return read_journal(self.started)
 
     def finish(self, values: frozenset, sentinels) -> dict:
-        hits: List[dict] = []
         journal = self.journal()
-        jl = 0
-        for n, line in enumerate(journal.splitlines(), 1):
-            found = evals.leak_hits(line, values, sentinels)
-            jl += 1
-            if found:
-                tag = next((w for w in line.split() if w.startswith("[") and w.endswith("]")),
-                           None)
-                hits.append({"where": "journal", "line": n, "tag": tag, "tokens": found})
+        hits: List[dict] = journal_hits(journal, values, sentinels)
+        jl = len(journal.splitlines())
         for p, size in self.volumes.items():
             added = read_since(p, size)
             found = evals.leak_hits(added, values, sentinels)
@@ -375,6 +363,90 @@ class Scan:
                              "region": "new file" if before is None else "changed"})
         return {"pass": not hits, "hits": hits, "journal_lines": jl, "files_changed": changed,
                 "values_scanned": len(values), "sentinels": list(sentinels)}
+
+
+def read_journal(since: float, until: Optional[float] = None) -> str:
+    """The box's journal from `since` (and up to `until`), as unix seconds."""
+    cmd = ["journalctl", "-u", JOURNAL_UNIT, "--since", f"@{int(since)}"]
+    if until is not None:
+        cmd += ["--until", f"@{int(until) + 1}"]
+    cmd += ["--no-pager", "-o", "short-iso"]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def journal_hits(journal: str, values: frozenset, sentinels) -> List[dict]:
+    """A11b over journal lines: where (the line number and its first [TAG],
+    never its text) and which tokens."""
+    hits = []
+    for n, line in enumerate(journal.splitlines(), 1):
+        found = evals.leak_hits(line, values, sentinels)
+        if found:
+            tag = next((w for w in line.split() if w.startswith("[") and w.endswith("]")), None)
+            hits.append({"where": "journal", "line": n, "tag": tag, "tokens": found})
+    return hits
+
+
+def _epoch(iso: str) -> float:
+    return float(calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))) if iso else 0.0
+
+
+def rescan(args, sim) -> int:
+    """A11b again for an earlier run's report (after a check is fixed): the
+    envelopes re-fetched by the rows' signed refs, the journal of the run's
+    window and the ledger bytes it appended (when the report recorded the
+    offsets); a file baseline cannot be rebuilt, so those hits are carried
+    over from the report as they were."""
+    report = json.loads(Path(args.rescan).expanduser().read_text(encoding="utf-8"))
+    box = Box(sim, args)
+    fx = sim._fixture_module()
+    sentinels = tuple(fx.SENTINEL_STRINGS)
+    rows = report.get("rows", []) + report.get("a2_rows", [])
+    envs = [e for e in (box.envelope(r) for row in rows for r in row.get("refs") or [])
+            if e is not None]
+    prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
+    texts = [p.get("live_prompt") or p["prompt"] for p in prompts["p"]]
+    texts += [x["prompt"] for k in ("health", "nonhealth", "a2") for x in prompts[k]]
+    typed = set()
+    for t in texts:
+        typed |= set(evals.grounding_values([], evals.render_prompt(
+            t, fx.day_of, others=(args.other_name, args.other_name2))))
+    values = frozenset(v for v in mask.value_set(envs) if v not in typed)
+    started, finished = _epoch(report.get("started_at")), _epoch(report.get("finished_at"))
+    journal = read_journal(started, finished)
+    hits = journal_hits(journal, values, sentinels)
+    root = Path(args.box_root).expanduser().resolve()
+    ledger = report.get("ledger") or {}
+    if ledger.get("offset") is not None and ledger.get("end") is not None:
+        vol = root / "Volumes" / "SNAPSHOT_VOLUME.txt"
+        added = read_since(vol, ledger["offset"])[:max(0, ledger["end"] - ledger["offset"])]
+        found = evals.leak_hits(added, values, sentinels)
+        if found:
+            hits.append({"where": "Volumes/SNAPSHOT_VOLUME.txt", "tokens": found,
+                         "region": "appended"})
+        ledger_note = "rescanned"
+    else:
+        ledger_note = "not rescanned: the report holds no ledger offsets"
+    before = (report.get("totals") or {}).get("bars", {}).get("A11b") or {}
+    carried = [h for h in before.get("hits") or [] if h.get("where") != "journal"
+               and not (ledger_note == "rescanned" and h.get("region") == "appended")]
+    result = {"pass": not (hits or carried), "hits": hits + carried,
+              "journal_lines": len(journal.splitlines()), "envelopes": len(envs),
+              "values_scanned": len(values), "ledger": ledger_note,
+              "files": "carried over from the report", "before": {
+                  "pass": before.get("pass"), "hits": len(before.get("hits") or [])}}
+    report.setdefault("totals", {}).setdefault("bars", {})["A11b_rescan"] = result
+    out_path = Path(args.out).expanduser().resolve()
+    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.chmod(out_path, 0o600)
+    print(f"A11b rescan of {args.rescan}: {'PASS' if result['pass'] else 'FAIL'} "
+          f"({len(result['hits'])} hits; journal {result['journal_lines']} lines, "
+          f"{result['envelopes']} envelopes re-fetched, ledger {ledger_note}; "
+          f"before: {result['before']})")
+    print(f"  report       {out_path}")
+    return 0 if result["pass"] else 1
 
 
 # ------------------------------------------------------------------ the judges
@@ -448,6 +520,8 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--include-replies", action="store_true",
                    help="keep the reply text in the report (synthetic data, but off by default)")
+    p.add_argument("--rescan", default=None, metavar="REPORT",
+                   help="redo A11b for an earlier report (after a check is fixed); writes --out")
     p.add_argument("--out", required=True, help="the JSON report (keep it outside the repo)")
     args = p.parse_args(argv)
     args.judge_provider = args.judge_provider or args.provider
@@ -457,6 +531,8 @@ def main(argv=None) -> int:
         raise SystemExit("--out must be outside the repository")
 
     sim = load_sim()
+    if args.rescan:
+        return rescan(args, sim)
     box = Box(sim, args)
     prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
     fx = sim._fixture_module()
@@ -567,6 +643,8 @@ def main(argv=None) -> int:
                             "providers_allowed": start_status.get("providers_allowed"),
                             "last_sync": start_status.get("last_sync")},
         "stale": stale_of(start_status), "rows": rows, "a2_rows": a2_rows, "info": info,
+        "ledger": {"offset": vol_offset,
+                   "end": volume.stat().st_size if volume.exists() else vol_offset},
         "totals": totals, "pass": totals["pass"], "replies_included": args.include_replies,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
