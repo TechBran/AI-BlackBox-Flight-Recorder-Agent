@@ -36,8 +36,12 @@ sessions and readings older than that are deleted and the rollups, coverage,
 baselines and digests stay. The first day whose detail is kept is the
 "detail horizon" (meta); the days before it are frozen: nothing rebuilds
 them from the little detail left, and ingest drops rows for them
-("past_retention"). The horizon only moves forward. The ingest log rolls over
-at 90 days and the delivered log at 400, whatever the setting.
+("past_retention"). The horizon only moves forward, and never more than two
+days past the newest detail the store holds, so a store keeps collecting
+whatever the clock said. Retention reads its own clock, which moves at most a
+day per pass, so a box clock that jumps years ahead prunes a day more at
+most. The ingest log rolls over at 90 days and the delivered log at 400,
+whatever the setting.
 """
 from __future__ import annotations
 
@@ -120,6 +124,13 @@ SIDECARS = ("-wal", "-shm", "-journal")
 INGEST_LOG_KEEP_DAYS = 90
 DELIVERED_KEEP_DAYS = 400
 META_DETAIL_HORIZON = "detail_horizon"
+# Retention keeps its own clock, which moves at most a day per pass past the
+# last pass (a store's first pass: past its newest batch). The pass is hourly,
+# so a box that was off catches up a day every hour, and one wrong reading of
+# the box clock, years ahead, cannot prune years of detail or roll the logs
+# over. A clock that reads behind prunes nothing and is not kept.
+META_PRUNE_CLOCK = "prune_clock"
+PRUNE_CLOCK_STEP_MS = DAY_MS
 
 _LOCKS: Dict[str, threading.RLock] = {}
 _INITIALIZED: Set[str] = set()      # store files this process has applied the DDL to
@@ -701,23 +712,53 @@ class Store:
             return None
         return self.offsets(conn).bounds(add_days(horizon, -1))[0]
 
+    def _newest_detail(self, conn: sqlite3.Connection) -> Optional[int]:
+        """The latest instant any bucket, session or reading holds."""
+        newest = None
+        for sql in ("SELECT MAX(ts) FROM bucket", "SELECT MAX(end_ts) FROM session",
+                    "SELECT MAX(ts) FROM reading"):
+            v = conn.execute(sql).fetchone()[0]
+            if v is not None:
+                newest = v if newest is None else max(newest, v)
+        return newest
+
     def prune(self, now_ms: int, detail_years: Optional[int]) -> Dict[str, int]:
         """Apply retention once. Returns counts of rows removed."""
         counts = dict.fromkeys(("buckets", "sessions", "readings", "ingest_log", "delivered"), 0)
         with self.write() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key=?",
+                               (META_PRUNE_CLOCK,)).fetchone()
+            last = _loads(row[0]) if row else None
+            last = last if isinstance(last, int) and not isinstance(last, bool) else None
+            # The first pass over a store steps from its newest batch instead.
+            ref = last if last is not None else conn.execute(
+                "SELECT MAX(received_at) FROM ingest_log").fetchone()[0]
+            clock = int(now_ms) if ref is None else min(int(now_ms), ref + PRUNE_CLOCK_STEP_MS)
+            if last is None or clock > last:
+                self.meta_set(META_PRUNE_CLOCK, clock, conn=conn)
             counts["ingest_log"] = conn.execute(
                 "DELETE FROM ingest_log WHERE received_at<?",
-                (now_ms - INGEST_LOG_KEEP_DAYS * DAY_MS,)).rowcount
+                (clock - INGEST_LOG_KEEP_DAYS * DAY_MS,)).rowcount
             counts["delivered"] = conn.execute(
                 "DELETE FROM delivered WHERE ts<?",
-                (now_ms - DELIVERED_KEEP_DAYS * DAY_MS,)).rowcount
+                (clock - DELIVERED_KEEP_DAYS * DAY_MS,)).rowcount
             if not detail_years:
                 return counts
             offsets = self.offsets(conn)
             old = self.detail_horizon(conn)
-            horizon = detail_horizon_day(offsets.day_of(now_ms), int(detail_years))
+            horizon = detail_horizon_day(offsets.day_of(clock), int(detail_years))
             if old is not None and old > horizon:
                 horizon = old              # a longer setting cannot bring detail back
+            if horizon != old:
+                newest = self._newest_detail(conn)
+                if newest is None:
+                    return counts          # no detail: nothing to prune, nothing to freeze
+                # At most two days past the newest detail's day: all of it can
+                # go, but the days after that had nothing pruned and are never
+                # frozen, whatever the clock said.
+                horizon = min(horizon, add_days(offsets.day_of(newest), 2))
+                if old is not None and old > horizon:
+                    horizon = old
             cutoff = offsets.bounds(add_days(horizon, -1))[0]
             counts["buckets"] = conn.execute("DELETE FROM bucket WHERE ts<?",
                                              (cutoff,)).rowcount

@@ -4,7 +4,10 @@ years and keeps rollups and coverage; the ingest log rolls over at 90 days
 and the delivered (disclosure) log at 400, whatever the setting. The
 hourly maintenance pass applies it, logging counts only. Pruned days are
 frozen: a late batch or a recompute never rebuilds them from the little
-detail left. Time is injected throughout."""
+detail left. Retention's own clock moves at most a day per pass, and the
+horizon never passes the newest detail, so a wrong box clock can neither
+prune years at once nor stop a store collecting. Time is injected
+throughout."""
 from __future__ import annotations
 
 import logging
@@ -26,8 +29,22 @@ LATER = NOW + 304 * DAY_MS
 LATEST = NOW + 345 * DAY_MS
 
 
+HOUR_MS = 3_600_000
+
+
 def _later_day(ms):
     return store_mod.local_day(ms, FX.OFFSET_S)
+
+
+def _passes_ran(st, until_ms):
+    """The hourly passes ran until an hour before `until_ms` (retention's
+    clock steps a day per pass, so a test that jumps months ahead says so)."""
+    st.meta_set(store_mod.META_PRUNE_CLOCK, until_ms - HOUR_MS)
+
+
+def _prune(st, at_ms, years):
+    _passes_ran(st, at_ms)
+    return st.prune(at_ms, detail_years=years)
 
 
 def _count(st, table, where="1=1", args=()):
@@ -79,7 +96,7 @@ def test_the_horizon_is_n_years_before_the_local_day():
 def test_detail_older_than_the_horizon_goes_and_summaries_stay(full):
     before = _summaries(full)
     n_buckets = _count(full, "bucket")
-    counts = full.prune(LATER, detail_years=1)
+    counts = _prune(full, LATER, 1)
     horizon = store_mod.detail_horizon_day(_later_day(LATER), 1)
     assert full.detail_horizon() == horizon == "2026-08-28"
     cutoff = full.offsets().bounds(store_mod.add_days(horizon, -1))[0]
@@ -104,7 +121,7 @@ def test_no_setting_keeps_every_detail_but_the_logs_still_roll(full):
         st.log_batch(conn, "fx-recent", LATER - 89 * DAY_MS, 1, 1, 0, "ok", None)
     n_buckets = _count(st, "bucket")
     n_logs = _count(st, "ingest_log")
-    counts = st.prune(LATER, detail_years=None)
+    counts = _prune(st, LATER, None)
     assert counts["buckets"] == counts["sessions"] == counts["readings"] == 0
     assert _count(st, "bucket") == n_buckets and st.detail_horizon() is None
     # The fixture's batches arrived on day 0, over 90 days before LATER.
@@ -114,12 +131,18 @@ def test_no_setting_keeps_every_detail_but_the_logs_still_roll(full):
 
 
 def test_pruning_is_idempotent_and_the_horizon_only_moves_forward(full):
-    full.prune(LATER, detail_years=1)
+    _prune(full, LATER, 1)
     again = full.prune(LATER, detail_years=1)
     assert again["buckets"] == again["sessions"] == again["readings"] == 0
     horizon = full.detail_horizon()
     full.prune(LATER, detail_years=5)            # a longer setting cannot bring detail back
     assert full.detail_horizon() == horizon
+    # Ten days with no pass (the box was off): each pass catches up one day.
+    full.prune(LATER + 10 * DAY_MS, detail_years=1)
+    assert full.detail_horizon() == store_mod.add_days(horizon, 1)
+    for _ in range(9):
+        full.prune(LATER + 10 * DAY_MS, detail_years=1)
+    assert full.detail_horizon() == store_mod.add_days(horizon, 10)
     full.prune(LATER + 10 * DAY_MS, detail_years=1)
     assert full.detail_horizon() == store_mod.add_days(horizon, 10)
 
@@ -127,7 +150,7 @@ def test_pruning_is_idempotent_and_the_horizon_only_moves_forward(full):
 # ------------------------------------------------------------------ frozen days
 
 def test_a_pruned_day_is_never_rebuilt(full):
-    full.prune(LATER, detail_years=1)
+    _prune(full, LATER, 1)
     old = FX.day_of(-110)
     before = _summaries(full)
     rollups.recompute(full, [old, store_mod.add_days(old, 1)], now_ms=LATER)
@@ -147,7 +170,7 @@ def test_a_pruned_day_is_never_rebuilt(full):
 
 
 def test_days_after_the_horizon_still_recompute(full):
-    full.prune(LATER, detail_years=1)
+    _prune(full, LATER, 1)
     day = store_mod.add_days(full.detail_horizon(), 3)
     with full.write() as conn:
         conn.execute("DELETE FROM rollup WHERE bucket=?", (day,))
@@ -156,7 +179,7 @@ def test_days_after_the_horizon_still_recompute(full):
 
 
 def test_a_deletion_of_a_pruned_record_touches_nothing(full):
-    full.prune(LATER, detail_years=1)
+    _prune(full, LATER, 1)
     before = _summaries(full)
     gone = {"schema": "bbx.wellness.ingest/1", "batch_id": "fx-del-old", "enrollment_id": ENR,
             "epoch": 1, "deleted_ids": [f"fx-sleep-{FX.day_of(-110)}"]}
@@ -172,6 +195,8 @@ def test_prune_all_covers_every_store_and_logs_counts_only(tmp_path, monkeypatch
     b = store_mod.open_store("000000000000000b")
     ingest_fixture(b, "days_10")
     (tmp_path / "data" / "wellness" / "enrollments.json").write_text("{}")
+    _passes_ran(a, LATEST)
+    _passes_ran(b, LATEST)
     with caplog.at_level(logging.INFO, logger="Orchestrator.wellness.store"):
         out = store_mod.prune_all(now_ms=LATEST, detail_years=1)
     assert out["stores"] == 2 and out["buckets"] > 0 and out["ingest_log"] > 0
@@ -210,6 +235,7 @@ def test_the_maintenance_pass_applies_it(isolated_stores, monkeypatch):
     paths.ensure_private_dir()
     st = store_mod.open_store("000000000000000d")
     ingest_fixture(st, "days_60")
+    _passes_ran(st, LATEST)
 
     def edit(p):
         if not p.has_section("wellness"):
@@ -226,3 +252,75 @@ def test_the_maintenance_pass_applies_it(isolated_stores, monkeypatch):
     assert report["errors"] == []
     assert report["wellness"]["stores"] == 1 and report["wellness"]["buckets"] > 0
     assert st.detail_horizon() == store_mod.detail_horizon_day(_later_day(LATEST), 1)
+
+
+# ------------------------------------------------------------------ a wrong clock
+
+YEAR_MS = 365 * DAY_MS
+
+
+def _steps_batch(bid, day):
+    """One local day of hourly steps, as the phone pushes it."""
+    start, _ = store_mod.day_bounds(day, FX.OFFSET_S)
+    return {"schema": "bbx.wellness.ingest/1", "batch_id": bid, "origins": [FX.PHONE],
+            "buckets": [{"metric": "steps", "grain": "1h", "origin": "o2", "replace_day": day,
+                         "offset_s": FX.OFFSET_S,
+                         "rows": [[start + h * HOUR_MS, 400.0] for h in range(7, 22)]}]}
+
+
+def test_a_clock_read_years_ahead_prunes_nothing_more(full):
+    """The hourly pass runs once with the box clock ten years ahead: the
+    retention clock moves a day, so nothing is pruned, the logs stay, and
+    the next day's batch is stored and summed."""
+    full.record_delivery("w-recent", "t-recent", "android", "local", None, "wellness_summary",
+                         {}, ["sleep"], {"x": 1}, ts=NOW - DAY_MS)
+    _prune(full, NOW + HOUR_MS, 1)
+    n_buckets, n_logs = _count(full, "bucket"), _count(full, "ingest_log")
+    counts = full.prune(NOW + 10 * YEAR_MS, detail_years=1)
+    assert counts == dict.fromkeys(counts, 0)
+    assert _count(full, "bucket") == n_buckets and _count(full, "ingest_log") == n_logs
+    assert full.get_delivery("w-recent") is not None
+    assert full.detail_horizon() <= FX.day_of(0)
+    # The clock is right again; retention never stepped back, and the store
+    # keeps collecting.
+    full.prune(NOW + 2 * HOUR_MS, detail_years=1)
+    day = FX.day_of(1)
+    res = ingest_batches(full, [_steps_batch("fx-next-day", day)], now_ms=NOW + DAY_MS)[0]
+    assert res.accepted == 15 and res.dropped == 0
+    assert rollup(full, "steps", "day", day)["value"] == 15 * 400.0
+
+
+def test_a_stores_first_pass_steps_from_its_newest_batch(full):
+    """No pass has run on this store yet: its first one counts from the
+    newest batch it received, not from a clock years ahead."""
+    n_buckets, n_logs = _count(full, "bucket"), _count(full, "ingest_log")
+    counts = full.prune(NOW + 10 * YEAR_MS, detail_years=1)
+    assert counts["buckets"] == counts["ingest_log"] == 0
+    assert _count(full, "bucket") == n_buckets and _count(full, "ingest_log") == n_logs
+    assert full.meta_get(store_mod.META_PRUNE_CLOCK) == NOW + DAY_MS
+
+
+def test_a_clock_read_behind_prunes_nothing_and_is_not_kept(full):
+    _prune(full, LATER, 1)
+    horizon, clock = full.detail_horizon(), full.meta_get(store_mod.META_PRUNE_CLOCK)
+    counts = full.prune(NOW - 5 * YEAR_MS, detail_years=1)
+    assert counts == dict.fromkeys(counts, 0)
+    assert full.detail_horizon() == horizon
+    assert full.meta_get(store_mod.META_PRUNE_CLOCK) == clock
+    full.prune(LATER + HOUR_MS, detail_years=1)             # the next pass carries on
+    assert full.meta_get(store_mod.META_PRUNE_CLOCK) == LATER + HOUR_MS
+
+
+def test_the_horizon_never_passes_the_newest_detail(full):
+    """A store nothing was added to for three years, with a one-year
+    setting: every detail goes, but the days after its newest data are not
+    frozen, so when its phone comes back, the new days are stored and
+    summed."""
+    later = NOW + 3 * YEAR_MS
+    _prune(full, later, 1)
+    assert _count(full, "bucket") == _count(full, "session") == _count(full, "reading") == 0
+    assert full.detail_horizon() == store_mod.add_days(FX.day_of(0), 2)
+    day = _later_day(later)
+    res = ingest_batches(full, [_steps_batch("fx-back", day)], now_ms=later)[0]
+    assert res.accepted == 15 and res.dropped == 0
+    assert rollup(full, "steps", "day", day)["value"] == 15 * 400.0
