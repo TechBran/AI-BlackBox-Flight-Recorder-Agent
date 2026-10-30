@@ -76,7 +76,7 @@ class WellnessReplaceTest {
         try {
             val key = ByteArray(32) { 4 }
             val signer = OriginSigner("en_0badc0de", OriginSigner.encodeKey(key))
-            val client = IngestClient(server.url("").toString().removeSuffix("/"), nowSec = { 1_793_000_000L })
+            val client = IngestClient(server.url("").toString().removeSuffix("/"), nowSec = { 1_793_000_000L }, keyPinned = { true })
             server.enqueue(MockResponse.Builder().code(200).body("""{"state":"active"}""").build())
             val body = WellnessStatusParser.replaceApproveBody(WellnessFixtures.OPERATOR, true)
             val reply = client.action(IngestClient.REPLACE_APPROVE, body, signer)

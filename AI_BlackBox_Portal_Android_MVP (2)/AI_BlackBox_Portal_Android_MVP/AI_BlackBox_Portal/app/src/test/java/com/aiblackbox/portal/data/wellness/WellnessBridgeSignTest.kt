@@ -28,11 +28,14 @@ class WellnessBridgeSignTest {
     private val k = OriginSigner.encodeKey(key)
     private val paired = "http://100.64.0.10:9091"
 
-    private fun install(state: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.ACTIVE) =
-        WellnessChatSigning.installForTest {
-            WellnessSigningInterceptor.Facts(WellnessBindingRecord(op, "en_0f1c0f1c", 1, k), WellnessSyncState(state = state.wire),
-                "http://box.invalid:9091")
-        }
+    private fun install(
+        state: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.ACTIVE,
+        boundTo: String? = "http://box.invalid:9091",
+        adopt: (String) -> Boolean = { false },
+    ) = WellnessChatSigning.installForTest {
+        WellnessSigningInterceptor.Facts(WellnessBindingRecord(op, "en_0f1c0f1c", 1, k, boxOrigin = boundTo),
+            WellnessSyncState(state = state.wire), "http://box.invalid:9091", adoptOrigin = adopt)
+    }
 
     @After fun tearDown() = WellnessChatSigning.installForTest(null)
 
@@ -88,6 +91,34 @@ class WellnessBridgeSignTest {
         assertNull(WellnessChatSigning.bridgeHeader("  ", "POST", "/chat/stream", sha))
         assertEquals(op, WellnessChatRules.bridgeOperator("post", "/chat?operator=x", op))
         assertNull(WellnessChatRules.bridgeOperator("GET", "/wellness/disclosures?operator=x", op))
+    }
+
+    @Test
+    fun `the in-app Portal signs its ledger read like any other read, naming its operator once`() {
+        install()
+        assertNotNull(WellnessChatSigning.bridgeHeader(op, "GET", "/fossil/snapshot/SNAP-20261028-42?operator=$op", emptySha))
+        assertNull(WellnessChatSigning.bridgeHeader(op, "GET", "/fossil/snapshot/SNAP-20261028-42", emptySha))
+        assertNull(WellnessChatSigning.bridgeHeader("someone-else", "GET", "/fossil/snapshot/SNAP-42?operator=$op", emptySha))
+        assertNull(WellnessChatSigning.bridgeHeader(op, "POST", "/fossil/snapshot/SNAP-42?operator=$op", emptySha))
+    }
+
+    // ── the key's box (contract (f)) ───────────────────────────────────────────────────────
+
+    @Test
+    fun `an app re-pointed at another box gives its Portal no proof`() {
+        install(boundTo = "http://100.64.0.99:9091")
+        assertNull(WellnessChatSigning.bridgeHeader(op, "POST", "/chat/stream", sha))
+        assertNull(WellnessChatSigning.bridgeHeader(op, "GET", "/wellness/ref/w-20261028-ab12?operator=$op", emptySha))
+    }
+
+    @Test
+    fun `a binding older than box_origin signs for the Portal once it has adopted the paired box`() {
+        val adopted = mutableListOf<String>()
+        install(boundTo = null, adopt = { adopted += it; true })
+        assertNotNull(WellnessChatSigning.bridgeHeader(op, "POST", "/chat/stream", sha))
+        assertEquals(listOf("http://box.invalid:9091"), adopted)
+        install(boundTo = null)
+        assertNull("not adopted, not signed", WellnessChatSigning.bridgeHeader(op, "POST", "/chat/stream", sha))
     }
 
     // ── who may ask ────────────────────────────────────────────────────────────────────────

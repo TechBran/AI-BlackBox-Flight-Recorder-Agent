@@ -703,6 +703,83 @@ class WellnessSyncEngineTest {
         assertEquals(1, outbox.size())
     }
 
+    // ── the privacy policy re-prompt (contract (g)) ───────────────────────────────────────
+
+    /** A credentialed status whose `policy_version` is [policy]. */
+    private fun statusWithPolicy(policy: String): String =
+        JsonObject(Json.parseToJsonElement(statusBody(allAsk)).jsonObject + ("policy_version" to JsonPrimitive(policy))).toString()
+
+    @Test
+    fun `a new policy in the signed status holds every read and push until the person agrees`() = runBlocking {
+        var policy = "2026-10-29"
+        val e = newEngine { WellnessOutbox.SendResult(200, statusWithPolicy(policy)) }
+        enroll()
+        state.update { WellnessRules.enrolledUnderPolicy(it, "2026-10-29") }
+        e.sync(false)
+        gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
+        reply = { WellnessOutbox.SendResult(-1) }
+        now += 61_000
+        e.sync(false)                               // read under the agreed policy; the box was unreachable
+        assertEquals(1, outbox.size())
+
+        policy = "2026-11-15"
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        received.clear()
+        now += 61_000
+        gw.upsert(WellnessFixtures.sleepNight("sleep-2", 4))
+        val reads = gw.reads
+        assertEquals(WellnessSyncEngine.POLICY_HELD, e.sync(true).outcome)
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped(WellnessRules.POLICY_CHANGED), e.backfillPage(inForeground = true))
+        assertTrue("nothing is pushed", received.isEmpty())
+        assertEquals("nothing is read", reads, gw.reads)
+        assertEquals(1, outbox.size())
+        assertEquals("2026-11-15", state.load().policyVersionBox)
+        assertTrue(WellnessRules.policyHold(state.load()))
+
+        // "I agree" on the card records the version of the text it showed, and the collector runs again.
+        state.update { WellnessRules.agreePolicy(it, "2026-11-15") }
+        now += 61_000
+        assertEquals("ok", e.sync(false).outcome)
+        assertTrue(received.isNotEmpty())
+        assertEquals(0, outbox.size())
+    }
+
+    @Test
+    fun `an ingest answer naming a new policy stops the push there, and the rest waits on the phone`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        reply = { WellnessOutbox.SendResult(-1) }
+        for (i in 1..3) {
+            gw.upsert(WellnessFixtures.bp("bp-$i", 3, 6 + i))
+            engine.sync(false)
+        }
+        assertEquals(3, outbox.size())
+        // The version every enrollment before acked versions agreed to: no hold, all three go.
+        reply = { WellnessOutbox.SendResult(200, "{}", policyVersion = WellnessRules.LEGACY_POLICY_VERSION) }
+        received.clear()
+        assertEquals("ok", engine.sync(false).outcome)
+        assertEquals(3, received.size)
+
+        reply = { WellnessOutbox.SendResult(-1) }
+        for (i in 4..6) {
+            gw.upsert(WellnessFixtures.bp("bp-$i", 3, 6 + i))
+            engine.sync(false)
+        }
+        assertEquals(3, outbox.size())
+        reply = { WellnessOutbox.SendResult(200, "{}", policyVersion = "2026-11-15") }
+        received.clear()
+        val report = engine.sync(false)
+        assertEquals(WellnessSyncEngine.POLICY_HELD, report.outcome)
+        assertEquals("the answer that named it was the last push", 1, received.size)
+        assertEquals(1, report.batchesSent)
+        assertEquals(2, outbox.size())
+        assertTrue(WellnessRules.policyHold(state.load()))
+        gw.upsert(WellnessFixtures.bp("bp-7", 3, 14))
+        assertEquals(WellnessSyncEngine.POLICY_HELD, engine.sync(false).outcome)
+        assertEquals(1, received.size)
+        assertEquals(2, outbox.size())
+    }
+
     // ── review fix: bucket groups say which local day they replace ────────────────────────
 
     @Test

@@ -69,6 +69,18 @@ data class WellnessSyncState(
      * ([WellnessRules.pendingSettingsBody]), then are cleared. Null when there are none.
      */
     @SerialName("pending_settings") val pendingSettings: PendingSetupSettings? = null,
+    /**
+     * The privacy policy version the person agreed to: the enroll reply's at enrollment, then the
+     * one of the text they agreed to on the "The privacy policy changed" card. Null in a state
+     * written before it was kept ([WellnessRules.LEGACY_POLICY_VERSION]).
+     */
+    @SerialName("policy_version_acked") val policyVersionAcked: String? = null,
+    /**
+     * The newest version the box named (a credentialed status, an enroll reply, an
+     * X-Policy-Version header). While it is not the agreed one the collector holds
+     * ([WellnessRules.policyHold]); kept here so the hold survives a restart.
+     */
+    @SerialName("policy_version_box") val policyVersionBox: String? = null,
 ) {
     fun consent(): Map<WellnessCategory, WellnessConsent> =
         WellnessCategory.entries.associateWith { WellnessConsent.fromWire(categories[it.wire]) }

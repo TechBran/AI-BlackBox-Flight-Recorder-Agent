@@ -7,11 +7,14 @@ import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.SearchResponse
 import com.aiblackbox.portal.data.model.SnapshotResult
+import com.aiblackbox.portal.data.store.BlackBoxStore
+import com.aiblackbox.portal.data.wellness.WellnessLedgerRead
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -50,6 +53,19 @@ fun peekViewFor(peek: SnapshotPeek?, currentSnapId: String): PeekView = when {
 
 class TimelineViewModel(application: Application) : AndroidViewModel(application) {
     private var api: BlackBoxApi? = null
+
+    /**
+     * (M7) The operator on the app's screen, read when a snapshot is fetched: the ledger read
+     * is signed for it (WellnessLedgerRead), so the enrolled phone's own health turns come back
+     * masked with their gauge and Show numbers can offer them. Tests replace it.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var screenOperator: suspend () -> String = {
+        BlackBoxStore(getApplication<Application>()).operator.first()
+    }
+
+    private suspend fun ledgerRead(api: BlackBoxApi, snapId: String): String =
+        WellnessLedgerRead.fetch(api, snapId, runCatching { screenOperator() }.getOrNull())
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private var pollJob: Job? = null
     private var currentOperator = ""
@@ -171,7 +187,7 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Select a snapshot and fetch its full content from /fossil/snapshot/{id}
+     * Select a snapshot and fetch its full content from /fossil/snapshot/{id} (the ledger read, M7)
      */
     fun selectSnapshot(snapshot: SnapshotResult?) {
         _selectedSnapshot.value = snapshot
@@ -193,7 +209,7 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
         _isLoadingContent.value = true
         peekJob = viewModelScope.launch {
             try {
-                val response = api.get("/fossil/snapshot/$snapId")
+                val response = ledgerRead(api, snapId)
                 val obj = json.parseToJsonElement(response).jsonObject
                 val content = obj["content"]?.jsonPrimitive?.content ?: ""
                 val meta = obj["metadata"]?.jsonObject
@@ -229,7 +245,7 @@ class TimelineViewModel(application: Application) : AndroidViewModel(application
         _isLoadingContent.value = true
         peekJob = viewModelScope.launch {
             try {
-                val response = api.get("/fossil/snapshot/$snapId")
+                val response = ledgerRead(api, snapId)
                 val obj = json.parseToJsonElement(response).jsonObject
                 if (_selectedSnapshot.value?.snapId == snapId) {
                     _fullContent.value = obj["content"]?.jsonPrimitive?.content ?: ""

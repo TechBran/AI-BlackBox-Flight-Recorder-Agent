@@ -26,8 +26,9 @@ object WellnessChatSigning {
     fun install(context: Context) {
         val app = context.applicationContext
         facts = {
-            WellnessSigningInterceptor.Facts(WellnessGraph.binding(app).current(), WellnessGraph.state(app).load(),
-                WellnessGraph.boxOrigin(app))
+            val binding = WellnessGraph.binding(app)
+            WellnessSigningInterceptor.Facts(binding.current(), WellnessGraph.state(app).load(),
+                WellnessGraph.boxOrigin(app), adoptOrigin = { origin -> binding.adoptBoxOrigin(origin) })
         }
         // The box's clock as the collector last learned it (IngestClient.clockSkewS): a phone whose
         // clock drifted past the box's 120 s window would otherwise sign every chat turn in vain.
@@ -47,10 +48,14 @@ object WellnessChatSigning {
      * The in-app Portal's signer ([WellnessChatRules.BRIDGE_CHANNEL]; [WellnessChatRules.bridgeHeader]
      * over this phone's facts): the header value, or null. [portalOperator] is the operator the
      * in-app Portal is on. The caller has checked the message came from the paired box's main
-     * frame ([WellnessChatRules.bridgeCallerAllowed]).
+     * frame ([WellnessChatRules.bridgeCallerAllowed]), so the request goes to the paired box; the
+     * key still signs only when the binding was made with that box (contract (f): an app
+     * re-pointed at another box gives its Portal no proof).
      */
     fun bridgeHeader(portalOperator: String?, method: String, pathWithQuery: String, bodySha256Hex: String): String? {
         val f = runCatching { facts?.invoke() }.getOrNull() ?: return null
+        val paired = f.boxOrigin ?: return null
+        if (f.binding == null || !WellnessSigningInterceptor.keyPinned(f, paired)) return null
         return WellnessChatRules.bridgeHeader(f.binding, f.state, portalOperator, method, pathWithQuery, bodySha256Hex,
             nowSec(), OriginSigner.newNonce())
     }

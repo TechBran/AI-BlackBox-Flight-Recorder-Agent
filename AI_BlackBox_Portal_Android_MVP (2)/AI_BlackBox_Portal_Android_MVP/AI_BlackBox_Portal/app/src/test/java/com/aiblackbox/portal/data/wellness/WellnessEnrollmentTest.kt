@@ -61,6 +61,19 @@ class WellnessEnrollmentTest {
     }
 
     @Test
+    fun `the bind is pinned to the box the enroll call went to, and the reply's policy is the agreed one`() = runBlocking {
+        val e = WellnessEnrollment(binding, box(), { listOf("100.101.102.103") }, bindWaitMs = 200,
+            boxOrigin = "http://100.64.0.10:9091")
+        val outcome = e.enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, false)
+        outcome as WellnessEnrollment.Outcome.Enrolled
+        assertEquals("http://100.64.0.10:9091", binding.current()!!.boxOrigin)
+        assertEquals("2026-10-29", outcome.policyVersion)
+        val st = WellnessRules.enrolledUnderPolicy(WellnessSyncState(), outcome.policyVersion)
+        assertEquals("2026-10-29", st.policyVersionAcked)
+        assertTrue(!WellnessRules.policyHold(st))
+    }
+
+    @Test
     fun `a 200 with the bind received is Enrolled`() = runBlocking {
         val outcome = enrollment(box()).enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, false)
         outcome as WellnessEnrollment.Outcome.Enrolled

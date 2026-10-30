@@ -42,6 +42,9 @@ class WellnessNoBackupPathTest {
         val intent = binding.beginIntent(WellnessFixtures.OPERATOR)
         binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_0badc0de", 1, intent.nonce,
             OriginSigner.encodeKey(ByteArray(32) { 7 })))
+        // An older binding pinned to its box on first use is rewritten in place (contract (f)).
+        assertTrue(binding.adoptBoxOrigin("http://100.64.0.10:9091"))
+        WellnessSyncStateStore(files.syncState).update { WellnessRules.agreePolicy(it, "2026-11-01") }
         ChangesTokenStore(files.tokens).seed(HcType.SLEEP, "tok")
         DayIndex(files.dayIndex).apply { record("id", HcType.SLEEP, "2026-11-03"); save() }
         WellnessSyncStateStore(files.syncState).update { it.copy(intervalMin = 30) }

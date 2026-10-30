@@ -14,8 +14,8 @@ import okio.Buffer
  * request goes on as it came, untouched.
  *
  * Opt-in, not every client derived from HttpClients.base: only the surfaces that show a
- * health turn as one (the native chat with its footer and Show numbers, and Show numbers'
- * own read) ask for the credential. The WebView's download client (it writes what it fetches
+ * health turn as one (the native chat with its footer and Show numbers, Show numbers' own
+ * read, and the Timeline's and the SNAP peek sheet's ledger read) ask for the credential. The WebView's download client (it writes what it fetches
  * to shared Downloads, at a URL the page chose) and the overlay's /chat (it cannot render a
  * masked health turn) never carry the tag, so they never sign. The tag is an OkHttp tag: it
  * never reaches the wire.
@@ -41,12 +41,26 @@ class WellnessSigningInterceptor(
      * What the decision needs from the phone: its binding, the collector's view of the box,
      * and the origin of the box this app is paired with ([boxOrigin]; null = unpaired, so
      * nothing is signed). A request to any other host is never signed: a proof is live for
-     * 120 s at the box that enrolled this phone, whoever receives it.
+     * 120 s at the box that enrolled this phone, whoever receives it. Nor is a request to the
+     * paired box when the binding belongs to another one (the app was re-pointed:
+     * [WellnessChatRules.keyUse]); a binding older than its `box_origin` is pinned to the
+     * paired box on its first signed use through [adoptOrigin] (WellnessBinding.adoptBoxOrigin;
+     * false, the default, = it could not be, so nothing is signed).
      */
-    class Facts(val binding: WellnessBindingRecord?, val state: WellnessSyncState?, val boxOrigin: String?)
+    class Facts(
+        val binding: WellnessBindingRecord?,
+        val state: WellnessSyncState?,
+        val boxOrigin: String?,
+        val adoptOrigin: (String) -> Boolean = { false },
+    )
 
     /** The opt-in tag ([optIn]). */
     object SignHealth
+
+    /** The operator on the app's screen, for a request that names none itself (the ledger read; [optIn]). */
+    class ForOperator(val operator: String) {
+        override fun toString(): String = "ForOperator"
+    }
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
@@ -63,7 +77,7 @@ class WellnessSigningInterceptor(
         if (request.header("Content-Encoding") != null) return null
         val f = facts() ?: return null
         if (f.binding == null) return null
-        if (!WellnessChatRules.sameOrigin(request.url.toString(), f.boxOrigin)) return null
+        if (!keyPinned(f, request.url.toString())) return null
         val body = request.body
         val bytes: ByteArray? = when {
             body == null -> null
@@ -74,7 +88,8 @@ class WellnessSigningInterceptor(
                 Buffer().also { body.writeTo(it) }.readByteArray()
             }
         }
-        val operator = WellnessChatRules.operatorOf(bytes, request.url.queryParameter("operator"))
+        val operator = WellnessChatRules.requestOperator(path, bytes, request.url.queryParameter("operator"),
+            request.tag(ForOperator::class.java)?.operator)
         val decision = WellnessChatRules.signingDecision(f.binding, f.state, operator, request.method, path)
             as? WellnessChatRules.SigningDecision.Sign ?: return null
         val header = OriginSigner(decision.enrollmentId, decision.key)
@@ -89,7 +104,25 @@ class WellnessSigningInterceptor(
         const val MAX_SIGNED_BODY = 4L * 1024 * 1024
         private val EMPTY = ByteArray(0)
 
-        /** Ask for the credential on this request (the native chat and Show numbers only). */
-        fun optIn(builder: Request.Builder): Request.Builder = builder.tag(SignHealth::class.java, SignHealth)
+        /**
+         * Ask for the credential on this request (the native chat, Show numbers and the ledger
+         * read only). [operator] is the operator on the app's screen, for the ledger read, whose
+         * request names none ([WellnessChatRules.requestOperator]); it never overrides the
+         * operator a body or query names.
+         */
+        fun optIn(builder: Request.Builder, operator: String? = null): Request.Builder =
+            builder.tag(SignHealth::class.java, SignHealth)
+                .let { b -> operator?.takeIf { it.isNotBlank() }?.let { b.tag(ForOperator::class.java, ForOperator(it)) } ?: b }
+
+        /**
+         * May [f]'s key sign a request to [requestUrl] ([WellnessChatRules.keyUse])? A binding
+         * without `box_origin` adopts the paired box here, once, and signs only if that stuck.
+         */
+        fun keyPinned(f: Facts, requestUrl: String): Boolean =
+            when (val use = WellnessChatRules.keyUse(f.binding?.boxOrigin, requestUrl, f.boxOrigin)) {
+                WellnessChatRules.KeyUse.Pinned -> true
+                is WellnessChatRules.KeyUse.Adopt -> runCatching { f.adoptOrigin(use.origin) }.getOrDefault(false)
+                is WellnessChatRules.KeyUse.Refused -> false
+            }
     }
 }

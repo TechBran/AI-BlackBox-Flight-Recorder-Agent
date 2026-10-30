@@ -17,13 +17,27 @@ import java.util.concurrent.TimeUnit
  * yet). Answers come back as [WellnessHttp] (status -1 = no answer), never as exceptions, so
  * the outbox table and the UI handle every outcome the same way.
  *
+ * The key signs only for the box that delivered it ([keyPinned], contract (f)): a request that
+ * is to be signed but goes to any other box (the app was re-pointed) is not sent at all, signed
+ * or unsigned (status -1, [OTHER_BOX]): an ingest body is health data, and a proof would be live
+ * for 120 s at the box that enrolled this phone. Unsigned calls (enroll, the provider list) are
+ * not affected.
+ *
  * Never logs a body, a header or a key.
  */
 class IngestClient(
     private val baseUrl: String,
     base: OkHttpClient = HttpClients.base,
     private val nowSec: () -> Long = { System.currentTimeMillis() / 1000 },
+    /**
+     * May this phone's key sign a request to the given URL? WellnessGraph wires
+     * WellnessBinding.mayUseKeyFor with the paired box; the default signs nothing.
+     */
+    private val keyPinned: (requestUrl: String) -> Boolean = { false },
 ) {
+    /** The box this client talks to, `scheme://host[:port]` (the enroll call's box: the bind is pinned to it). */
+    val origin: String? get() = WellnessChatRules.originOf(baseUrl)
+
     private val client: OkHttpClient = base.newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -73,8 +87,12 @@ class IngestClient(
         gzip: Boolean = false,
     ): WellnessHttp = withContext(Dispatchers.IO) {
         try {
+            val url = baseUrl.trimEnd('/') + pathWithQuery
+            if (signer != null && !runCatching { keyPinned(url) }.getOrDefault(false)) {
+                return@withContext WellnessHttp(status = -1, body = "", error = OTHER_BOX)
+            }
             val builder = Request.Builder()
-                .url(baseUrl.trimEnd('/') + pathWithQuery)
+                .url(url)
                 .header("X-BlackBox-Client", "native-android/1.0")
             if (signer != null) {
                 builder.header(OriginSigner.HEADER, signer.header(method, pathWithQuery, body, nowSec() + clockSkewS))
@@ -112,6 +130,9 @@ class IngestClient(
         const val REPLACE_APPROVE = "/wellness/replace-approve"
         const val PRIVACY_POLICY = "/wellness/privacy-policy"
         private const val MAX_REPLY_CHARS = 1_000_000
+
+        /** A signed call not sent: the key belongs to another box than this client's ([keyPinned]). */
+        const val OTHER_BOX = "other_box"
 
         /** Drift under this is left alone (the box allows 120 s; HTTP dates have 1 s grain). */
         const val SKEW_TOLERANCE_S = 30L

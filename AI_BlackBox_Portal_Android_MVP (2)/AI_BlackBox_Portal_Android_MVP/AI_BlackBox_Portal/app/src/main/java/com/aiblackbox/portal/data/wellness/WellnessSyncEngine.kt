@@ -27,6 +27,11 @@ import java.time.ZoneId
  * ([IngestPayloadBuilder.withoutCategories]), so a batch read earlier never delivers a
  * category that is now off.
  *
+ * The privacy policy holds it too (the policy's own promise: the app shows the new version
+ * before it collects anything more). When the box names a version the person has not agreed
+ * to (a credentialed status, an answer's X-Policy-Version), nothing is read or pushed until they
+ * agree on the Health screen ([WellnessRules.policyHold]); a push stops at that answer.
+ *
  * Logs carry counts only, never a value, a key or a payload.
  */
 class WellnessSyncEngine(
@@ -92,6 +97,7 @@ class WellnessSyncEngine(
             backoffUntilMs = st.backoffUntilMs,
             nowMs = now,
             held = st.localHold != null,
+            policyHold = WellnessRules.policyHold(st),
         ),
     )
 
@@ -519,10 +525,14 @@ class WellnessSyncEngine(
             WellnessRules.StatusReaction.APPLY -> {
                 val box = WellnessStatusParser.parse(reply.body)
                 val categories = box?.takeIf { it.credentialed }?.categories
+                // The policy version the box names now (the header, else a credentialed body's):
+                // a new one holds the collector at the gate below until the person agrees.
+                val policy = reply.policyVersion ?: box?.takeIf { it.credentialed }?.policyVersion
                 write(gen) {
                     state.update { st ->
-                        if (box == null || categories == null) st.copy(lastStatusMs = now)
-                        else st.copy(
+                        val seen = WellnessRules.noteBoxPolicy(st, policy)
+                        if (box == null || categories == null) seen.copy(lastStatusMs = now)
+                        else seen.copy(
                             categories = categories.mapKeys { it.key.wire }.mapValues { it.value.wire },
                             state = box.state.wire,
                             sourceLabel = box.sourceLabel ?: st.sourceLabel,
@@ -622,16 +632,40 @@ class WellnessSyncEngine(
         }
     }
 
-    /** Push the outbox; react to the box's answers. */
+    /**
+     * Remember the policy version an answer named; true when the collector must now hold
+     * (a version the person has not agreed to: [WellnessRules.policyHold]).
+     */
+    private fun notePolicy(gen: Long, version: String?): Boolean {
+        if (WellnessRules.policyVersion(version) == null) return false
+        var hold = false
+        write(gen) { state.update { st -> WellnessRules.noteBoxPolicy(st, version).also { hold = WellnessRules.policyHold(it) } } }
+        return hold
+    }
+
+    /**
+     * Push the outbox; react to the box's answers. An answer that names a privacy policy the
+     * person has not agreed to (X-Policy-Version) stops the push there: the batches still
+     * waiting stay on the phone, unsent, until they agree on the Health screen.
+     */
     private suspend fun drain(record: WellnessBindingRecord, gen: Long): SyncReport {
         val signer = OriginSigner(record.enrollmentId, record.k)
+        var policyHeld = false
         val result = outbox.drain(
-            send = { bytes -> sendWithConsent(bytes, signer) },
+            send = { bytes ->
+                if (policyHeld) WellnessOutbox.SendResult(-1, local = true)
+                else sendWithConsent(bytes, signer).also { r -> if (notePolicy(gen, r.policyVersion)) policyHeld = true }
+            },
             newBatchId = newBatchId,
             fence = { block -> binding.runIfCurrent(gen, block) },
         )
         if (result.notices.isNotEmpty()) runCatching { onNotices(result.notices) }
         val now = clock()
+        if (policyHeld && (result is WellnessOutbox.DrainResult.Drained || result is WellnessOutbox.DrainResult.RetryLater)) {
+            if (result.sent > 0) write(gen) { state.update { it.copy(lastPushMs = now) } }
+            Log.i(TAG, "push held: the privacy policy changed (sent=${result.sent})")
+            return SyncReport(POLICY_HELD, batchesSent = result.sent, pending = outbox.size())
+        }
         return when (result) {
             is WellnessOutbox.DrainResult.Drained -> {
                 if (result.sent > 0) write(gen) { state.update { it.copy(lastPushMs = now) } }
@@ -686,8 +720,11 @@ class WellnessSyncEngine(
         const val MAX_LATENCIES = 30
         /** The collector reads the box's consent and state back at most this often. */
         const val STATUS_EVERY_MS = 60_000L
+        /** A push that stopped at an answer naming a privacy policy the person has not agreed to. */
+        const val POLICY_HELD = "skipped:" + WellnessRules.POLICY_CHANGED
+
         /** Push outcomes after which the history import reads no further page. */
-        private val STOPPING_OUTCOMES = setOf("reconnect", "paused", "stale")
+        private val STOPPING_OUTCOMES = setOf("reconnect", "paused", "stale", POLICY_HELD)
 
         fun randomBatchId(): String = java.util.UUID.randomUUID().toString().replace("-", "")
     }

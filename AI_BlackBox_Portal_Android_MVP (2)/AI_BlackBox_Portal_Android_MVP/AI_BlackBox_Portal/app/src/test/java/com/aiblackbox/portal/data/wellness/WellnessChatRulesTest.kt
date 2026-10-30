@@ -38,17 +38,89 @@ class WellnessChatRulesTest {
     @Test
     fun `only the allow-listed paths with their method are signable`() {
         val yes = listOf("POST" to "/chat/stream", "POST" to "/chat", "GET" to "/wellness/status",
-            "GET" to "/wellness/disclosures", "GET" to "/wellness/ref/w-20261028-ab12", "post" to "/chat/stream")
+            "GET" to "/wellness/disclosures", "GET" to "/wellness/ref/w-20261028-ab12", "post" to "/chat/stream",
+            "GET" to "/fossil/snapshot/SNAP-20261028-42", "GET" to "/fossil/snapshot/SNAP-1", "get" to "/fossil/snapshot/SNAP-7")
         for ((m, p) in yes) assertTrue("$m $p", WellnessChatRules.isSignable(m, p))
         val no = listOf(
             "GET" to "/chat/stream", "PUT" to "/chat", "POST" to "/wellness/status", "POST" to "/chat/save",
             "POST" to "/wellness/erase", "POST" to "/wellness/settings", "PUT" to "/wellness/settings",
             "POST" to "/wellness/replace-approve", "GET" to "/wellness/ref/", "GET" to "/wellness/ref/../erase",
             "GET" to "/wellness/ref/w-20261028-ab12/x", "GET" to "/wellness/ref/W-20261028-AB12",
-            "POST" to "/chat/stream/", "GET" to "/fossil/snapshot/SNAP-1", "POST" to "/chat%2Fstream",
-            "GET" to "/wellness/statusx",
+            "POST" to "/chat/stream/", "POST" to "/chat%2Fstream", "GET" to "/wellness/statusx",
+            // the ledger read: GET only, one well-formed snapshot id, nothing after it
+            "POST" to "/fossil/snapshot/SNAP-1", "DELETE" to "/fossil/snapshot/SNAP-1", "GET" to "/fossil/snapshot/",
+            "GET" to "/fossil/snapshot/SNAP-", "GET" to "/fossil/snapshot/snap-1", "GET" to "/fossil/snapshot/SNAP-1/x",
+            "GET" to "/fossil/snapshot/SNAP-2026102-1", "GET" to "/fossil/snapshot/../wellness/erase",
+            "GET" to "/fossil/snapshot/SNAP-1%2F..", "GET" to "/fossil/snapshot/SNAP-1234567890123",
+            "GET" to "/fossil/hybrid", "GET" to "/api/snapshots/recent",
         )
         for ((m, p) in no) assertFalse("$m $p", WellnessChatRules.isSignable(m, p))
+    }
+
+    @Test
+    fun `the ledger read's path takes the box's two id forms and nothing else`() {
+        assertEquals("/fossil/snapshot/SNAP-20261028-42", WellnessChatRules.ledgerPath("SNAP-20261028-42"))
+        assertEquals("/fossil/snapshot/SNAP-42", WellnessChatRules.ledgerPath(" SNAP-42 "))
+        assertNull(WellnessChatRules.ledgerPath("snap-42"))
+        assertNull(WellnessChatRules.ledgerPath("SNAP-42?operator=x"))
+        assertNull(WellnessChatRules.ledgerPath("../wellness/erase"))
+        assertTrue(WellnessChatRules.isLedgerRead("/fossil/snapshot/SNAP-42"))
+        assertFalse(WellnessChatRules.isLedgerRead("/wellness/ref/w-20261028-ab12"))
+        // a refused proof (and only that) is asked again unsigned
+        for (s in listOf(401, 409, 410)) assertTrue("$s", WellnessChatRules.proofRefused(s))
+        for (s in listOf(200, 400, 403, 404, 500, -1)) assertFalse("$s", WellnessChatRules.proofRefused(s))
+    }
+
+    @Test
+    fun `a ledger read is for the operator on screen, never for one a body or query names`() {
+        val ledger = "/fossil/snapshot/SNAP-42"
+        assertEquals(op, WellnessChatRules.requestOperator(ledger, null, null, op))
+        assertEquals(op, WellnessChatRules.requestOperator(ledger, null, op, " $op "))
+        assertNull("a query naming someone else", WellnessChatRules.requestOperator(ledger, null, "someone-else", op))
+        assertNull("nobody on screen", WellnessChatRules.requestOperator(ledger, null, null, null))
+        assertNull(WellnessChatRules.requestOperator(ledger, null, op, " "))
+        // every other path: the body's operator, else the query's; the screen never overrides them
+        val body = """{"operator":"wellness-fixture"}""".toByteArray()
+        assertEquals(op, WellnessChatRules.requestOperator("/chat/stream", body, null, "someone-else"))
+        assertNull(WellnessChatRules.requestOperator("/wellness/status", null, null, op))
+        assertEquals("someone-else", WellnessChatRules.requestOperator("/wellness/status", null, "someone-else", op))
+        // so another operator on screen leaves the enrolled phone's ledger read unsigned
+        val other = WellnessChatRules.requestOperator(ledger, null, null, "someone-else")
+        assertEquals(unsigned(WellnessChatRules.UNSIGNED_OTHER_OPERATOR), decide(operator = other, method = "GET", path = ledger))
+        assertTrue(decide(operator = WellnessChatRules.requestOperator(ledger, null, null, op), method = "GET", path = ledger)
+            is WellnessChatRules.SigningDecision.Sign)
+    }
+
+    // ── the key's box (contract (f)) ───────────────────────────────────────────────────────
+
+    @Test
+    fun `an origin is scheme, host and a port only when it is not the default`() {
+        assertEquals("http://100.64.0.10:9091", WellnessChatRules.originOf("http://100.64.0.10:9091/chat/stream?x=1"))
+        assertEquals("https://box.invalid", WellnessChatRules.originOf("https://box.invalid:443/"))
+        assertEquals("http://box.invalid", WellnessChatRules.originOf("HTTP://Box.Invalid:80"))
+        assertEquals("http://[fd7a:115c:a1e0::1]:9091", WellnessChatRules.originOf("http://[fd7a:115c:a1e0::1]:9091/"))
+        assertNull(WellnessChatRules.originOf("not a url"))
+        assertNull(WellnessChatRules.originOf(null))
+    }
+
+    @Test
+    fun `the key signs only for the box that delivered it, while the app is paired with that box`() {
+        val a = "http://100.64.0.10:9091"
+        val b = "http://100.64.0.20:9091"
+        val pinned = WellnessChatRules.KeyUse.Pinned
+        assertEquals(pinned, WellnessChatRules.keyUse(a, "$a/chat/stream", a))
+        assertEquals(pinned, WellnessChatRules.keyUse("$a/", "$a/fossil/snapshot/SNAP-1", "$a/"))
+        // the app re-pointed at another box (the same operator name can exist there): no proof for it
+        assertEquals(WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_OTHER_BOX), WellnessChatRules.keyUse(a, "$b/chat/stream", b))
+        // a request to a host other than the paired box, or no pairing at all
+        assertEquals(WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_OTHER_HOST), WellnessChatRules.keyUse(a, "$b/chat", a))
+        assertEquals(WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_OTHER_HOST),
+            WellnessChatRules.keyUse(a, "http://100.64.0.10:9092/chat", a))
+        assertEquals(WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_UNPAIRED), WellnessChatRules.keyUse(a, "$a/chat", null))
+        // a binding older than box_origin adopts the paired box of its first signed use
+        assertEquals(WellnessChatRules.KeyUse.Adopt(a), WellnessChatRules.keyUse(null, "$a/chat/stream", "$a/"))
+        assertEquals(WellnessChatRules.KeyUse.Adopt(a), WellnessChatRules.keyUse(" ", "$a/chat/stream", a))
+        assertEquals(WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_OTHER_HOST), WellnessChatRules.keyUse(null, "$b/chat", a))
     }
 
     // ── the decision matrix ────────────────────────────────────────────────────────────────
@@ -155,6 +227,26 @@ class WellnessChatRulesTest {
             "ef6f5233bf83837e36693a79ca9a5ab0")
         assertEquals("v1;enr=en_00000006;ts=1793000305;nonce=ef6f5233bf83837e36693a79ca9a5ab0;" +
             "sig=3a3fc48b76031a4685515e375ba9aec37f1ddc8ff291bceebfc464e60d573df3", header)
+    }
+
+    @Test
+    fun `the bridge signs the in-app Portal's ledger read only when it names the Portal's operator once`() {
+        // The box's own signature for this request (origin_proof.signed_headers, the query not signed).
+        val k = OriginSigner.encodeKey(ByteArray(32) { (it * 7 + 3).toByte() })
+        val b = WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = k)
+        fun read(path: String, portal: String? = op) = WellnessChatRules.bridgeHeader(b, state(), portal, "GET", path,
+            emptySha, 1_793_000_000L, "0123456789abcdef0123456789abcdef")
+        assertEquals("v1;enr=en_0f1c0f1c;ts=1793000000;nonce=0123456789abcdef0123456789abcdef;" +
+            "sig=06bc2546b076158a0079114b1537d89021a374f92da74bb91fbbdc0f64e98405",
+            read("/fossil/snapshot/SNAP-42?operator=wellness-fixture"))
+        assertNull("no operator named", read("/fossil/snapshot/SNAP-42"))
+        assertNull("named twice", read("/fossil/snapshot/SNAP-42?operator=wellness-fixture&operator=wellness-fixture"))
+        assertNull("another operator", read("/fossil/snapshot/SNAP-42?operator=someone-else"))
+        assertNull("the Portal is on another operator", read("/fossil/snapshot/SNAP-42?operator=wellness-fixture", "someone-else"))
+        assertNull("not a snapshot id", read("/fossil/snapshot/snap-42?operator=wellness-fixture"))
+        // a POST is the Portal's own operator's, whatever its query says
+        assertEquals(WellnessChatRules.bridgeOperator("POST", "/chat/stream?operator=someone-else", op), op)
+        assertEquals(WellnessChatRules.bridgeOperator("GET", "/fossil/snapshot/SNAP-42?operator=wellness-fixture", op), op)
     }
 
     @Test
@@ -297,6 +389,60 @@ class WellnessChatRulesTest {
         assertFalse("another operator's turn", WellnessChatRules.offersShowNumbers(ledger, emptyList(), "someone-else", op))
         assertFalse("not a health source", WellnessChatRules.offersShowNumbers(ledger, emptyList(), op, null))
         assertFalse(WellnessChatRules.offersShowNumbers("plain", listOf("w-20261028-ab12"), op, op))
+    }
+
+    /**
+     * Snapshots the box's real perform_mint wrote for a masked wellness turn (resources
+     * `wellness/ledger_snapshots.json`): as minted (what the owner's signed ledger read returns),
+     * as redact.hide leaves it (an unsigned read), another operator's, and an untagged turn.
+     */
+    private fun minted(key: String): String {
+        val url = javaClass.classLoader!!.getResource("wellness/ledger_snapshots.json")!!
+        return kotlinx.serialization.json.Json.parseToJsonElement(url.readText())
+            .let { (it as kotlinx.serialization.json.JsonObject).getValue(key) }
+            .let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+    }
+
+    @Test
+    fun `Show numbers appears on the owner's reloaded masked turn, and not on another's or an unmasked one`() {
+        val ref = minted("ref")
+        val own = minted("owner_signed")
+        assertEquals(listOf(ref), WellnessChatRules.refsFromTag(own))
+        assertTrue(WellnessChatRules.offersShowNumbers(own, emptyList(), op, op))
+        assertEquals(listOf(ref), WellnessChatRules.showNumbersRefs(own))
+        // the same turn read unsigned: hidden, no gauge, nothing to offer
+        assertFalse(WellnessChatRules.offersShowNumbers(minted("hidden"), emptyList(), op, op))
+        assertEquals(emptyList<String>(), WellnessChatRules.refsFromTag(minted("hidden")))
+        // another operator's turn stays hidden, and is never theirs to show on this phone
+        assertFalse(WellnessChatRules.offersShowNumbers(minted("other_operator_hidden"), emptyList(), "someone-else", op))
+        assertFalse(WellnessChatRules.offersShowNumbers(own, emptyList(), "someone-else", op))
+        // an untagged turn has nothing masked
+        assertFalse(WellnessChatRules.offersShowNumbers(minted("untagged"), emptyList(), op, op))
+        assertFalse("not a health source", WellnessChatRules.offersShowNumbers(own, emptyList(), op, null))
+    }
+
+    // ── speech (contract (e)) ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun `a health reply is never read aloud, by any voice, with the Portal's words`() {
+        assertFalse(WellnessChatRules.maySpeak(usedHealth = true))
+        assertTrue(WellnessChatRules.maySpeak(usedHealth = false))
+        assertEquals("Health replies aren't read aloud: the voice service would get your health data.",
+            WellnessChatRules.NOT_SPOKEN_MESSAGE)
+    }
+
+    @Test
+    fun `the box's 403 wellness_text is recognized, nothing else is`() {
+        assertTrue(WellnessChatRules.isHealthTextRefusal(403, "wellness_text"))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(403, "not_allowed"))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(400, "wellness_text"))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(403, null as String?))
+        val body = """{"error":"wellness_text","detail":"This text recalls your health data."}""".toByteArray()
+        assertTrue(WellnessChatRules.isHealthTextRefusal(403, body))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(500, body))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(403, "Forbidden".toByteArray()))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(403, """{"detail":"wellness_text"}""".toByteArray()))
+        assertFalse(WellnessChatRules.isHealthTextRefusal(403, null as ByteArray?))
     }
 
     @Test

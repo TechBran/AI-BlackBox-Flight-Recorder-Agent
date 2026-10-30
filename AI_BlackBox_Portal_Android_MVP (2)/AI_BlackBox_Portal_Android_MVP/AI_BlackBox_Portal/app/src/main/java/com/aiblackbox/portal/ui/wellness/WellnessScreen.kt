@@ -3,12 +3,14 @@ package com.aiblackbox.portal.ui.wellness
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +40,7 @@ import com.aiblackbox.portal.data.wellness.WellnessCatalog
 import com.aiblackbox.portal.data.wellness.WellnessCategory
 import com.aiblackbox.portal.data.wellness.WellnessConsent
 import com.aiblackbox.portal.data.wellness.WellnessRules
+import com.aiblackbox.portal.ui.components.MarkdownText
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -50,7 +53,9 @@ import com.aiblackbox.portal.ui.theme.Neutral700
  * with their fixes, what BlackBox may use (Off / Ask / Proactive), where it may go ("Only AI
  * on my network", providers, local-only per kind), the health instinct prompt, where you can
  * ask, the briefing placeholder (M7.3), who saw my health data, and Pause / Disconnect /
- * Stop & erase. Not set up: the setup flow. The Probe exists only in debug builds and in a
+ * Stop & erase; "The privacy policy changed" while the collector holds for a new version, and
+ * "Health is turned off on your BlackBox" when the box's owner turned it off (no setup then).
+ * Not set up: the setup flow. The Probe exists only in debug builds and in a
  * build made with `-PwellnessProbe` (the M7.1 device walk).
  */
 @Composable
@@ -100,6 +105,14 @@ fun WellnessScreen(viewModel: WellnessViewModel = viewModel()) {
 @Composable
 private fun NotSetUp(state: WellnessUiState, onSetUp: () -> Unit) {
     val context = LocalContext.current
+    if (!WellnessRules.offersSetup(state.shownState)) {
+        // Health is turned off on the box: nothing to set up here until its owner turns it on.
+        HealthCard("Needs attention") {
+            HealthNote(WellnessRules.DISABLED_MESSAGE, HealthAmber)
+            HealthButton("Privacy policy", color = Neutral700) { HealthIntents.openPrivacyPolicy(context) }
+        }
+        return
+    }
     HealthCard("Not set up") {
         HealthNote(
             if (state.box?.state == WellnessRules.EnrollmentState.AWAITING_PHONE)
@@ -137,6 +150,12 @@ private fun Enrolled(state: WellnessUiState, viewModel: WellnessViewModel) {
     val launcher = rememberLauncherForActivityResult(
         remember { PermissionController.createRequestPermissionResultContract() },
     ) { granted -> viewModel.onPermissionsResult(granted) }
+
+    if (state.shownState == WellnessRules.EnrollmentState.DISABLED) {
+        HealthCard("Needs attention") { HealthNote(WellnessRules.DISABLED_MESSAGE, HealthAmber) }
+    }
+
+    if (state.policyHold) PolicyChangedCard(state, viewModel)
 
     WellnessStatusScreen(state, viewModel)
 
@@ -238,6 +257,62 @@ private fun InstinctPromptCard(current: String?, viewModel: WellnessViewModel) {
     }
 }
 
+/**
+ * "The privacy policy changed" (the policy's own promise: the app shows the new version before
+ * it collects anything more). The box's current text, rendered like the bundled copy
+ * (WellnessRationaleActivity's MarkdownText); "I agree" records that text's version and resumes,
+ * "Disconnect" is the usual Keep-or-Delete choice. Chat keeps working meanwhile.
+ */
+@Composable
+private fun PolicyChangedCard(state: WellnessUiState, viewModel: WellnessViewModel) {
+    var disconnectOpen by remember { mutableStateOf(false) }
+    HealthCard(WellnessRules.POLICY_CARD_TITLE) {
+        HealthNote(WellnessRules.POLICY_CARD_NOTE, HealthAmber)
+        val text = state.policyText
+        if (text == null) {
+            HealthNote(WellnessRules.POLICY_TEXT_UNAVAILABLE)
+        } else {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) { MarkdownText(content = text) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HealthButton("I agree", enabled = WellnessRules.mayAgreeToPolicy(text, state.policyTextVersion)) {
+                viewModel.agreeToPolicy()
+            }
+            HealthButton("Disconnect…", color = Neutral700) { disconnectOpen = true }
+        }
+    }
+    if (disconnectOpen) DisconnectDialog(viewModel, onDismiss = { disconnectOpen = false })
+}
+
+/** Disconnect has no default: the person picks Keep or Delete history (WellnessRules.disconnectAllowed). */
+@Composable
+private fun DisconnectDialog(viewModel: WellnessViewModel, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Disconnect this phone?") },
+        text = { Text("Collection stops. Do you want to keep what BlackBox already stored, or delete it?") },
+        confirmButton = {
+            TextButton(onClick = { onDismiss(); viewModel.disconnect(keepHistory = false) }) {
+                Text("Delete history", color = BbxAccent)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDismiss) { Text("Cancel", color = Neutral700) }
+                TextButton(onClick = { onDismiss(); viewModel.disconnect(keepHistory = true) }) {
+                    Text("Keep history", color = BbxWhite)
+                }
+            }
+        },
+        containerColor = BbxBlack,
+    )
+}
+
 @Composable
 private fun StopControls(state: WellnessUiState, viewModel: WellnessViewModel) {
     var disconnectOpen by remember { mutableStateOf(false) }
@@ -248,28 +323,7 @@ private fun StopControls(state: WellnessUiState, viewModel: WellnessViewModel) {
         HealthButton("Disconnect…") { disconnectOpen = true }
         HealthButton("Stop & erase…") { eraseOpen = true }
     }
-    if (disconnectOpen) {
-        // No default: the user must pick Keep or Delete history.
-        AlertDialog(
-            onDismissRequest = { disconnectOpen = false },
-            title = { Text("Disconnect this phone?") },
-            text = { Text("Collection stops. Do you want to keep what BlackBox already stored, or delete it?") },
-            confirmButton = {
-                TextButton(onClick = { disconnectOpen = false; viewModel.disconnect(keepHistory = false) }) {
-                    Text("Delete history", color = BbxAccent)
-                }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { disconnectOpen = false }) { Text("Cancel", color = Neutral700) }
-                    TextButton(onClick = { disconnectOpen = false; viewModel.disconnect(keepHistory = true) }) {
-                        Text("Keep history", color = BbxWhite)
-                    }
-                }
-            },
-            containerColor = BbxBlack,
-        )
-    }
+    if (disconnectOpen) DisconnectDialog(viewModel, onDismiss = { disconnectOpen = false })
     if (eraseOpen) {
         var typed by remember { mutableStateOf("") }
         AlertDialog(

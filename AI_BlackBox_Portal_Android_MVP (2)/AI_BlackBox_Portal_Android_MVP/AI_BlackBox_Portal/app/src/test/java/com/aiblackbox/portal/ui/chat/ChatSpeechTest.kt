@@ -264,10 +264,14 @@ class ChatSpeechTest {
 
     // ---- a reply that used health data (M7) ----
 
-    @Test fun `auto-TTS never sends a health reply to a cloud voice`() {
+    /** Every voice the operator can pick, the on-box one (it writes its WAV under Portal/uploads) among them. */
+    private val everyVoice = listOf("openai:alloy", "gemini-pro:Charon", "elevenlabs:abc123", "local:af_heart", "qwen:Vivian", "")
+
+    @Test fun `auto-TTS never reads a health reply aloud, with any voice`() {
         healthReplies += "h1"
         routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
-        for (v in listOf("openai:alloy", "gemini-pro:Charon", "elevenlabs:abc123", "local:af_heart", "")) {
+        routes["/tts/queue"] = { ok("""{"task_id":"t9"}""") }
+        for (v in everyVoice) {
             voice = v
             events.clear()
             var done = false
@@ -278,28 +282,31 @@ class ChatSpeechTest {
         assertTrue("no request left the phone: $requests", requests.isEmpty())
     }
 
-    @Test fun `the speaker refuses a cloud voice for a health reply and says why`() {
+    @Test fun `the speaker never reads a health reply aloud, with any voice, and says why`() {
         healthReplies += "h2"
         routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
-        speech.speakForMessage("h2", "You slept 6 h 49 min.")
-        awaitUntil("the refusal") { events.size == 2 }
-        assertEquals(listOf("generating(h2, true, null)", "generating(h2, false, null)"), events)
-        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
-        assertTrue(requests.isEmpty())
-        val actions = mutableListOf<String?>()
-        awaitUntil("the keep-alive stop") { actions += serviceActions(); BackgroundTaskService.ACTION_STOP in actions }
+        routes["/tts/queue"] = { ok("""{"task_id":"t9"}""") }
+        for (v in everyVoice) {
+            voice = v
+            ShadowToast.reset()
+            speech.speakForMessage("h2", "You slept a little less than usual.")
+            repeat(5) { shadowOf(Looper.getMainLooper()).idle() }
+            assertEquals(v, com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        }
+        assertTrue("the bubble never spins", events.isEmpty())
+        assertTrue("no request left the phone: $requests", requests.isEmpty())
+        assertTrue("no keep-alive service for nothing", serviceActions().isEmpty())
     }
 
-    @Test fun `the on-box voice speaks a health reply, and other replies are unchanged`() {
+    @Test fun `other replies are spoken as before, the on-box voice included`() {
         healthReplies += "h3"
         voice = "qwen:Vivian"
         routes["/tts/queue"] = { ok("""{"task_id":"t9"}""") }
         routes["/tts/task/t9"] = { ok("""{"status":"done","audio_url":"/ui/uploads/t9.wav"}""") }
         routes["/ui/uploads/t9.wav"] = { bytes("RIFF".toByteArray()) }
-        speech.speakForMessage("h3", "You slept a little less than usual.")
+        speech.speakForMessage("plain-1", "The answer.")
         awaitUntil("the clip") { events.any { it.startsWith("audio(") } }
-        assertEquals("audio(h3, tts_q_h3_T.wav)", events.last())
-        assertTrue(requests.none { it.first == "/tts/batch" })
+        assertEquals("audio(plain-1, tts_q_plain-1_T.wav)", events.last())
 
         voice = "openai:alloy"
         routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
@@ -310,12 +317,71 @@ class ChatSpeechTest {
         assertEquals(listOf("generating(plain, true, null)", "audio(plain, auto_tts_T.mp3)"), events)
     }
 
-    @Test fun `only the on-box voice may speak a health reply`() {
+    @Test fun `no voice may speak a health reply`() {
         val rules = com.aiblackbox.portal.data.wellness.WellnessChatRules
-        assertTrue(rules.maySpeak(true, "qwen"))
-        assertTrue(rules.maySpeak(true, " QWEN "))
-        for (p in listOf("openai", "gemini-pro", "gemini-flash", "elevenlabs", "local", "", null)) assertTrue(!rules.maySpeak(true, p))
-        for (p in listOf("openai", "elevenlabs", "", null)) assertTrue(rules.maySpeak(false, p))
+        assertTrue(!rules.maySpeak(usedHealth = true))
+        assertTrue(rules.maySpeak(usedHealth = false))
+    }
+
+    // ---- the box refuses a text that recalls health data (403 wellness_text) ----
+
+    private val healthTextRefusal = {
+        MockResponse.Builder().code(403)
+            .body("""{"error":"wellness_text","detail":"This text recalls your health data, so it is not spoken."}""").build()
+    }
+
+    @Test fun `the box's refusal on tts batch shows the Portal's words and is never retried`() {
+        routes["/tts/batch"] = healthTextRefusal
+        speech.speakForMessage("m9", "Earlier you said the number.")
+        awaitUntil("the refusal") { events.size == 2 }
+        assertEquals(listOf("generating(m9, true, null)", "generating(m9, false, null)"), events)
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        repeat(20) { shadowOf(Looper.getMainLooper()).idle(); Thread.sleep(5) }
+        assertEquals(listOf("/tts/batch"), requests.map { it.first })
+
+        // auto-TTS and plain speech say the same, once
+        requests.clear()
+        ShadowToast.reset()
+        var done = false
+        scope.launch { speech.autoSpeak("m10", "Earlier you said the number."); done = true }
+        awaitUntil("auto-TTS") { done }
+        awaitUntil("the toast") { ShadowToast.getTextOfLatestToast() != null }
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        assertEquals(listOf("/tts/batch"), requests.map { it.first })
+        requests.clear()
+        ShadowToast.reset()
+        speech.speak("Earlier you said the number.")
+        awaitUntil("the toast") { ShadowToast.getTextOfLatestToast() != null }
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        assertEquals(listOf("/tts/batch"), requests.map { it.first })
+        assertTrue(played.isEmpty())
+    }
+
+    @Test fun `the box's refusal on the on-box queue never falls back to tts batch`() {
+        voice = "qwen:Vivian"
+        routes["/tts/queue"] = healthTextRefusal
+        routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
+        speech.speakForMessage("m11", "Earlier you said the number.")
+        awaitUntil("the reset") { events.lastOrNull() == "generating(m11, false, null)" }
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        repeat(20) { shadowOf(Looper.getMainLooper()).idle(); Thread.sleep(5) }
+        assertEquals(listOf("/tts/queue"), requests.map { it.first })
+
+        requests.clear()
+        ShadowToast.reset()
+        speech.speak("Earlier you said the number.")
+        awaitUntil("the toast") { ShadowToast.getTextOfLatestToast() != null }
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        repeat(20) { shadowOf(Looper.getMainLooper()).idle(); Thread.sleep(5) }
+        assertEquals(listOf("/tts/queue"), requests.map { it.first })
+        assertTrue(played.isEmpty())
+    }
+
+    @Test fun `another 403 is an ordinary failure, not the health refusal`() {
+        routes["/tts/batch"] = { MockResponse.Builder().code(403).body("""{"error":"not_allowed"}""").build() }
+        speech.speakForMessage("m12", "Hi.")
+        awaitUntil("the reset") { events.size == 2 }
+        assertEquals("TTS failed: 403", ShadowToast.getTextOfLatestToast())
     }
 
     // ---- plain speech ----

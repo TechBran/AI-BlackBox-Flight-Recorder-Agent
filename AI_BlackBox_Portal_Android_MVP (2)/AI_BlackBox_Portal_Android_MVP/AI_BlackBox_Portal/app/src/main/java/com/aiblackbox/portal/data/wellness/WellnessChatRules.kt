@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.time.Instant
 import java.time.OffsetDateTime
@@ -24,7 +25,8 @@ import java.util.Locale
  * SIGNING. A request carries `X-BlackBox-Origin` only when it goes to an allow-listed path
  * with that path's method, this phone holds a binding the box knows as live
  * ([SIGNING_STATES]), the box has not refused its key, no Disconnect or erase is waiting on
- * the box, and the request is for the enrolled operator. Everything else goes out unsigned,
+ * the box, the request is for the enrolled operator, and it goes to the box that delivered the
+ * bind while the app is still paired with it ([keyUse]). Everything else goes out unsigned,
  * byte-identical to a build without Health. The box decides on its own as well (it grants a
  * chat turn the credential only when the proof is the body operator's enrolled phone): this
  * rule only keeps the phone from spending its key where it cannot count.
@@ -37,6 +39,14 @@ object WellnessChatRules {
     const val CHAT = "/chat"
     const val REF_PREFIX = "/wellness/ref/"
 
+    /**
+     * The ledger read (`GET /fossil/snapshot/<id>`, Timeline and the SNAP peek sheet). Signed, the
+     * box reads the snapshot as the enrolled operator's own screen: a health turn of theirs comes
+     * back masked ("[·]") with its WELLNESS gauge, so Show numbers can offer its refs; unsigned
+     * (or for anyone else's turn) it stays "[wellness conversation · not shared]".
+     */
+    const val LEDGER_PREFIX = "/fossil/snapshot/"
+
     /** The exact paths (no query) that may be signed, each with the one method it takes. */
     private val SIGNED_EXACT: Map<String, String> = mapOf(
         CHAT_STREAM to "POST",
@@ -48,16 +58,36 @@ object WellnessChatRules {
     /** A delivery ref as the box mints them (api.new_ref): `w-<yyyymmdd>-<hex>`. */
     val REF_RE = Regex("w-[0-9]{8}-[0-9a-f]{4,16}")
 
+    /** A snapshot id as the box takes it: `SNAP-<yyyymmdd>-<n>`, or the short `SNAP-<n>` models cite. */
+    val SNAP_ID_RE = Regex("SNAP-(?:[0-9]{8}-)?[0-9]{1,12}")
+
     /**
      * May [method] [path] carry the proof? [path] is the request path without its query: one
-     * of the exact paths with its method, or `GET /wellness/ref/<one ref>` (Show numbers).
-     * Nothing else, so no other route ever receives a signature from the chat side.
+     * of the exact paths with its method, `GET /wellness/ref/<one ref>` (Show numbers), or
+     * `GET /fossil/snapshot/<one snapshot id>` (a turn reloaded from the ledger). Nothing else,
+     * so no other route ever receives a signature from the chat side.
      */
     fun isSignable(method: String, path: String): Boolean {
         val m = method.trim().uppercase(Locale.ROOT)
         SIGNED_EXACT[path]?.let { return it == m }
-        return m == "GET" && path.startsWith(REF_PREFIX) && REF_RE.matches(path.removePrefix(REF_PREFIX))
+        if (m != "GET") return false
+        if (path.startsWith(REF_PREFIX)) return REF_RE.matches(path.removePrefix(REF_PREFIX))
+        return isLedgerRead(path)
     }
+
+    /** Is [path] (no query) the ledger read of one snapshot? */
+    fun isLedgerRead(path: String): Boolean =
+        path.startsWith(LEDGER_PREFIX) && SNAP_ID_RE.matches(path.removePrefix(LEDGER_PREFIX))
+
+    /** `/fossil/snapshot/<id>`, with no query (the native app never sends one), or null for an id the box would not take. */
+    fun ledgerPath(snapId: String): String? = snapId.trim().takeIf { SNAP_ID_RE.matches(it) }?.let { LEDGER_PREFIX + it }
+
+    /**
+     * The box refused the proof itself (401 bad_signature, 409 owner_changed, 410 revoked or
+     * source_moved; never downgraded to an unsigned read on its side). The ledger read then asks
+     * once more unsigned, so the Timeline never shows less than it did before Health.
+     */
+    fun proofRefused(status: Int): Boolean = status == 401 || status == 409 || status == 410
 
     /** The enrollment states in which the box's gate answers from this phone's data (gate.GATE_STATES). */
     val SIGNING_STATES: Set<WellnessRules.EnrollmentState> = setOf(
@@ -122,6 +152,48 @@ object WellnessChatRules {
         return a.scheme == b.scheme && a.host == b.host && a.port == b.port
     }
 
+    /** `scheme://host[:port]` of [url] (the port only when it is not the scheme's default), or null. */
+    fun originOf(url: String?): String? {
+        val u = url?.trim()?.toHttpUrlOrNull() ?: return null
+        val host = if (':' in u.host) "[${u.host}]" else u.host
+        val port = if (u.port == HttpUrl.defaultPort(u.scheme)) "" else ":${u.port}"
+        return u.scheme + "://" + host + port
+    }
+
+    /** May this phone's key sign a request to a given box ([keyUse])? */
+    sealed class KeyUse {
+        /** The binding is pinned to the paired box and the request goes there: sign. */
+        data object Pinned : KeyUse()
+
+        /**
+         * A binding written before `box_origin` existed (wave 3 and earlier): it was made with
+         * the box the app was paired with then, which is the one it is paired with now unless
+         * the app was re-pointed in between. It adopts [origin], the paired box of its first
+         * signed use, and is rewritten once (WellnessBinding.adoptBoxOrigin); then it is Pinned.
+         */
+        data class Adopt(val origin: String) : KeyUse()
+
+        data class Refused(val reason: String) : KeyUse()
+    }
+
+    const val KEY_UNPAIRED = "unpaired"
+    const val KEY_OTHER_HOST = "other_host"
+    const val KEY_OTHER_BOX = "other_box"
+
+    /**
+     * Where this phone's key may go (contract (f)): only to the box that delivered the bind
+     * ([bindingOrigin], the binding's `box_origin`), only while the app is still paired with it
+     * ([pairedOrigin]), and only for a request that goes there ([requestUrl]). An app re-pointed
+     * at another box (the same operator name can exist there) therefore never hands that box a
+     * proof, which would be live for 120 s at the box that enrolled this phone.
+     */
+    fun keyUse(bindingOrigin: String?, requestUrl: String?, pairedOrigin: String?): KeyUse {
+        val paired = originOf(pairedOrigin) ?: return KeyUse.Refused(KEY_UNPAIRED)
+        if (!sameOrigin(requestUrl, paired)) return KeyUse.Refused(KEY_OTHER_HOST)
+        if (bindingOrigin.isNullOrBlank()) return KeyUse.Adopt(paired)
+        return if (sameOrigin(bindingOrigin, paired)) KeyUse.Pinned else KeyUse.Refused(KEY_OTHER_BOX)
+    }
+
     private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
@@ -136,6 +208,19 @@ object WellnessChatRules {
             return (obj?.get("operator") as? JsonPrimitive)?.takeIf { it.isString }?.content
         }
         return queryOperator
+    }
+
+    /**
+     * The operator a request to [path] (no query) is for, as the interceptor decides it. A ledger
+     * read has no body and, from the native app, no query: it is for the operator on the app's
+     * screen ([screenOperator], the one its Timeline and chat are on), since the box answers a
+     * signed read as the proof's operator's own screen. A query naming someone else makes it
+     * nobody's. Every other path: [operatorOf] (a screen operator never overrides a body or query).
+     */
+    fun requestOperator(path: String, body: ByteArray?, queryOperator: String?, screenOperator: String?): String? {
+        if (!isLedgerRead(path)) return operatorOf(body, queryOperator)
+        val screen = screenOperator?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return screen.takeIf { queryOperator == null || queryOperator.trim() == it }
     }
 
     /** The `operator` query parameter of [pathWithQuery] (decoded), or null. */
@@ -333,23 +418,36 @@ object WellnessChatRules {
 
     // ── reading a reply aloud ──────────────────────────────────────────────────────────────
 
-    /** The box's on-box voice (Qwen3-TTS; TtsRepository.ON_BOX_PROVIDER): text it speaks never leaves the box. */
-    const val ON_BOX_VOICE = "qwen"
+    /**
+     * May a reply be read aloud? Not when it used the person's health data ([usedHealth]), in
+     * v1, with any voice, automatically or by a tap (contract (e), the same rule as the
+     * Portal's). Every cloud voice is a service the health settings never allowed (rule W31:
+     * they name which AI may see the data, never a voice), a "local" voice server is one the
+     * phone cannot tell is on the person's network, and even the on-box voice is no exception:
+     * it writes the clip as a WAV under Portal/uploads and serves it at /ui/uploads/, where no
+     * health value may ever land (rules W26, W32). The box refuses such a text on its own as
+     * well ([isHealthTextRefusal]).
+     */
+    fun maySpeak(usedHealth: Boolean): Boolean = !usedHealth
+
+    /** What the person reads when a health reply is not spoken: identical on the Portal and in the app. */
+    const val NOT_SPOKEN_MESSAGE = "Health replies aren't read aloud: the voice service would get your health data."
+
+    /** The box's answer to a TTS text that recalls a wellness delivery (POST /tts, /tts/batch, /tts/queue). */
+    const val TTS_REFUSAL_ERROR = "wellness_text"
 
     /**
-     * May a reply be read aloud with a voice of [ttsProvider] (the operator's "provider:voice"
-     * provider; "" is the box's default, whichever that is)? Always, unless the reply used the
-     * person's health data ([usedHealth]); then only with the on-box voice. Every other voice
-     * sends the text to a service: OpenAI, Google, ElevenLabs, or a "local" server the phone
-     * cannot tell is on the person's network. The health settings name which AI may see the
-     * data, never a voice, so this is default-deny (rules W19, W31; the bundled policy says a
-     * cloud provider sees health data only if it is ticked).
+     * Did the box refuse to speak a text because it recalls the operator's health data (403
+     * `{"error": "wellness_text"}`)? The client then shows [NOT_SPOKEN_MESSAGE] and never retries.
      */
-    fun maySpeak(usedHealth: Boolean, ttsProvider: String?): Boolean =
-        !usedHealth || ttsProvider?.trim()?.lowercase(Locale.ROOT) == ON_BOX_VOICE
+    fun isHealthTextRefusal(status: Int, error: String?): Boolean = status == 403 && error?.trim() == TTS_REFUSAL_ERROR
 
-    const val NOT_SPOKEN_MESSAGE = "Not read aloud: this reply has your health data, and your voice isn't on your " +
-        "BlackBox. Choose an on-box voice to hear replies like this."
+    /** [isHealthTextRefusal] over a raw response body (the direct /tts/batch call reads one). */
+    fun isHealthTextRefusal(status: Int, body: ByteArray?): Boolean {
+        if (status != 403 || body == null || body.isEmpty() || body.size > 4096) return false
+        val obj = runCatching { JSON.parseToJsonElement(body.toString(Charsets.UTF_8)) as? JsonObject }.getOrNull()
+        return isHealthTextRefusal(status, obj?.str("error"))
+    }
 
     // ── masked turns and Show numbers ──────────────────────────────────────────────────────
 

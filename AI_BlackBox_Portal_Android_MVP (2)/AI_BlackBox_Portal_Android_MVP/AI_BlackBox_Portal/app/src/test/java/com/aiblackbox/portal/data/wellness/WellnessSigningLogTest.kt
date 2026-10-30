@@ -36,7 +36,7 @@ class WellnessSigningLogTest {
     private val k = OriginSigner.encodeKey(ByteArray(32) { (it * 11 + 5).toByte() })
     private val facts by lazy {
         WellnessSigningInterceptor.Facts(
-            WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = k),
+            WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = k, boxOrigin = server.url("").toString()),
             WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire),
             server.url("").toString(),
         )

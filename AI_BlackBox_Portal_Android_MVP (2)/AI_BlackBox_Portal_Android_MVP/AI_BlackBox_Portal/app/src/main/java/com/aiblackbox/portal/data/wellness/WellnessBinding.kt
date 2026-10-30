@@ -66,13 +66,18 @@ class WellnessBinding(
     /** The operator the box may address `/wellness/sync` and `/wellness/unbind` to ("" if none). */
     fun enrolledOperator(): String = current()?.operator.orEmpty()
 
-    /** Start an enrollment for [operator]: a fresh 2-minute nonce, persisted. */
-    fun beginIntent(operator: String): WellnessIntent = synchronized(lock) {
+    /**
+     * Start an enrollment for [operator]: a fresh 2-minute nonce, persisted. [boxOrigin] is the
+     * box the enroll call goes to (the paired box): the bind it answers with arrives while that
+     * call is held, so the binding records it as the one box its key may sign for (contract (f)).
+     */
+    fun beginIntent(operator: String, boxOrigin: String? = null): WellnessIntent = synchronized(lock) {
         require(operator.isNotBlank()) { "operator required" }
         val intent = WellnessIntent(
             operator = operator.trim(),
             nonce = OriginSigner.newNonce(random),
             expiresAtMs = clock() + INTENT_LIFE_MS,
+            boxOrigin = WellnessChatRules.originOf(boxOrigin),
         )
         WellnessAtomic.writeText(files.intent, JSON.encodeToString(intent))
         intent
@@ -108,6 +113,7 @@ class WellnessBinding(
             k = request.k,
             boundAtMs = clock(),
             boundBy = intent.nonce,
+            boxOrigin = intent.boxOrigin,
         )
         val previous = readRecord()
         val sameEnrollment = previous != null && previous.enrollmentId == record.enrollmentId &&
@@ -176,6 +182,36 @@ class WellnessBinding(
     /** A signer for the live binding, or null when not bound. */
     fun signer(): OriginSigner? = current()?.let { OriginSigner(it.enrollmentId, it.k, random) }
 
+    /**
+     * Pin a binding written before `box_origin` existed (wave 3 and earlier) to [origin], the
+     * paired box of its first signed use ([WellnessChatRules.KeyUse.Adopt]). The record is
+     * rewritten ONCE, in place (same key, enrollment and generation: a run in flight carries on);
+     * a binding that already names a box is never re-pinned. True when the binding now names
+     * [origin], so its key may sign for it.
+     */
+    fun adoptBoxOrigin(origin: String): Boolean = synchronized(lock) {
+        val pinned = WellnessChatRules.originOf(origin) ?: return false
+        val record = readRecord() ?: return false
+        if (record.boxOrigin != null) return WellnessChatRules.sameOrigin(record.boxOrigin, pinned)
+        WellnessAtomic.writeText(files.binding, JSON.encodeToString(record.copy(boxOrigin = pinned)))
+        Log.i(TAG, "health source pinned to its box (an older binding)")
+        true
+    }
+
+    /**
+     * May this phone's key sign a request to [requestUrl] while the app is paired with
+     * [pairedOrigin] ([WellnessChatRules.keyUse])? An older binding adopts the paired box here.
+     * The one check IngestClient makes before it signs anything.
+     */
+    fun mayUseKeyFor(requestUrl: String, pairedOrigin: String?): Boolean {
+        val record = current() ?: return false
+        return when (val use = WellnessChatRules.keyUse(record.boxOrigin, requestUrl, pairedOrigin)) {
+            WellnessChatRules.KeyUse.Pinned -> true
+            is WellnessChatRules.KeyUse.Adopt -> adoptBoxOrigin(use.origin)
+            is WellnessChatRules.KeyUse.Refused -> false
+        }
+    }
+
     private fun readRecord(): WellnessBindingRecord? {
         val raw = WellnessAtomic.readTextOrNull(files.binding) ?: return null
         return runCatching { JSON.decodeFromString<WellnessBindingRecord>(raw) }.getOrNull()
@@ -212,6 +248,12 @@ data class WellnessBindingRecord(
     @SerialName("bound_at_ms") val boundAtMs: Long = 0L,
     /** The intent nonce of the enrollment attempt that delivered this bind (spent; see rollBackBind). */
     @SerialName("bound_by") val boundBy: String? = null,
+    /**
+     * `scheme://host[:port]` of the box that delivered the bind, the only box this key signs for
+     * (contract (f)). Null in a binding written before the field existed: it adopts the paired
+     * box of its first signed use ([WellnessBinding.adoptBoxOrigin]).
+     */
+    @SerialName("box_origin") val boxOrigin: String? = null,
 )
 
 @Serializable
@@ -219,6 +261,8 @@ data class WellnessIntent(
     val operator: String,
     val nonce: String,
     @SerialName("expires_at_ms") val expiresAtMs: Long,
+    /** The box the enroll call went to; the bind it delivers is pinned to it. */
+    @SerialName("box_origin") val boxOrigin: String? = null,
 )
 
 /** The box's `/wellness/bind` body (wire contract). */

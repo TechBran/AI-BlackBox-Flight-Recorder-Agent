@@ -28,7 +28,7 @@ class IngestClientTest {
 
     @Before fun setUp() {
         server.start()
-        client = IngestClient(server.url("").toString().removeSuffix("/"), nowSec = { 1_793_000_000L })
+        client = IngestClient(server.url("").toString().removeSuffix("/"), nowSec = { 1_793_000_000L }, keyPinned = { true })
     }
 
     @After fun tearDown() = server.close()
@@ -105,8 +105,35 @@ class IngestClientTest {
     }
 
     @Test
+    fun `a signed call to a box the key does not belong to is never sent, signed or not`() = runBlocking {
+        val asked = mutableListOf<String>()
+        val repointed = IngestClient(server.url("").toString().removeSuffix("/"), nowSec = { 1_793_000_000L },
+            keyPinned = { url -> asked += url; false })
+        val gz = WellnessOutbox.gzip("""{"schema":"bbx.wellness.ingest/1"}""")
+        for (r in listOf(repointed.ingest(gz, signer), repointed.status(WellnessFixtures.OPERATOR, signer),
+                repointed.capabilities("{}", signer), repointed.putSettings("{}", signer),
+                repointed.action(IngestClient.ERASE, "{}", signer))) {
+            assertEquals(-1, r.status)
+            assertEquals(IngestClient.OTHER_BOX, r.error)
+            assertEquals(WellnessRules.OutboxReaction.RETRY_LATER, WellnessRules.outboxReaction(r.status))
+        }
+        assertEquals("nothing reached the box", 0, server.requestCount)
+        assertEquals(server.url("/wellness/ingest").toString(), asked.first())
+        // the unsigned calls (enroll, a read with no key) are not the key's to hold back
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        assertEquals(200, repointed.enroll("""{"operator":"wellness-fixture"}""").status)
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        assertEquals(200, repointed.status(WellnessFixtures.OPERATOR, null).status)
+        assertNull(taken().headers[OriginSigner.HEADER])
+        assertNull(taken().headers[OriginSigner.HEADER])
+        // and the default client signs nothing at all
+        assertEquals(IngestClient.OTHER_BOX, IngestClient(server.url("").toString()).ingest(gz, signer).error)
+        assertEquals(server.url("").toString().removeSuffix("/"), repointed.origin)
+    }
+
+    @Test
     fun `no answer is status -1, never an exception`() = runBlocking {
-        val dead = IngestClient("http://127.0.0.1:1")
+        val dead = IngestClient("http://127.0.0.1:1", keyPinned = { true })
         val r = dead.ingest(ByteArray(0), signer)
         assertEquals(-1, r.status)
         assertFalse(r.reached)

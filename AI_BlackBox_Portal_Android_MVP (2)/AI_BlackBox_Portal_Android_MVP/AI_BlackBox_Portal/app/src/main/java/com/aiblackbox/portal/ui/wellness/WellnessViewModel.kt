@@ -104,6 +104,13 @@ data class WellnessUiState(
     val message: String? = null,
     val probeReport: String? = null,
     val probeFile: String? = null,
+    /** The state the screen shows (WellnessRules.shownState): the box's, or the phone's own. */
+    val shownState: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.NOT_SET_UP,
+    /** The box names a privacy policy the person has not agreed to: the collector holds (WellnessRules.policyHold). */
+    val policyHold: Boolean = false,
+    /** The box's current policy text (GET /wellness/privacy-policy) and the version it names, while [policyHold]. */
+    val policyText: String? = null,
+    val policyTextVersion: String? = null,
 ) {
     val bound: Boolean get() = boundOperator != null
 }
@@ -151,10 +158,15 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val client = client()
         val signer = binding.signer()
         val statusOperator = record?.operator ?: operator
+        var statusPolicy: String? = null
         var box = if (client != null && statusOperator.isNotBlank()) {
             val reply = client.status(statusOperator, signer)
-            if (reply.ok) WellnessStatusParser.parse(reply.body) else null
+            if (reply.ok) WellnessStatusParser.parse(reply.body).also { parsed ->
+                statusPolicy = reply.policyVersion ?: parsed?.takeIf { it.credentialed }?.policyVersion
+            } else null
         } else null
+        // A credentialed status names the box's policy version: a new one holds the collector.
+        if (record != null && statusPolicy != null) writeState { WellnessRules.noteBoxPolicy(it, statusPolicy) }
         // A replacement the old phone has approved: the AI choices setup made while it waited
         // go now (the collector's status read sends them too, whichever comes first).
         if (record != null && client != null && signer != null) {
@@ -219,6 +231,12 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val troubleCodes = WellnessRules.mergeTroubles(box?.troubles.orEmpty(), if (record != null) local else
             local.filter { it == "hc_unavailable" || it == "hc_needs_update" })
         val boxState = WellnessRules.shownState(box?.state, box?.credentialed == true, st.enrollmentState())
+        // The policy changed: the card shows the box's own current text (and agreeing records
+        // the version of THAT text, never one the person did not see).
+        val policyHold = record != null && WellnessRules.policyHold(st)
+        val policy = if (policyHold && client != null) {
+            client.get(IngestClient.PRIVACY_POLICY, null).takeIf { it.ok }
+        } else null
         _state.update { s ->
             s.copy(
                 loading = false,
@@ -232,7 +250,12 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 epoch = record?.epoch,
                 box = box,
                 settings = box?.takeIf { it.credentialed }?.settings() ?: s.settings,
-                chip = WellnessRules.statusChip(boxState, record != null, troubleCodes, held = st.localHold != null),
+                chip = WellnessRules.statusChip(boxState, record != null, troubleCodes, held = st.localHold != null,
+                    policyHold = policyHold),
+                shownState = boxState,
+                policyHold = policyHold,
+                policyText = policy?.body?.takeIf { it.isNotBlank() },
+                policyTextVersion = WellnessRules.policyVersion(policy?.policyVersion),
                 troubles = troubleCodes.mapNotNull { WellnessRules.troubleCard(it) },
                 sync = WellnessSyncInfo(
                     lastPushMs = st.lastPushMs, pending = outbox.size(), quarantined = outbox.quarantinedCount(),
@@ -340,8 +363,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         report?.let { runCatching { withContext(Dispatchers.IO) { WellnessGraph.applyProbe(app, it) } } }
         // A bind this attempt received but the box did not confirm is rolled back with
         // whatever it scheduled (nothing is scheduled before the box's 200).
+        // The bind is pinned to the box this enroll call goes to (contract (f)).
         val enrollment = WellnessEnrollment(binding, { body -> client.enroll(body) }, { WellnessGraph.tailnetIps() },
-            onRolledBack = { WellnessScheduler.cancelAll(app) })
+            onRolledBack = { WellnessScheduler.cancelAll(app) }, boxOrigin = client.origin)
         val outcome = enrollment.enroll(
             operator = s.operator,
             consent = s.setup.consent,
@@ -349,6 +373,11 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             assignToMe = s.setup.assignToMe,
             replace = s.setup.replace,
         )
+        if (outcome is WellnessEnrollment.Outcome.Enrolled) {
+            // The person agreed to the privacy policy this enrollment was made under: the version
+            // the enroll reply carries (a later one on the box holds the collector until agreed).
+            writeState { WellnessRules.enrolledUnderPolicy(it, outcome.policyVersion) }
+        }
         // Providers and local-only are settings, sent signed once the box takes them from this phone.
         val wanted = WellnessRules.Settings(
             categories = s.setup.consent, localOnly = s.setup.localOnly,
@@ -530,6 +559,27 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         } else {
             say(if (reply.reached) "The box didn't accept that." else "Couldn't reach your box.")
         }
+        refresh()
+    }
+
+    /**
+     * "I agree" on "The privacy policy changed": records the version of the text the card showed
+     * (WellnessRules.agreePolicy) and lets the collector run again. Only over text the box sent
+     * (WellnessRules.mayAgreeToPolicy); "Disconnect" is the other answer.
+     */
+    fun agreeToPolicy() = viewModelScope.launch {
+        val s = state.value
+        val version = s.policyTextVersion
+        if (!WellnessRules.mayAgreeToPolicy(s.policyText, version) || version == null) {
+            say(WellnessRules.POLICY_TEXT_UNAVAILABLE)
+            return@launch
+        }
+        if (!writeState { WellnessRules.agreePolicy(it, version) }) {
+            say("Couldn't save that on this phone. Try again.")
+            return@launch
+        }
+        WellnessScheduler.syncNow(app)
+        say("Thanks. Health collection is back on.")
         refresh()
     }
 

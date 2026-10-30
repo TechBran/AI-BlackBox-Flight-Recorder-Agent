@@ -125,6 +125,55 @@ class WellnessBindingTest {
         assertFalse(binding.rollBackBind(first.nonce))
     }
 
+    // ── the key's box (contract (f)) ───────────────────────────────────────────────────────
+
+    private val box = "http://100.64.0.10:9091"
+
+    @Test
+    fun `a bind is pinned to the box the enroll call went to`() {
+        val intent = binding.beginIntent(WellnessFixtures.OPERATOR, "$box/")
+        assertEquals(box, intent.boxOrigin)
+        binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_0badc0de", 1, intent.nonce, key))
+        assertEquals(box, binding.current()!!.boxOrigin)
+        assertTrue(binding.mayUseKeyFor("$box/chat/stream", box))
+        assertFalse("re-pointed at another box", binding.mayUseKeyFor("http://100.64.0.20:9091/chat/stream", "http://100.64.0.20:9091"))
+        assertFalse("a request off the paired box", binding.mayUseKeyFor("http://100.64.0.20:9091/chat", box))
+        assertFalse("unpaired", binding.mayUseKeyFor("$box/chat", null))
+        // a re-enroll through another box pins the new binding to that one
+        val again = binding.beginIntent(WellnessFixtures.OPERATOR, "http://100.64.0.20:9091")
+        binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_12ab34cd", 2, again.nonce, key))
+        assertEquals("http://100.64.0.20:9091", binding.current()!!.boxOrigin)
+    }
+
+    @Test
+    fun `an older binding adopts the paired box once, and a pinned one is never re-pinned`() {
+        bind() // an intent without a box: a binding as wave 3 wrote it
+        assertNull(binding.current()!!.boxOrigin)
+        val (_, gen) = binding.snapshot()!!
+        assertTrue(binding.mayUseKeyFor("$box/wellness/ingest", "$box/"))
+        assertEquals(box, binding.current()!!.boxOrigin)
+        val written = files.binding.readText()
+        assertTrue("the same key and enrollment: a run in flight carries on", binding.runIfCurrent(gen) {})
+        assertTrue(binding.mayUseKeyFor("$box/wellness/ingest", box))
+        assertEquals("rewritten once", written, files.binding.readText())
+        assertFalse(binding.adoptBoxOrigin("http://100.64.0.20:9091"))
+        assertFalse(binding.mayUseKeyFor("http://100.64.0.20:9091/wellness/ingest", "http://100.64.0.20:9091"))
+        assertEquals(box, binding.current()!!.boxOrigin)
+        assertEquals(written, files.binding.readText())
+        binding.clearAll()
+        assertFalse("no binding, nothing to pin", binding.adoptBoxOrigin(box))
+        assertFalse(binding.mayUseKeyFor("$box/chat", box))
+    }
+
+    @Test
+    fun `a binding file from before box_origin still reads`() {
+        files.root.mkdirs()
+        files.binding.writeText("""{"operator":"wellness-fixture","enrollment_id":"en_0badc0de","epoch":1,"k":"$key","bound_at_ms":1}""")
+        val record = binding.current()!!
+        assertNull(record.boxOrigin)
+        assertEquals("en_0badc0de", record.enrollmentId)
+    }
+
     @Test
     fun `clearAll takes the probe exports with everything else`() {
         bind()

@@ -1,0 +1,281 @@
+{
+ "categories": [
+  "sleep",
+  "heart",
+  "activity",
+  "blood_pressure"
+ ],
+ "payload": {
+  "as_of": "2026-10-28T11:55-04:00",
+  "categories": [
+   "sleep",
+   "heart",
+   "activity",
+   "blood_pressure"
+  ],
+  "coarsened": true,
+  "gaps": [],
+  "metrics": [
+   {
+    "category": "sleep",
+    "compact": true,
+    "coverage": {
+     "label": "worn 27 of 30 nights",
+     "pct": 90
+    },
+    "display": "7 h 15 min",
+    "metric": "sleep_duration",
+    "usual": {
+     "high": 490.5,
+     "low": 381.5
+    },
+    "value": 435.1,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "worn 27 of 30 nights",
+     "pct": 90
+    },
+    "display": "53 bpm",
+    "metric": "sleeping_hr_median",
+    "usual": {
+     "high": 55.0,
+     "low": 49.0
+    },
+    "value": 52.8,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "worn 27 of 30 nights",
+     "pct": 90
+    },
+    "display": "48 bpm",
+    "metric": "sleeping_hr_p10",
+    "usual": {
+     "high": 50.6,
+     "low": 44.6
+    },
+    "value": 48.4,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "27 of 30 days with data",
+     "pct": 90
+    },
+    "display": "55 bpm",
+    "metric": "resting_hr",
+    "usual": {
+     "high": 56.1,
+     "low": 49.2
+    },
+    "value": 54.9,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "26 of 30 days with 10 h of wear",
+     "pct": 100
+    },
+    "display": "70 bpm",
+    "metric": "heart_rate",
+    "usual": {
+     "high": 73.3,
+     "low": 67.3
+    },
+    "value": 69.7,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "9 of 30 days with data",
+     "pct": 30
+    },
+    "display": "43 ms",
+    "metric": "hrv",
+    "usual": null,
+    "value": 42.8,
+    "vs_usual": null
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "27 of 30 days with data",
+     "pct": 90
+    },
+    "display": "96 %",
+    "metric": "spo2",
+    "usual": {
+     "high": 98.2,
+     "low": 93.8
+    },
+    "value": 96.3,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "heart",
+    "compact": true,
+    "coverage": {
+     "label": "27 of 30 days with data",
+     "pct": 90
+    },
+    "display": "14.5 breaths/min",
+    "metric": "respiratory_rate",
+    "usual": {
+     "high": 16.1,
+     "low": 13.2
+    },
+    "value": 14.5,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "activity",
+    "compact": true,
+    "coverage": {
+     "label": "26 of 30 days with 10 h of wear",
+     "pct": 100
+    },
+    "display": "7,953 steps",
+    "metric": "steps",
+    "total_display": "238,600 steps",
+    "usual": {
+     "high": 10543.0,
+     "low": 4583.0
+    },
+    "value": 7953.3,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "activity",
+    "compact": true,
+    "coverage": {
+     "label": "26 of 30 days with 10 h of wear",
+     "pct": 100
+    },
+    "display": "5.9 km",
+    "metric": "distance",
+    "total_display": "176.6 km",
+    "usual": {
+     "high": 7801.5,
+     "low": 3391.5
+    },
+    "value": 5885.5,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "activity",
+    "compact": true,
+    "coverage": {
+     "label": "26 of 30 days with 10 h of wear",
+     "pct": 100
+    },
+    "display": "326 kcal",
+    "metric": "active_calories",
+    "total_display": "9,783 kcal",
+    "usual": {
+     "high": 432.5,
+     "low": 187.5
+    },
+    "value": 326.1,
+    "vs_usual": "within your usual range"
+   },
+   {
+    "category": "activity",
+    "compact": true,
+    "coverage": {
+     "label": "10 of 30 days with data",
+     "pct": 33
+    },
+    "display": "34 min",
+    "metric": "exercise",
+    "total_display": "5 h 45 min",
+    "usual": null,
+    "value": 34.5,
+    "vs_usual": null
+   },
+   {
+    "category": "blood_pressure",
+    "compact": true,
+    "coverage": {
+     "label": "21 of 30 days with data",
+     "pct": 70
+    },
+    "display": "120 mmHg",
+    "metric": "bp_systolic",
+    "usual": null,
+    "value": 120.1,
+    "vs_usual": null
+   },
+   {
+    "category": "blood_pressure",
+    "compact": true,
+    "coverage": {
+     "label": "21 of 30 days with data",
+     "pct": 70
+    },
+    "display": "78 mmHg",
+    "metric": "bp_diastolic",
+    "usual": null,
+    "value": 78.0,
+    "vs_usual": null
+   }
+  ],
+  "metrics_omitted": [
+   "total_calories"
+  ],
+  "notes": [
+   "Sleeping heart rate is a BlackBox estimate from 5-minute averages.",
+   "Shown at a coarser resolution to fit; ask for a shorter range for detail.",
+   "Some metrics were left out to fit (metrics_omitted); ask about one of them for its numbers."
+  ],
+  "ok": true,
+  "paused": false,
+  "period": {
+   "days": 30,
+   "end": "2026-10-28T12:00-04:00",
+   "label": "the last 30 days",
+   "name": "last_30_days",
+   "start": "2026-09-29T00:00-04:00",
+   "tz": "UTC-04:00"
+  },
+  "ref": "w-20261028-8112",
+  "sessions": [
+   {
+    "avg_hr": 95.7,
+    "distance": "2.4 km",
+    "distance_m": 2400.0,
+    "duration": "30 min",
+    "duration_min": 30.0,
+    "end": "2026-09-29T13:00-04:00",
+    "hr_coverage_pct": 100,
+    "kind": "exercise",
+    "max_hr": 101.0,
+    "session_ref": "s-20260929-d69838e8",
+    "start": "2026-09-29T12:30-04:00",
+    "type": "walk"
+   }
+  ],
+  "sessions_shown": 1,
+  "sources": [],
+  "stale": false,
+  "tool": "wellness_summary",
+  "troubles": [],
+  "tz": "UTC-04:00"
+ },
+ "ref": "w-20261028-8112",
+ "tool": "wellness_summary",
+ "ts": 1793000000000
+}

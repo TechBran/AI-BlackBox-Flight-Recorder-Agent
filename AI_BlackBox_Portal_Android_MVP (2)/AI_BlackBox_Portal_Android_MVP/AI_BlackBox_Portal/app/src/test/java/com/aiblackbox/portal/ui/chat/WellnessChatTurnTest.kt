@@ -107,7 +107,8 @@ class WellnessChatTurnTest {
     }
 
     private fun enrolled() = WellnessSigningInterceptor.Facts(
-        WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = OriginSigner.encodeKey(key)),
+        WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = OriginSigner.encodeKey(key),
+            boxOrigin = server.url("").toString()),
         WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire, sourceLabel = "Test phone (SM-TEST)"),
         server.url("").toString(),
     )

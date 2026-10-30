@@ -325,4 +325,81 @@ class WellnessRulesTest {
         for (s in listOf(401, 409, 410)) assertEquals(WellnessRules.NarrowingOutcome.KEY_REFUSED, WellnessRules.narrowingOutcome(s))
         for (s in listOf(-1, 403, 422, 500, 503)) assertEquals(WellnessRules.NarrowingOutcome.UNCONFIRMED, WellnessRules.narrowingOutcome(s))
     }
+
+    // ── Health turned off on the box ───────────────────────────────────────────────────────
+
+    @Test
+    fun `the box's disabled state needs attention, with its own words and no setup`() {
+        assertEquals(EnrollmentState.DISABLED, EnrollmentState.fromWire("disabled"))
+        for (bound in listOf(true, false)) {
+            assertEquals(StatusChip.NEEDS_ATTENTION, WellnessRules.statusChip(EnrollmentState.DISABLED, bound, emptyList()))
+            assertEquals(StatusChip.NEEDS_ATTENTION, WellnessRules.statusChip(EnrollmentState.DISABLED, bound, emptyList(), held = true))
+        }
+        assertEquals("Health is turned off on your BlackBox.", WellnessRules.DISABLED_MESSAGE)
+        assertFalse(WellnessRules.offersSetup(EnrollmentState.DISABLED))
+        for (s in EnrollmentState.entries - EnrollmentState.DISABLED) assertTrue(s.wire, WellnessRules.offersSetup(s))
+        // the box's word wins over what the phone remembers, a waiting replacement included
+        for (local in EnrollmentState.entries) {
+            assertEquals(EnrollmentState.DISABLED, WellnessRules.shownState(EnrollmentState.DISABLED, false, local))
+            assertEquals(EnrollmentState.DISABLED, WellnessRules.shownState(EnrollmentState.DISABLED, true, local))
+        }
+        // a status that says nothing still keeps the phone's view
+        assertEquals(EnrollmentState.ACTIVE, WellnessRules.shownState(null, false, EnrollmentState.ACTIVE))
+        // the disabled box gets no proof from the chat either: it is no gate state
+        assertFalse(EnrollmentState.DISABLED in WellnessChatRules.SIGNING_STATES)
+    }
+
+    // ── the privacy policy re-prompt (contract (g)) ────────────────────────────────────────
+
+    @Test
+    fun `the collector holds only when the box names a version the person has not agreed to`() {
+        assertFalse(WellnessRules.policyHold("2026-10-29", "2026-10-29"))
+        assertTrue(WellnessRules.policyHold("2026-10-29", "2026-11-15"))
+        assertFalse("the box said nothing", WellnessRules.policyHold("2026-10-29", null))
+        assertFalse("a malformed version is no version", WellnessRules.policyHold("2026-10-29", "<b>new</b>"))
+        // a state from before acked versions were kept agreed to the one version served until then
+        assertFalse(WellnessRules.policyHold(null, WellnessRules.LEGACY_POLICY_VERSION))
+        assertTrue(WellnessRules.policyHold(null, "2026-11-15"))
+        assertFalse(WellnessRules.policyHold(null, null))
+    }
+
+    @Test
+    fun `enrollment records the reply's version, a new one holds, and agreeing to its text lifts the hold`() {
+        var st = WellnessRules.enrolledUnderPolicy(WellnessSyncState(), "2026-10-29")
+        assertEquals("2026-10-29", st.policyVersionAcked)
+        assertFalse(WellnessRules.policyHold(st))
+        assertEquals(st, WellnessRules.enrolledUnderPolicy(st, null))
+        // a credentialed status, an enroll reply or an X-Policy-Version names a new one
+        st = WellnessRules.noteBoxPolicy(st, "2026-11-15")
+        assertTrue(WellnessRules.policyHold(st))
+        assertEquals(st, WellnessRules.noteBoxPolicy(st, null))
+        assertEquals(st, WellnessRules.noteBoxPolicy(st, " "))
+        // "I agree" only over the box's text, and it records that text's version
+        assertFalse(WellnessRules.mayAgreeToPolicy(null, "2026-11-15"))
+        assertFalse(WellnessRules.mayAgreeToPolicy("# Policy", null))
+        assertTrue(WellnessRules.mayAgreeToPolicy("# Policy", "2026-11-15"))
+        st = WellnessRules.agreePolicy(st, "2026-11-15")
+        assertFalse(WellnessRules.policyHold(st))
+        assertEquals("2026-11-15", st.policyVersionAcked)
+        // an even newer text agreed to while the box was mid-update is what counts
+        st = WellnessRules.agreePolicy(WellnessRules.noteBoxPolicy(st, "2026-12-01"), "2026-12-02")
+        assertEquals("2026-12-02", st.policyVersionAcked)
+        assertFalse(WellnessRules.policyHold(st))
+    }
+
+    @Test
+    fun `while the policy holds nothing is read or pushed, and the chip says so, but chat still signs`() {
+        assertEquals(SyncDecision.Skip(WellnessRules.POLICY_CHANGED), WellnessRules.maySync(inputs().copy(policyHold = true)))
+        assertEquals(SyncDecision.Skip(WellnessRules.POLICY_CHANGED), WellnessRules.maySync(inputs(fg = true).copy(policyHold = true)))
+        assertFalse("nothing drains either", WellnessRules.mayDrainWhenSkipped(WellnessRules.POLICY_CHANGED))
+        assertEquals(StatusChip.NEEDS_ATTENTION, WellnessRules.statusChip(EnrollmentState.ACTIVE, true, emptyList(), policyHold = true))
+        assertEquals(StatusChip.NOT_SET_UP, WellnessRules.statusChip(EnrollmentState.ACTIVE, false, emptyList(), policyHold = true))
+        // The data already on the box was consented to under the old text: chat keeps its credential.
+        val held = WellnessRules.noteBoxPolicy(WellnessSyncState(state = EnrollmentState.ACTIVE.wire, policyVersionAcked = "2026-10-29"),
+            "2026-11-15")
+        assertTrue(WellnessRules.policyHold(held))
+        val binding = WellnessBindingRecord(WellnessFixtures.OPERATOR, "en_0f1c0f1c", 1, OriginSigner.encodeKey(ByteArray(32) { 3 }))
+        assertTrue(WellnessChatRules.signingDecision(binding, held, WellnessFixtures.OPERATOR, "POST", WellnessChatRules.CHAT_STREAM)
+            is WellnessChatRules.SigningDecision.Sign)
+    }
 }

@@ -30,6 +30,12 @@ object WellnessRules {
          * says it (to anyone but the old phone, it is the old enrollment's state).
          */
         REPLACE_PENDING("replace_pending"),
+        /**
+         * Health is turned off on the box itself (its owner's `[wellness] enabled`): the box's
+         * status says "disabled" to everyone, and it takes nothing until it is turned back on.
+         * Nothing this phone can set up or fix ([DISABLED_MESSAGE]).
+         */
+        DISABLED("disabled"),
         ;
 
         companion object {
@@ -48,20 +54,36 @@ object WellnessRules {
     /**
      * The chip for [state] as the box reports it, the phone's own binding, and the merged
      * trouble list. A phone that holds no binding is "Not set up" whatever the box says: the
-     * collector cannot run without K.
+     * collector cannot run without K. Health turned off on the box is "Needs attention" either
+     * way (there is nothing to set up until it is back on), and so is a privacy policy the
+     * person has not agreed to yet ([policyHold]).
      */
-    fun statusChip(state: EnrollmentState, boundHere: Boolean, troubles: List<String>, held: Boolean = false): StatusChip = when {
+    fun statusChip(
+        state: EnrollmentState,
+        boundHere: Boolean,
+        troubles: List<String>,
+        held: Boolean = false,
+        policyHold: Boolean = false,
+    ): StatusChip = when {
+        state == EnrollmentState.DISABLED -> StatusChip.NEEDS_ATTENTION
         !boundHere -> StatusChip.NOT_SET_UP
         state == EnrollmentState.NOT_SET_UP || state == EnrollmentState.AWAITING_PHONE ||
             state == EnrollmentState.REVOKED -> StatusChip.NOT_SET_UP
         // A Pause / Disconnect / erase asked for here and not yet confirmed by the box: the
         // phone has already stopped, so it says so.
         held || state == EnrollmentState.PAUSED -> StatusChip.PAUSED
+        policyHold -> StatusChip.NEEDS_ATTENTION
         state == EnrollmentState.NEEDS_ATTENTION || state == EnrollmentState.OWNERSHIP_CHANGED ||
             state == EnrollmentState.STALE || state == EnrollmentState.REPLACE_PENDING -> StatusChip.NEEDS_ATTENTION
         troubles.isNotEmpty() -> StatusChip.NEEDS_ATTENTION
         else -> StatusChip.ACTIVE
     }
+
+    /** The Health screen's words when the box has Health turned off ([EnrollmentState.DISABLED]); no setup button. */
+    const val DISABLED_MESSAGE = "Health is turned off on your BlackBox."
+
+    /** Does the screen offer "Set up Health on this phone"? Not while the box has Health turned off. */
+    fun offersSetup(shown: EnrollmentState?): Boolean = shown != EnrollmentState.DISABLED
 
     // ── trouble cards ──────────────────────────────────────────────────────────────────────
 
@@ -202,6 +224,8 @@ object WellnessRules {
         val nowMs: Long,
         /** A narrowing asked for on this phone that the box has not confirmed ([WellnessSyncState.localHold]). */
         val held: Boolean = false,
+        /** The box names a privacy policy the person has not agreed to yet ([policyHold]). */
+        val policyHold: Boolean = false,
     )
 
     /**
@@ -214,6 +238,8 @@ object WellnessRules {
         !i.bound -> SyncDecision.Skip("not_enrolled")
         i.stopped -> SyncDecision.Skip("stopped")
         i.held -> SyncDecision.Skip("held")
+        // The bundled policy promises the new version is shown before anything more is collected.
+        i.policyHold -> SyncDecision.Skip(POLICY_CHANGED)
         i.state == EnrollmentState.PAUSED -> SyncDecision.Skip("paused")
         i.state == EnrollmentState.REVOKED || i.state == EnrollmentState.OWNERSHIP_CHANGED ->
             SyncDecision.Skip(i.state.wire)
@@ -304,12 +330,73 @@ object WellnessRules {
     /**
      * The state the Health screen shows. A phone waiting for approval reads only the box's
      * four uncredentialed fields, whose state is the OLD enrollment's; until its own signed
-     * status is credentialed (it was approved), the phone's REPLACE_PENDING stands.
+     * status is credentialed (it was approved), the phone's REPLACE_PENDING stands. Health
+     * turned off on the box ([EnrollmentState.DISABLED], the four fields to everyone) wins over
+     * anything the phone remembers.
      */
     fun shownState(box: EnrollmentState?, boxCredentialed: Boolean, local: EnrollmentState): EnrollmentState = when {
+        box == EnrollmentState.DISABLED -> box
         local == EnrollmentState.REPLACE_PENDING && !boxCredentialed -> local
         else -> box ?: local
     }
+
+    // ── the privacy policy (its text: "the app shows the new version before collecting more") ──
+
+    /** The skip reason while the person has not agreed to the box's current policy. */
+    const val POLICY_CHANGED = "policy_changed"
+
+    /**
+     * The version a state written before acked versions were kept stands for: the only one the
+     * box ever served until then (catalog.POLICY_VERSION at waves 1-3, the bundled copy's
+     * "Version" line), which every earlier enrollment's setup showed.
+     */
+    const val LEGACY_POLICY_VERSION = "2026-10-29"
+
+    private val POLICY_VERSION_RE = Regex("[A-Za-z0-9._-]{1,40}")
+
+    /** [text] as a policy version, or null (absent, or not a version token). */
+    fun policyVersion(text: String?): String? = text?.trim()?.takeIf { POLICY_VERSION_RE.matches(it) }
+
+    /** The version the person agreed to: [acked], or [LEGACY_POLICY_VERSION] for an older state. */
+    fun agreedPolicy(acked: String?): String = policyVersion(acked) ?: LEGACY_POLICY_VERSION
+
+    /**
+     * Does the collector hold for the policy? Yes when the box last named a version ([boxVersion]:
+     * a credentialed status, an enroll reply or an answer's X-Policy-Version) other than the one
+     * the person agreed to; then nothing is read or pushed until they read the new text and agree.
+     * A box that names no version never holds. Chat signing does not look at this: the data
+     * already on the box was consented to under the old text, and the box's gate still decides
+     * what a turn may read.
+     */
+    fun policyHold(acked: String?, boxVersion: String?): Boolean {
+        val box = policyVersion(boxVersion) ?: return false
+        return box != agreedPolicy(acked)
+    }
+
+    fun policyHold(st: WellnessSyncState): Boolean = policyHold(st.policyVersionAcked, st.policyVersionBox)
+
+    /** [st] once the box has named [version] (null or malformed: nothing changes). */
+    fun noteBoxPolicy(st: WellnessSyncState, version: String?): WellnessSyncState =
+        policyVersion(version)?.takeIf { it != st.policyVersionBox }?.let { st.copy(policyVersionBox = it) } ?: st
+
+    /**
+     * [st] after the person agreed to the policy text of [version] (the X-Policy-Version of the
+     * text the card showed, never a version they did not see): agreed to, and the box's current.
+     */
+    fun agreePolicy(st: WellnessSyncState, version: String): WellnessSyncState =
+        policyVersion(version)?.let { st.copy(policyVersionAcked = it, policyVersionBox = it) } ?: st
+
+    /** [st] at enrollment: the person agreed to the version the enroll reply carried. */
+    fun enrolledUnderPolicy(st: WellnessSyncState, version: String?): WellnessSyncState =
+        policyVersion(version)?.let { st.copy(policyVersionAcked = it, policyVersionBox = it) } ?: st
+
+    /** May the policy card offer "I agree"? Only over the box's text, fetched, with the version it names. */
+    fun mayAgreeToPolicy(text: String?, version: String?): Boolean = !text.isNullOrBlank() && policyVersion(version) != null
+
+    const val POLICY_CARD_TITLE = "The privacy policy changed"
+    const val POLICY_CARD_NOTE = "Health collection is on hold until you read the new version. What's already on your " +
+        "box was shared under the old one; agreeing lets the phone send more."
+    const val POLICY_TEXT_UNAVAILABLE = "Couldn't load the new policy from your box. Try again when it's reachable."
 
     const val ENROLLED_MESSAGE = "This phone is now your health source."
     const val AWAITING_APPROVAL_MESSAGE = "Almost done: on the phone that is your health source now, open BlackBox, " +

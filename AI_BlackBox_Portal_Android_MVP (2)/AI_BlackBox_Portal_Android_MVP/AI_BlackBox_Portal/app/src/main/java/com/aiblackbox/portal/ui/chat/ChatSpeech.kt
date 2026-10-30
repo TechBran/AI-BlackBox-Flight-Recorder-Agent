@@ -6,6 +6,7 @@ import android.util.Log
 import android.widget.Toast
 import com.aiblackbox.portal.BackgroundTaskService
 import com.aiblackbox.portal.buildTtsBatchBody
+import com.aiblackbox.portal.data.api.ApiHttpException
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.repository.TtsQueue
 import com.aiblackbox.portal.data.repository.TtsQueueFailedException
@@ -27,9 +28,11 @@ import java.io.File
  * through the async queue when the box has one (B3), and otherwise asks /tts/batch. Moved
  * verbatim; the bubble state goes through [Bubbles].
  *
- * (M7) A reply that used the person's health data is read aloud only by the on-box voice
- * ([WellnessChatRules.maySpeak]): any other voice would send its numbers to a speech service
- * the health settings never allowed. Auto-TTS skips it; the speaker says why.
+ * (M7) A reply that used the person's health data is never read aloud, with any voice
+ * ([WellnessChatRules.maySpeak]): a cloud voice is a service the health settings never allowed,
+ * and the on-box voice writes its clip under Portal/uploads. Auto-TTS skips it; the speaker
+ * says why. The box refuses such a text on its own (403 wellness_text): every call here then
+ * shows the same words and never retries.
  */
 internal class ChatSpeech(
     /** The application context: the cache dir the clips go to, toasts, the keep-alive service. */
@@ -56,6 +59,19 @@ internal class ChatSpeech(
     }
 
     private val operator: String get() = operatorOf()
+
+    /** The box refused the text as the operator's health data (403 wellness_text; [WellnessChatRules.isHealthTextRefusal]). */
+    private fun isHealthRefusal(e: Throwable): Boolean =
+        (e as? ApiHttpException)?.let { WellnessChatRules.isHealthTextRefusal(it.code, it.error) } == true
+
+    /** The words for a health reply that is not spoken; the same on the Portal. */
+    private suspend fun sayNotSpoken() = withContext(Dispatchers.Main) {
+        Toast.makeText(context, WellnessChatRules.NOT_SPOKEN_MESSAGE, Toast.LENGTH_LONG).show()
+    }
+
+    /** A direct /tts/batch answer that is the box's health refusal (its body is read, and closed). */
+    private fun isHealthRefusal(response: okhttp3.Response): Boolean =
+        response.code == 403 && WellnessChatRules.isHealthTextRefusal(403, runCatching { response.body?.bytes() }.getOrNull())
 
     // =========================================================================
     // B3 (2026-07-22): on-box (qwen) TTS via the async B1 server queue.
@@ -104,6 +120,12 @@ internal class ChatSpeech(
             bubbles.setGenerating(messageId, false, null)
             throw e
         } catch (e: Exception) {
+            if (isHealthRefusal(e)) {
+                // The box will not speak this text (it recalls health data): no retry, no fallback.
+                bubbles.setGenerating(messageId, false, null)
+                sayNotSpoken()
+                return true
+            }
             Log.e("TTS", "Queue TTS failed: ${e.message}", e)
             // Reset to idle — tapping the speaker again IS the retry action.
             bubbles.setGenerating(messageId, false, null)
@@ -135,13 +157,13 @@ internal class ChatSpeech(
                 bubbles.setGenerating(messageId, false, null)
                 return
             }
-            val voiceValue = voiceFor(operator)
-            val config = TtsRepository.parseVoice(voiceValue)
-            // M7: a health reply is spoken only on the box; never sent to a cloud voice.
-            if (!WellnessChatRules.maySpeak(bubbles.usedHealth(messageId), config.provider)) {
+            // M7: a health reply is never read aloud, by any voice (the box refuses it too).
+            if (!WellnessChatRules.maySpeak(bubbles.usedHealth(messageId))) {
                 bubbles.setGenerating(messageId, false, null)
                 return
             }
+            val voiceValue = voiceFor(operator)
+            val config = TtsRepository.parseVoice(voiceValue)
             // B3: on-box voices go through the async queue when the
             // backend has it (404 -> direct /tts/batch fallback below).
             if (config.provider == TtsRepository.ON_BOX_PROVIDER &&
@@ -169,7 +191,9 @@ internal class ChatSpeech(
                     bubbles.setGenerating(messageId, false, null)
                 }
             } else {
+                val healthText = withContext(Dispatchers.IO) { isHealthRefusal(response) }
                 bubbles.setGenerating(messageId, false, null)
+                if (healthText) sayNotSpoken()
             }
         } catch (e: Exception) {
             Log.e("AutoTTS", "Failed: ${e.message}", e)
@@ -200,6 +224,11 @@ internal class ChatSpeech(
                             Toast.LENGTH_LONG
                         ).show()
                         return@launch
+                    } catch (e: ApiHttpException) {
+                        // M7: the box will not speak a text that recalls health data; no fallback.
+                        if (!isHealthRefusal(e)) throw e
+                        sayNotSpoken()
+                        return@launch
                     }
                     if (queued != null) {
                         val tempFile = File(context.cacheDir, "tts_${System.currentTimeMillis()}.wav")
@@ -223,6 +252,8 @@ internal class ChatSpeech(
                         tempFile.writeBytes(bytes)
                         play(tempFile)
                     }
+                } else if (withContext(Dispatchers.IO) { isHealthRefusal(response) }) {
+                    sayNotSpoken()
                 }
             } catch (e: Exception) {
                 Log.e("TTS", "Playback failed: ${e.message}", e)
@@ -236,11 +267,14 @@ internal class ChatSpeech(
      * second tap retries.
      */
     fun speakForMessage(messageId: String, text: String) {
-        // M7: whether a health reply may be spoken depends on the voice, read below.
-        val usedHealth = bubbles.usedHealth(messageId)
+        // M7: a health reply is never read aloud, by any voice; say why and send nothing.
+        if (!WellnessChatRules.maySpeak(bubbles.usedHealth(messageId))) {
+            Toast.makeText(context, WellnessChatRules.NOT_SPOKEN_MESSAGE, Toast.LENGTH_LONG).show()
+            return
+        }
         // Mark as generating (button turns red)
         bubbles.setGenerating(messageId, true, null)
-        if (!usedHealth) Toast.makeText(context, "Generating speech...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Generating speech...", Toast.LENGTH_SHORT).show()
         // Keep alive in background for TTS generation
         try {
             val svcIntent = android.content.Intent(context, BackgroundTaskService::class.java).apply {
@@ -265,14 +299,6 @@ internal class ChatSpeech(
                 }
                 val voiceValue = voiceFor(operator)
                 val config = TtsRepository.parseVoice(voiceValue)
-                // M7: a health reply is spoken only on the box; never sent to a cloud voice.
-                if (!WellnessChatRules.maySpeak(usedHealth, config.provider)) {
-                    bubbles.setGenerating(messageId, false, null)
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, WellnessChatRules.NOT_SPOKEN_MESSAGE, Toast.LENGTH_LONG).show()
-                    }
-                    return@launch
-                }
                 // B3: on-box voices go through the async queue when the
                 // backend has it — live chip on the bubble, short poll
                 // requests. 404 (pre-B1 backend) returns false and falls
@@ -315,8 +341,10 @@ internal class ChatSpeech(
                         }
                     }
                 } else {
+                    val healthText = withContext(Dispatchers.IO) { isHealthRefusal(response) }
                     bubbles.setGenerating(messageId, false, null)
-                    withContext(Dispatchers.Main) {
+                    if (healthText) sayNotSpoken()
+                    else withContext(Dispatchers.Main) {
                         Toast.makeText(context, "TTS failed: ${response.code}", Toast.LENGTH_SHORT).show()
                     }
                 }

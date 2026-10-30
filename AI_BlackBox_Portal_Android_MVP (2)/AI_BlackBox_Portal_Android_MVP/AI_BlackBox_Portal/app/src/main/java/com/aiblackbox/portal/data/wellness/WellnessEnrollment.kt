@@ -35,6 +35,8 @@ class WellnessEnrollment(
     private val tailnetIps: () -> List<String>,
     private val bindWaitMs: Long = 3_000L,
     private val onRolledBack: () -> Unit = {},
+    /** The box [post] reaches (`scheme://host[:port]`): the bind it delivers is pinned to it (contract (f)). */
+    private val boxOrigin: String? = null,
 ) {
 
     sealed class Outcome(val message: String) {
@@ -78,7 +80,7 @@ class WellnessEnrollment(
     ): Outcome {
         val ips = tailnetIps()
         if (ips.isEmpty()) return Outcome.NotOnTailnet
-        val intent = binding.beginIntent(operator)
+        val intent = binding.beginIntent(operator, boxOrigin)
         val body = requestBody(operator, binding.installId(), ips, intent.nonce, capabilityReportJson, consent, replace, assignToMe)
         val reply = post(body)
         val outcome = interpret(reply)

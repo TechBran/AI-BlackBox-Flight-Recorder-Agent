@@ -101,8 +101,15 @@ class WellnessOutbox(
      * One push attempt's answer: HTTP status (-1 = no answer) and body. [local] marks an
      * answer the phone gave itself without a request (a batch with nothing left to send after
      * the consent filter: 200, deleted and not counted; one it could not read: 422).
+     * [policyVersion] is the answer's X-Policy-Version, when it names one.
      */
-    data class SendResult(val status: Int, val body: String = "", val retryAfterS: Long? = null, val local: Boolean = false)
+    data class SendResult(
+        val status: Int,
+        val body: String = "",
+        val retryAfterS: Long? = null,
+        val local: Boolean = false,
+        val policyVersion: String? = null,
+    )
 
     /**
      * Push every pending batch, oldest first, through [send] (which signs and POSTs the gzip

@@ -2,6 +2,10 @@ package com.aiblackbox.portal.data.wellness
 
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
@@ -95,6 +99,49 @@ class WellnessRefSheetTest {
         assertEquals(ids.size + 1, sheet.coverage.size)
     }
 
+    private fun resource(name: String): String =
+        javaClass.classLoader!!.getResource("wellness/$name")!!.readText()
+
+    /**
+     * The box's own compacted summary (resources `wellness/ref_summary_compacted_15.json`:
+     * api.summary over the synthetic fixture, every category on, at the smallest budget that
+     * keeps all 15 of its metrics, wrapped as a /wellness/ref answer). Every metric keeps its
+     * catalog name although the compaction dropped every label.
+     */
+    @Test
+    fun `the box's compacted 15-metric summary shows every metric by its name`() {
+        val body = resource("ref_summary_compacted_15.json")
+        val env = Json.parseToJsonElement(body).jsonObject.getValue("payload").jsonObject
+        val metrics = env.getValue("metrics").jsonArray.map { it.jsonObject }
+        assertEquals(15, metrics.size)
+        assertTrue("compacted: no labels left", metrics.all { "label" !in it && it["compact"].toString() == "true" })
+        val sheet = WellnessRefSheet.parse(body)!!
+        val ids = metrics.map { it.getValue("metric").jsonPrimitive.content }
+        val metricRows = sheet.rows.take(ids.size)
+        assertEquals(ids.map { WellnessRefSheet.METRIC_NAMES.getValue(it) }, metricRows.map { it.label })
+        assertTrue("each with the box's display string", metricRows.zip(metrics).all { (row, m) ->
+            row.value == m.getValue("display").jsonPrimitive.content })
+        assertEquals("the comparison the compaction kept, where there is one",
+            metrics.map { (it["vs_usual"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content },
+            metricRows.map { it.detail })
+        assertEquals("one coverage line per metric", ids.size, sheet.coverage.size)
+        assertEquals("The last 30 days", sheet.title)
+        // every one of the catalog's 16 ids has a name, sleep stages (not in a summary) among them
+        assertEquals(16, catalogMetricIds().size)
+        assertTrue(catalogMetricIds().all { it in WellnessRefSheet.METRIC_NAMES })
+    }
+
+    @Test
+    fun `a summary that left a metric out to fit says which, by name`() {
+        val sheet = WellnessRefSheet.parse(resource("ref_summary_compacted_14.json"))!!
+        assertTrue(sheet.notes.contains("Left out to fit: Total calories"))
+        assertTrue(sheet.rows.none { it.label == "Total calories" })
+        val gaps = WellnessRefSheet.parse(ref("wellness_summary",
+            """{"ok":true,"tool":"wellness_summary","metrics":[],"gaps":[],"gaps_count":2,"metrics_omitted":["a_new_metric"]}"""))!!
+        assertTrue(gaps.notes.contains("Not recorded: 2 gaps (details left out to fit)"))
+        assertTrue(gaps.notes.contains("Left out to fit: A new metric"))
+    }
+
     @Test
     fun `a series lists each point's display string, a session list each session`() {
         val series = WellnessRefSheet.parse(ref("wellness_series", """
@@ -171,7 +218,7 @@ class WellnessRefSheetTest {
         try {
             val k = OriginSigner.encodeKey(ByteArray(32) { 9 })
             val facts = WellnessSigningInterceptor.Facts(
-                WellnessBindingRecord(WellnessFixtures.OPERATOR, "en_0f1c0f1c", 1, k),
+                WellnessBindingRecord(WellnessFixtures.OPERATOR, "en_0f1c0f1c", 1, k, boxOrigin = server.url("").toString()),
                 WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire), server.url("").toString())
             val client = OkHttpClient.Builder().addInterceptor(WellnessSigningInterceptor({ facts })).build()
             val api = BlackBoxApi(server.url("").toString().trimEnd('/'), client)

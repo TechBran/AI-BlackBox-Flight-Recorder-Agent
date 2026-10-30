@@ -35,7 +35,12 @@ private const val TAG = "BlackBoxApi"
  * message verbatim but wrap raw transport failures (whose messages are
  * gibberish like "timeout" or "Failed to connect...") in friendlier copy.
  */
-class ApiHttpException(message: String, val code: Int = 0) : IOException(message)
+class ApiHttpException(
+    message: String,
+    val code: Int = 0,
+    /** The body's machine-readable `error` code when it has one (e.g. "wellness_text"); never user copy. */
+    val error: String? = null,
+) : IOException(message)
 
 /**
  * The box's HTTP API. [base] is the client every variant below derives from with
@@ -115,13 +120,15 @@ class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.
     /**
      * [signHealth] (M7): the request asks for the Health origin proof, which the base client's
      * WellnessSigningInterceptor adds only for the enrolled phone's allow-listed chat and
-     * health reads (the native chat and Show numbers pass it; nothing else does).
+     * health reads (the native chat, Show numbers and the ledger read pass it; nothing else
+     * does). [signFor] is the operator on the app's screen, for a request that names none
+     * itself (the ledger read).
      */
-    private fun buildRequest(path: String, signHealth: Boolean = false): Request.Builder =
+    private fun buildRequest(path: String, signHealth: Boolean = false, signFor: String? = null): Request.Builder =
         Request.Builder()
             .url("$baseUrl$path")
             .header("X-BlackBox-Client", "native-android/1.0")
-            .let { if (signHealth) WellnessSigningInterceptor.optIn(it) else it }
+            .let { if (signHealth) WellnessSigningInterceptor.optIn(it, signFor) else it }
 
     /**
      * Build an [IOException] for a non-2xx response, preferring the backend's
@@ -142,24 +149,29 @@ class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.
      */
     private fun errorFor(response: Response): ApiHttpException {
         val fallback = "HTTP ${response.code}: ${response.message}"
+        var error: String? = null
         val detail = try {
             val raw = response.body?.string()
             if (raw.isNullOrBlank()) null
-            else when (val d = json.parseToJsonElement(raw).jsonObject["detail"]) {
-                null, is JsonNull -> null
-                is JsonPrimitive -> d.content
-                // FastAPI 422 validation errors ship `detail` as an ARRAY of
-                // {loc, msg, type} objects — stringify so the reason survives.
-                else -> d.toString()
+            else {
+                val obj = json.parseToJsonElement(raw).jsonObject
+                error = (obj["error"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                when (val d = obj["detail"]) {
+                    null, is JsonNull -> null
+                    is JsonPrimitive -> d.content
+                    // FastAPI 422 validation errors ship `detail` as an ARRAY of
+                    // {loc, msg, type} objects — stringify so the reason survives.
+                    else -> d.toString()
+                }
             }
         } catch (_: Exception) {
             null
         }
-        return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback, response.code)
+        return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback, response.code, error)
     }
 
-    suspend fun get(path: String, signHealth: Boolean = false): String {
-        val request = buildRequest(path, signHealth).get().build()
+    suspend fun get(path: String, signHealth: Boolean = false, signFor: String? = null): String {
+        val request = buildRequest(path, signHealth, signFor).get().build()
         return client.newCall(request).await().use { response ->
             if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""

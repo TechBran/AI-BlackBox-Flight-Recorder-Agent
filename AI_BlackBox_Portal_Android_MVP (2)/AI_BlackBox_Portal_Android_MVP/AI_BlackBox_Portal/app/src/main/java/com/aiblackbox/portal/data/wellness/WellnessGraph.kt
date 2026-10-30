@@ -56,12 +56,27 @@ object WellnessGraph {
 
     @Volatile private var client: Pair<String, IngestClient>? = null
 
+    /**
+     * May this phone's key sign a request to [requestUrl] (contract (f))? Only for the box the
+     * binding was made with, and only while the app is still paired with it
+     * ([WellnessBinding.mayUseKeyFor]; an older binding adopts the paired box once).
+     */
+    fun keyPinned(context: Context, requestUrl: String): Boolean {
+        val app = context.applicationContext
+        return binding(app).mayUseKeyFor(requestUrl, boxOrigin(app))
+    }
+
+    /** A client for [origin] whose key use is pinned ([keyPinned]). */
+    private fun newClient(app: Context, origin: String): IngestClient =
+        IngestClient(origin, keyPinned = { url -> keyPinned(app, url) })
+
     /** One client per box origin, so the clock-skew correction it learns is shared. */
     fun client(context: Context): IngestClient? {
         val origin = boxOrigin(context) ?: return null
         client?.takeIf { it.first == origin }?.let { return it.second }
+        val app = context.applicationContext
         return synchronized(lock) {
-            client?.takeIf { it.first == origin }?.second ?: IngestClient(origin).also { client = origin to it }
+            client?.takeIf { it.first == origin }?.second ?: newClient(app, origin).also { client = origin to it }
         }
     }
 
@@ -72,7 +87,7 @@ object WellnessGraph {
             engine?.takeIf { engineOrigin == origin } ?: run {
                 val app = context.applicationContext
                 val f = files(app)
-                val client = client(app) ?: IngestClient(origin)
+                val client = client(app) ?: newClient(app, origin)
                 WellnessSyncEngine(
                     gateway = gateway(app),
                     binding = binding(app),
@@ -82,15 +97,15 @@ object WellnessGraph {
                     state = state(app),
                     send = { bytes, signer ->
                         val r = client.ingest(bytes, signer)
-                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
+                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS, policyVersion = r.policyVersion)
                     },
                     fetchStatus = { operator, signer ->
                         val r = client.status(operator, signer)
-                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
+                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS, policyVersion = r.policyVersion)
                     },
                     putSettings = { body, signer ->
                         val r = client.putSettings(body, signer)
-                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
+                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS, policyVersion = r.policyVersion)
                     },
                     onSetupSettingsRefused = {
                         BlackBoxNotificationManager(app).showWellnessNotice("Health AI choices",

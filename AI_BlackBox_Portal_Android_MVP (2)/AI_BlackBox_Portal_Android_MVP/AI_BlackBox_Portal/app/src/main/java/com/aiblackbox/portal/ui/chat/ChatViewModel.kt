@@ -2111,8 +2111,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * spinner; it is always cleared when [generating] ends.
      */
     /**
-     * (M7) Did message [messageId]'s turn use the person's health data? ChatSpeech reads it
-     * aloud only with the on-box voice then (WellnessChatRules.maySpeak).
+     * (M7) Did message [messageId]'s turn use the person's health data? ChatSpeech never reads
+     * it aloud, with any voice (WellnessChatRules.maySpeak).
      */
     fun usedHealth(messageId: String): Boolean =
         _messages.value.firstOrNull { it.id == messageId }?.let { it.wellnessUsed != null || it.wellnessRef != null } == true

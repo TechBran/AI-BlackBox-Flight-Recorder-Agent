@@ -178,6 +178,15 @@ data class WellnessRefSheet(
                 val name = metricName(g.str("metric")) ?: g.str("metric") ?: continue
                 out += "Not recorded: $name" + (g.str("day")?.let { " on $it" } ?: "") + (g.str("reason")?.let { " ($it)" } ?: "")
             }
+            // A compacted envelope (api.py, to fit the token budget) keeps only the gaps' count
+            // and names the metrics it left out by id: the sheet says both in words.
+            val gapsCount = (env["gaps_count"] as? JsonPrimitive)?.intOrNull ?: 0
+            if (env.arr("gaps").isEmpty() && gapsCount > 0) {
+                out += "Not recorded: $gapsCount " + (if (gapsCount == 1) "gap" else "gaps") + " (details left out to fit)"
+            }
+            val omitted = (env["metrics_omitted"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.contentOrNull?.let(::displayName) }.orEmpty()
+            if (omitted.isNotEmpty()) out += "Left out to fit: " + omitted.distinct().joinToString(", ")
             for (t in env.arr("troubles")) t.str("title")?.let { out += it }
             (env["notes"] as? JsonArray)?.forEach { n -> (n as? JsonPrimitive)?.contentOrNull?.let { out += it } }
             if (!rowsShown && out.isEmpty()) out += "This result had no health numbers."
