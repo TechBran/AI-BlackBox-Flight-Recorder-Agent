@@ -50,8 +50,11 @@ The batch, exactly (times are Unix milliseconds, offsets seconds east of UTC):
 
 `origin` is a key from `origins`, or "hc_merged" for an aggregate Health
 Connect de-duplicated across sources. `offset_s` on a bucket group is the
-zone offset of its replace_day; when absent the box uses the offset it last
-saw for that day.
+zone offset at the START (local midnight) of its replace_day, which the box
+keeps as that day's; on a session it is the offset at the session's start,
+on a reading the one at its time. A DST day is 23 or 25 hours: it ends where
+the next day's offset puts the next midnight (store.py). When a group has no
+offset_s the box uses the one it last saw for that day.
 """
 from __future__ import annotations
 

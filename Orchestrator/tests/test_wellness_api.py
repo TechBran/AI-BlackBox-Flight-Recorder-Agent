@@ -255,3 +255,52 @@ def test_a_store_erased_mid_answer_reads_as_not_set_up(box, monkeypatch):
     env = api.summary(OPERATOR, "last_7_days", now_ms=NOW)
     assert env == {"ok": False, "tool": "wellness_summary", "error": "not_enrolled",
                    "fix": api.NOT_ENROLLED_FIX}
+
+
+# ------------------------------------------------------------------ local-time grids and gaps
+
+def test_last_24_hours_points_sit_on_local_hours(box):
+    """Asked at 12:37, the hourly points start on the hour (the hour that
+    holds 12:37 yesterday, partly outside the window), and each holds the
+    bucket of the hour it names."""
+    now = NOW + 37 * 60_000
+    env = api.series(OPERATOR, "steps", "last_24_hours", now_ms=now)
+    labels = [p["t"] for p in env["points"]]
+    assert all(t.endswith(":00-04:00") for t in labels), labels[:3]
+    assert labels[0] == "2026-10-27T12:00-04:00" and labels[-1] == "2026-10-28T12:00-04:00"
+    want = {}
+    for b in FX.load("continuous_120")["batches"]:
+        for g in b["buckets"]:
+            if g["metric"] == "steps":
+                want.update({r[0]: r[1] for r in g["rows"]})
+    for p in env["points"]:
+        day = -1 if p["t"].startswith("2026-10-27") else 0
+        assert p["value"] == want.get(FX.ms(day, int(p["t"][11:13]))), p
+    hr = api.series(OPERATOR, "heart_rate", "last_24_hours", now_ms=now)
+    assert hr["points"][0]["t"] == "2026-10-27T12:00-04:00"
+
+
+def test_a_gap_after_the_last_push_reads_not_synced_yet(box):
+    """The last push came at 21:00 local (01:00 the next day in UTC); a day
+    after it has not been synced, whatever the UTC date says."""
+    from Orchestrator.wellness import enroll
+    with enroll.editing() as data:
+        data[OPERATOR]["last_push_at"] = enroll.iso(FX.ms(0, 21))
+    env = api.summary(OPERATOR, "today", now_ms=FX.ms(1, 9))
+    reasons = {g["reason"] for g in env["gaps"]}
+    assert env["gaps"] and reasons == {"not synced yet"}, env["gaps"]
+
+
+def test_troubles_read_local_nights_and_local_clock_times(box):
+    """At 21:00 local the UTC date is tomorrow: the last 3 nights are still
+    tonight's three (worn, not worn, worn: no "not worn" trouble), and the
+    stale-sync wording names the local time of the last push."""
+    from Orchestrator.wellness import enroll
+    rec = enroll.get_enrollment(OPERATOR)
+    details = enroll.troubles_for(rec, FX.ms(0, 21))
+    codes = [t["code"] for t in details]
+    assert "not_worn_likely" not in codes and "stale_sync" in codes
+    stale = next(t for t in details if t["code"] == "stale_sync")
+    assert "since 11:55." in stale["body"], stale["body"]
+    env = api.summary(OPERATOR, "today", now_ms=FX.ms(0, 21))
+    assert "not_worn_likely" not in [t["code"] for t in env["troubles"]]

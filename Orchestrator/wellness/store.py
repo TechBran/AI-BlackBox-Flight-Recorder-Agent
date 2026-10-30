@@ -161,6 +161,11 @@ def local_day(ts_ms: int, offset_s: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000 + offset_s, tz=timezone.utc).date().isoformat()
 
 
+def local_clock(ts_ms: int, offset_s: int) -> str:
+    """"07:10": the wall-clock time of an instant at a zone offset."""
+    return datetime.fromtimestamp(ts_ms / 1000 + offset_s, tz=timezone.utc).strftime("%H:%M")
+
+
 def add_days(day: str, n: int) -> str:
     return (date.fromisoformat(day) + timedelta(days=n)).isoformat()
 
@@ -809,8 +814,7 @@ class Store:
         """One wellness result reached a model: the disclosure log row, the
         durable mask carry (turn_key) and what "Show numbers" returns."""
         if ts is None:
-            import time
-            ts = int(time.time() * 1000)
+            ts = _now_ms()
         with self.write() as conn:
             conn.execute("INSERT INTO delivered(ref, ts, turn_key, surface, provider, model, tool, "
                          "args, categories, payload, masked_at) VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",

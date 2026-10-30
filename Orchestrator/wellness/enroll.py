@@ -459,9 +459,11 @@ def troubles_for(record: dict, now_ms: Optional[int] = None) -> List[dict]:
         codes.append("stale_sync")
     st = store_for(record, create=False)
     days = {}
+    offsets = None
     if st is not None:
-        today = iso(now_ms)[:10]
         try:
+            offsets = st.offsets()
+            today = offsets.day_of(now_ms)          # the local day, not the UTC date
             days = st.coverage_days(store.add_days(today, -14), today)
         except store.StoreGone:
             days = {}
@@ -475,9 +477,16 @@ def troubles_for(record: dict, now_ms: Optional[int] = None) -> List[dict]:
             if coverage.not_worn_likely(nights, worn_before):
                 codes.append("not_worn_likely")
     last = record.get("last_push_at")
+    last_ms = coverage.iso_to_ms(last)
+    if last_ms is None:
+        last_sync = "a while"
+    elif offsets is not None:                   # the phone's local clock time
+        last_sync = store.local_clock(last_ms, offsets.offset_at(last_ms))
+    else:
+        last_sync = last[11:16]
     out = []
     for code in dict.fromkeys(codes):
-        out.append(coverage.trouble(code, last_sync=last[11:16] if last else "a while"))
+        out.append(coverage.trouble(code, last_sync=last_sync))
     return out
 
 

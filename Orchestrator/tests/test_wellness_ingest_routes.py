@@ -306,7 +306,8 @@ def test_turning_a_category_off_stops_it_on_the_next_push(box):
     b = _batch(box, 0)                      # the week with the run (1-minute HR, avg/max HR)
     r = box.push(b)
     assert r.status_code == 200
-    heart = sum(len(g["rows"]) for g in b["buckets"] if g["metric"] == "heart_rate") +         sum(1 for x in b["readings"] if x["metric"] in ("resting_hr", "hrv", "spo2",
+    heart = sum(len(g["rows"]) for g in b["buckets"] if g["metric"] == "heart_rate") + \
+        sum(1 for x in b["readings"] if x["metric"] in ("resting_hr", "hrv", "spo2",
                                                         "respiratory_rate"))
     assert r.json()["dropped"] == heart + _bp_rows(b)
     st = _store(box)

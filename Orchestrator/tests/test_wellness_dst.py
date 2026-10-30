@@ -300,7 +300,7 @@ def test_hourly_points_show_the_local_time_of_each_hour(tmp_path, monkeypatch):
 
 def test_last_night_on_the_change_day(tmp_path, monkeypatch):
     _rec, _st, data = enrolled_fixture(tmp_path, monkeypatch, name=FALL)
-    z, i = FX.zone(FALL), FX.DST_VARIANTS[FALL]["dst_day"]
+    i = FX.DST_VARIANTS[FALL]["dst_day"]
     env = api.summary("wellness-fixture", "custom", start=FALL_DAY, end=FALL_DAY,
                       now_ms=data["now_ms"])
     sleep = next(m for m in env["metrics"] if m["metric"] == "sleep_duration")

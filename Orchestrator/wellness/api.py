@@ -281,8 +281,8 @@ def _gap_reason(ctx: Ctx, metric: str, day: str, cover: dict) -> str:
     cat = catalog.category_of(metric) or ""
     if f"permission_revoked:{cat}" in (ctx.record.get("phone_troubles") or []):
         return "permission off"
-    last = ctx.record.get("last_push_at")
-    if not last or day > last[:10]:
+    last = cov.iso_to_ms(ctx.record.get("last_push_at"))
+    if last is None or day > ctx.offsets.day_of(last):      # the local day, not the UTC date
         return "not synced yet"
     c = cover.get(day) or {}
     if catalog.METRICS.get(metric) and metric in NIGHT_GRAIN | {"sleep_stages"}:
@@ -582,6 +582,9 @@ def series(operator: str, metric: str, range: Optional[str] = None, *,  # noqa: 
     points = []
     if gran in _STEP_MS:
         step = _STEP_MS[gran]
+        # The grid sits on local hours (or 5 minutes): its first slot is the
+        # one holding the window's start, so every point holds what it names.
+        s -= (s + ctx.offsets.offset_at(s) * 1000) % step
         if metric == "heart_rate":
             col = {"min": "min", "p10": "min", "max": "max"}.get(stat, "avg")
             vals = [(r["ts"], r[col] if r[col] is not None else r["avg"])
