@@ -342,7 +342,9 @@ def wellness_ingest(request: Request,
                                       epoch=int(rec.get("epoch") or 0), now_ms=now_ms,
                                       device_id=rec.get("device_id"),
                                       earliest_available=enroll.earliest_available(rec),
-                                      still_enrolled=lambda: enroll.still_active(signed))
+                                      still_enrolled=lambda: enroll.still_active(signed),
+                                      consent=lambda: (enroll.get_enrollment(signed.operator)
+                                                       or {}).get("categories"))
     except ingest.IngestError as e:
         logger.info("[WELLNESS] ingest refused: %s", e.code)
         if e.status == 413:

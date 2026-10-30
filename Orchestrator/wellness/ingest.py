@@ -13,6 +13,14 @@ this build cannot use (an unknown metric, a grain that does not fit, a time in
 the future) is dropped and counted. Both counts go to the ingest log, never
 the values.
 
+Consent, in depth: the phone should not read a category that is off, and a
+row of one that arrives anyway is dropped here (counted as "category_off",
+logged as a count, never stored). The consent is read when the batch is
+written, under the store's write lock, so a category turned off while a
+batch was in flight is already off; one turned back on starts with the next
+push (nothing dropped is kept for later). A workout is activity, so with
+heart off it is kept without the heart rate it carries.
+
 Zone offsets (store.py has the day model): a bucket group's offset_s is the
 offset at its day's midnight and is stored as the day's; a session or reading
 carries the offset at its own time, which fills a day nobody stated yet or,
@@ -29,7 +37,7 @@ import json
 import logging
 import time
 import zlib
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Mapping, Optional, Set, Union
 
 from pydantic import ValidationError
 
@@ -58,6 +66,15 @@ READING_RANGES = {"resting_hr": HR_RANGE, "hrv": HRV_RANGE, "spo2": SPO2_RANGE,
                   "respiratory_rate": RESP_RANGE}
 GRAIN_HOURS = {"1min": 1 / 60.0, "5min": 5 / 60.0, "1h": 1.0}
 GRAIN_MS = {"1min": 60_000, "5min": 300_000, "1h": 3_600_000}
+
+# The consent category (catalog.CATEGORIES) of every row the phone can send.
+BUCKET_CATEGORY = {"heart_rate": "heart", "steps": "activity", "distance": "activity",
+                   "active_calories": "activity", "total_calories": "activity"}
+READING_CATEGORY = {"resting_hr": "heart", "hrv": "heart", "spo2": "heart",
+                    "respiratory_rate": "heart", "blood_pressure": "blood_pressure"}
+SESSION_CATEGORY = {"sleep": "sleep", "exercise": "activity"}
+# Heart rate a workout carries in its attrs (heart, not activity).
+SESSION_HEART_ATTRS = ("avg_hr", "max_hr")
 # A day can run this many hours past 24 (a fall-back day is 25; flying west
 # across zones a little more); rows further out than that infer nothing.
 MAX_DAY_STRETCH_H = 3
@@ -177,17 +194,35 @@ def _reading_flag(metric: str, v: float, v2: Optional[float]) -> int:
 
 # ------------------------------------------------------------------ pipeline
 
+Consent = Union[Mapping[str, str], Callable[[], Optional[Mapping[str, str]]], None]
+
+
+def consented(consent: Consent) -> Optional[Set[str]]:
+    """The categories a batch may store: those whose consent is ask or
+    proactive. None (no consent given: the fixture loaders) keeps every
+    category; a callable is asked now, and an answer of None keeps none."""
+    if consent is None:
+        return None
+    answer = consent() if callable(consent) else consent
+    return {c for c in catalog.CATEGORIES if (answer or {}).get(c) in catalog.CONSENTED}
+
+
 def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, epoch: int,
                   now_ms: int, device_id: Optional[str] = None, model: Optional[str] = None,
                   earliest_available: Optional[str] = None,
-                  still_enrolled: Optional[Callable[[], bool]] = None) -> IngestResult:
+                  still_enrolled: Optional[Callable[[], bool]] = None,
+                  consent: Consent = None) -> IngestResult:
     """Store one validated batch and recompute what it touched.
 
     `still_enrolled` is asked under the operator's write lock, before
     anything is written: a batch whose signature was checked before an erase
     or a revocation must not land after it (410 revoked). Erase unlinks the
     store under that same lock, and a store that is gone raises StoreGone,
-    which is answered the same way; nothing ever re-creates it."""
+    which is answered the same way; nothing ever re-creates it.
+
+    `consent` (the enrollment's category map, or a callable returning it,
+    asked under the same lock): rows of a category that is not consented are
+    dropped as "category_off". The route always passes it."""
     t0 = time.monotonic()
     if batch.enrollment_id != enrollment_id:
         raise IngestError(422, "invalid", "enrollment_id does not match the signature")
@@ -205,6 +240,10 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
     with store_mod.write_lock(st.op_key):
         if still_enrolled is not None and not still_enrolled():
             raise IngestError(410, "revoked")
+        allowed = consented(consent)
+
+        def off(category: Optional[str]) -> bool:
+            return allowed is not None and category not in allowed
         try:
             with st.write() as conn:
                 if st.has_batch(conn, batch.batch_id):
@@ -273,6 +312,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if kind is None:
                             drop("unknown_metric", len(g.rows))
                             continue
+                        if off(BUCKET_CATEGORY.get(g.metric)):
+                            drop("category_off", len(g.rows))
+                            continue
                         if (kind == "hr") != (g.grain in ("1min", "5min")):
                             drop("bad_grain", len(g.rows))
                             continue
@@ -313,6 +355,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
 
                     # ---- sessions
                     for s in batch.sessions:
+                        if off(SESSION_CATEGORY.get(s.kind)):
+                            drop("category_off")
+                            continue
                         oid = origin_id(s.origin)
                         if oid is None:
                             drop("unknown_origin")
@@ -337,7 +382,8 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             attrs["type"] = catalog.exercise_type_name(code)
                             if s.attrs is not None:
                                 attrs.update({k: v for k, v in s.attrs.model_dump().items()
-                                              if v is not None})
+                                              if v is not None and not (
+                                                  k in SESSION_HEART_ATTRS and off("heart"))})
                         if flag:
                             attrs["flags"] = 1
                         subtype = s.subtype if s.subtype is not None else (
@@ -363,6 +409,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                     for r in batch.readings:
                         if r.metric not in catalog.READING_METRICS:
                             drop("unknown_metric")
+                            continue
+                        if off(READING_CATEGORY.get(r.metric)):
+                            drop("category_off")
                             continue
                         oid = origin_id(r.origin)
                         if oid is None:
@@ -406,7 +455,8 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
         except store_mod.StoreGone:
             raise IngestError(410, "revoked") from None
     res.ms = int((time.monotonic() - t0) * 1000)
-    logger.info("[WELLNESS] ingest op=%s rows=%d flagged=%d dropped=%d deleted=%d days=%d%s ms=%d",
-                st.op_key[:4], res.accepted, res.flagged, res.dropped, res.deleted,
-                len(res.dirty_days), " duplicate" if res.duplicate else "", res.ms)
+    logger.info("[WELLNESS] ingest op=%s rows=%d flagged=%d dropped=%d off=%d deleted=%d "
+                "days=%d%s ms=%d", st.op_key[:4], res.accepted, res.flagged, res.dropped,
+                dropped.get("category_off", 0), res.deleted, len(res.dirty_days),
+                " duplicate" if res.duplicate else "", res.ms)
     return res

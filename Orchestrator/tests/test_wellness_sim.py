@@ -46,6 +46,12 @@ def test_end_to_end(sim_box):
     pushed = SIM.push(t, state, fixture="continuous_120", log=lambda m: None)
     n = len(FX.load("continuous_120")["batches"])
     assert pushed["pushed"] == n and pushed["quarantined"] == 0 and pushed["accepted"] > 30_000
+    # Blood pressure is off by default: the fixture's readings were dropped
+    # at the door, so none is stored.
+    with enroll.store_for(enroll.get_enrollment(OPERATOR)).read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM reading WHERE metric='blood_pressure'"
+                            ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM reading").fetchone()[0] > 0
 
     code, status = SIM.status(t, state)
     assert code == 200 and status["state"] in ("active", "stale") and status["enrolled"]

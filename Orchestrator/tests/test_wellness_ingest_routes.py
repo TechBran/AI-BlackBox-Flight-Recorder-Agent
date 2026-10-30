@@ -1,7 +1,8 @@
 """POST /wellness/ingest and /wellness/capabilities through the real app:
 200 / duplicate, 401 (unsigned, wrong key, stale clock, replayed nonce),
 410, 413 (compressed and decompressed caps), 422 (malformed structure only),
-429, paused and the kill switch, flagged values, pending notices."""
+429, paused and the kill switch, flagged values, pending notices, and rows
+of a category whose consent is off dropped at the door."""
 from __future__ import annotations
 
 import gzip
@@ -37,11 +38,21 @@ def _store(box):
     return enroll.store_for(enroll.get_enrollment(OPERATOR))
 
 
+def _bp_rows(batch):
+    return sum(1 for r in batch["readings"] if r["metric"] == "blood_pressure")
+
+
+def _put(box, body, signed=True):
+    return box.post("/wellness/settings", dict({"operator": OPERATOR}, **body), signed=signed,
+                    method="PUT")
+
+
 def test_accepted_then_duplicate(box):
     r = box.push(_batch(box))
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["accepted"] > 1000 and body["dropped"] == 0
+    # Blood pressure is off by default: its readings are dropped and counted.
+    assert body["accepted"] > 1000 and body["dropped"] == _bp_rows(_batch(box)) > 0
     assert body["next_min_interval_s"] == 900 and body["pending_notices"] == []
     assert set(body) == {"accepted", "dropped", "next_min_interval_s", "pending_notices"}
     again = box.push(_batch(box))
@@ -149,6 +160,7 @@ def test_epoch_or_enrollment_mismatch_is_422(box):
 
 
 def test_one_implausible_value_is_flagged_never_422(box):
+    assert _put(box, {"categories": {"blood_pressure": "ask"}}).status_code == 200
     t = FX.ms(-1, 3, 2)
     b = _batch(box, batch_id="fx-flag", buckets=[{
         "metric": "heart_rate", "grain": "5min", "origin": "o1", "replace_day": None,
@@ -253,3 +265,105 @@ def test_a_push_clears_a_failed_nudge(box):
     assert box.push(_batch(box)).status_code == 200
     assert "source_unreachable" not in enroll.get_enrollment(OPERATOR)["phone_troubles"]
     assert box.get(f"/wellness/status?operator={OPERATOR}").json()["state"] == "active"
+
+
+# ------------------------------------------------------------------ consent at the door
+
+def test_rows_of_a_category_turned_off_are_never_stored(box):
+    """Defense in depth (the phone should not send them): a row whose
+    category is off in the enrollment is dropped at ingest and counted, and
+    nothing of it reaches the store; a category turned back on starts from
+    the next push."""
+    first, second = _batch(box, 0), _batch(box, 1)
+    assert _bp_rows(first) and _bp_rows(second)
+    r = box.push(first)
+    assert r.status_code == 200 and r.json()["dropped"] == _bp_rows(first)
+    with _store(box).read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM reading WHERE metric='blood_pressure'"
+                            ).fetchone()[0] == 0
+        dropped = conn.execute("SELECT dropped FROM ingest_log WHERE batch_id=?",
+                               (first["batch_id"],)).fetchone()[0]
+    assert json.loads(dropped) == {"category_off": _bp_rows(first)}
+
+    assert _put(box, {"categories": {"blood_pressure": "ask"}}).status_code == 200
+    r = box.push(second)
+    assert r.status_code == 200 and r.json()["dropped"] == 0
+    with _store(box).read() as conn:
+        days = {d for (d,) in conn.execute(
+            "SELECT DISTINCT date(ts / 1000 - 14400, 'unixepoch') FROM reading "
+            "WHERE metric='blood_pressure'")}
+    second_days = {g["replace_day"] for g in second["buckets"]}
+    first_days = {g["replace_day"] for g in first["buckets"]}
+    assert days and days <= second_days and not days & (first_days - second_days)
+
+
+def test_turning_a_category_off_stops_it_on_the_next_push(box):
+    assert box.push(_batch(box, 1)).status_code == 200
+    with _store(box).read() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM reading WHERE metric='spo2'").fetchone()[0]
+    assert before > 0
+    assert _put(box, {"categories": {"heart": "off"}}, signed=False).status_code == 200
+    b = _batch(box, 0)                      # the week with the run (1-minute HR, avg/max HR)
+    r = box.push(b)
+    assert r.status_code == 200
+    heart = sum(len(g["rows"]) for g in b["buckets"] if g["metric"] == "heart_rate") +         sum(1 for x in b["readings"] if x["metric"] in ("resting_hr", "hrv", "spo2",
+                                                        "respiratory_rate"))
+    assert r.json()["dropped"] == heart + _bp_rows(b)
+    st = _store(box)
+    lo = st.offsets().bounds(min(g["replace_day"] for g in b["buckets"]))[0]
+    with st.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM reading WHERE metric='spo2'"
+                            ).fetchone()[0] == before
+        assert conn.execute("SELECT COUNT(*) FROM bucket WHERE metric='heart_rate' AND ts>=?",
+                            (lo,)).fetchone()[0] == 0
+        # Workouts are activity: kept, without the heart rate they carry.
+        attrs = {hc: json.loads(a or "{}") for hc, a in conn.execute(
+            "SELECT hc_id, attrs FROM session WHERE kind='exercise' AND end_ts>=?", (lo,))}
+    run = attrs[f"fx-run-{FX.day_of(FX.RUN_DAY)}"]
+    assert run["distance_m"] == 7210.0 and not {"avg_hr", "max_hr"} & set(run)
+
+
+def test_every_wire_row_has_a_consent_category():
+    from Orchestrator.wellness import catalog
+    assert set(ingest.BUCKET_CATEGORY) == set(catalog.BUCKET_METRICS)
+    assert set(ingest.READING_CATEGORY) == set(catalog.READING_METRICS)
+    assert set(ingest.SESSION_CATEGORY) == set(catalog.SESSION_KINDS)
+    every = set(ingest.BUCKET_CATEGORY.values()) | set(ingest.READING_CATEGORY.values()) | \
+        set(ingest.SESSION_CATEGORY.values())
+    assert every == set(catalog.CATEGORIES)
+
+
+def test_the_consent_is_read_when_the_batch_is_written(tmp_path, monkeypatch):
+    """process_batch asks for the consent under the store's write lock (a
+    settings change that lands while a batch is being parsed wins), and an
+    enrollment that has no consent map gets nothing stored."""
+    from Orchestrator.tests.wellness_support import ENR, fresh_store
+    from Orchestrator.wellness import schema
+    st = fresh_store(tmp_path, monkeypatch)
+    b = dict(FX.load("days_10")["batches"][0], enrollment_id=ENR, epoch=1)
+    asked = []
+
+    def consent():
+        asked.append(1)
+        return {"sleep": "ask", "heart": "off", "activity": "off", "blood_pressure": "off"}
+
+    res = ingest.process_batch(st, schema.IngestBatch.model_validate(b), enrollment_id=ENR,
+                               epoch=1, now_ms=FX.now_ms(), consent=consent)
+    assert asked == [1]
+    assert res.accepted == sum(1 for x in b["sessions"] if x["kind"] == "sleep")
+    with st.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM bucket").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM reading").fetchone()[0] == 0
+    st2 = fresh_store(tmp_path / "b", monkeypatch, op_key="00000000000000dd")
+    res = ingest.process_batch(st2, schema.IngestBatch.model_validate(b), enrollment_id=ENR,
+                               epoch=1, now_ms=FX.now_ms(), consent=lambda: None)
+    assert res.accepted == 0 and res.dropped > 0
+
+
+def test_the_drop_is_logged_as_a_count(box, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="Orchestrator.wellness.ingest"):
+        assert box.push(_batch(box)).status_code == 200
+    line = next(r.getMessage() for r in caplog.records if "[WELLNESS] ingest" in r.getMessage())
+    assert f"off={_bp_rows(_batch(box))}" in line
+    assert "118" not in line and "blood" not in line
