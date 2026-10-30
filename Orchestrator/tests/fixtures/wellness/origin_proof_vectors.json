@@ -1,0 +1,74 @@
+[
+  {
+    "k_b64url": "z0vJ2oEG1cTPxA7L0M8WRI0CxAE41HO5l6jy98ZqwSs",
+    "enr": "en_00000001",
+    "ts": 1793000000,
+    "nonce": "bf56b981bc41ebc0428ab719d684df76",
+    "method": "GET",
+    "path": "/wellness/status",
+    "body_utf8": "",
+    "body_b64": "",
+    "content_encoding": null,
+    "expected_sig": "12359e201028626f0b0183c7a55e92aa45e505aafa9c4ba4afe9de8af91c904d"
+  },
+  {
+    "k_b64url": "0dU2-Rjodpw5g4-fQSPpVyBHqsHy6U6vjlQvp29DFOc",
+    "enr": "en_00000002",
+    "ts": 1793000061,
+    "nonce": "2bbc97c3edf286f440aba69499a77b65",
+    "method": "POST",
+    "path": "/wellness/capabilities",
+    "body_utf8": "{\"phone\":{\"manufacturer\":\"samsung\",\"model\":\"SM-TEST\",\"device_name\":\"Test phone\",\"sdk_int\":36,\"app_version\":\"1.0\"},\"reported_at\":\"2026-10-28T12:00:00Z\"}",
+    "body_b64": "eyJwaG9uZSI6eyJtYW51ZmFjdHVyZXIiOiJzYW1zdW5nIiwibW9kZWwiOiJTTS1URVNUIiwiZGV2aWNlX25hbWUiOiJUZXN0IHBob25lIiwic2RrX2ludCI6MzYsImFwcF92ZXJzaW9uIjoiMS4wIn0sInJlcG9ydGVkX2F0IjoiMjAyNi0xMC0yOFQxMjowMDowMFoifQ==",
+    "content_encoding": null,
+    "expected_sig": "cd45163c7fb72825af47fda0feb573730ac6d3abf218f486dbbd11c400f710ec"
+  },
+  {
+    "k_b64url": "AiRozH8H5TpWpvqQcvw6x1fb81I4MCB95YDP8ufLn38",
+    "enr": "en_00000003",
+    "ts": 1793000122,
+    "nonce": "c3f55121d8152f824ec9abec665dd047",
+    "method": "POST",
+    "path": "/wellness/ingest",
+    "body_utf8": "{\"label\":\"Montre connectée — Ärzte ✓ 心拍\",\"n\":1}",
+    "body_b64": "eyJsYWJlbCI6Ik1vbnRyZSBjb25uZWN0w6llIOKAlCDDhHJ6dGUg4pyTIOW/g+aLjSIsIm4iOjF9",
+    "content_encoding": null,
+    "expected_sig": "356cde98f93ae07da00bc67777789a06da1c4126867bf12789d28947f61e2ebd"
+  },
+  {
+    "k_b64url": "y9i9Bnhyolr4my_qvFF7vYiyXK7c6S_cXjrKF4wmYlE",
+    "enr": "en_00c0ffee",
+    "ts": 1793000183,
+    "nonce": "7a4df40ff150ea1f3a19c2be416ae330",
+    "method": "POST",
+    "path": "/wellness/ingest",
+    "body_utf8": "{\"batch_id\":\"vector-gzip-0001\",\"buckets\":[],\"deleted_ids\":[],\"enrollment_id\":\"en_00c0ffee\",\"epoch\":1,\"origins\":[],\"readings\":[],\"schema\":\"bbx.wellness.ingest/1\",\"sessions\":[],\"window\":{\"from\":\"2026-10-27T11:00:00Z\",\"to\":\"2026-10-27T12:00:00Z\",\"type\":\"changes\"}}",
+    "body_b64": "H4sIAAAAAAACA12OQY7CMAxF7+J1C04XM1LOMSsQQm3y20akSZUECoO4+xhRJDSSN9/Pz/aduraY8egsabrAlJjq4dfNNTMrqqg7mxNKJr0/VGThUWBleG0gpOj9hFBeCxCOzIb7HhAXczQjaVVRTG5wYZUSWuvCsKZsRkytuF133SzwPiDnjXDksn1+kCW7+JYXF2xcSN+pT3ESreHmq1ZcN98/SmlmqZ1YJf5jzQe7zRBqxvZ5hR6PP5cFXkoFAQAA",
+    "content_encoding": "gzip",
+    "expected_sig": "3961c50028db6bc567723eb081ddc6680c17a250592d86b93c3ef61c5e6a6ea3"
+  },
+  {
+    "k_b64url": "7dseUjiquz6y0o9YSWWtlziC7SI6E9ychidMGiGUZ2g",
+    "enr": "en_00000005",
+    "ts": 1793000244,
+    "nonce": "8fc1c53559aff1495184ee309021271b",
+    "method": "PUT",
+    "path": "/wellness/settings",
+    "body_utf8": "{\"operator\":\"wellness-fixture\",\"categories\":{\"blood_pressure\":\"ask\"}}",
+    "body_b64": "eyJvcGVyYXRvciI6IndlbGxuZXNzLWZpeHR1cmUiLCJjYXRlZ29yaWVzIjp7ImJsb29kX3ByZXNzdXJlIjoiYXNrIn19",
+    "content_encoding": null,
+    "expected_sig": "6824a1816b559c8ec8027f57e6ab3e55e423106ff82b7380feb5fdf19df2443b"
+  },
+  {
+    "k_b64url": "34-2fzDIz8A9qIUfSJ2vmzIjFnszh6_mfAXGp97V64c",
+    "enr": "en_00000006",
+    "ts": 1793000305,
+    "nonce": "ef6f5233bf83837e36693a79ca9a5ab0",
+    "method": "GET",
+    "path": "/wellness/ref/w-20261028-ab12",
+    "body_utf8": "",
+    "body_b64": "",
+    "content_encoding": null,
+    "expected_sig": "3a3fc48b76031a4685515e375ba9aec37f1ddc8ff291bceebfc464e60d573df3"
+  }
+]

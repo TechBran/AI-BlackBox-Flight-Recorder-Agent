@@ -229,6 +229,34 @@ async def notify(
     )
 
 
+async def notify_device(
+    operator: str,
+    device_id: str,
+    tailnet_ip: str,
+    title: str,
+    body: str,
+    category: str = "general",
+    *,
+    dedup_key: Optional[str] = None,
+) -> NotifyResult:
+    """Send ONE notification to ONE named device of ``operator`` (the wellness
+    setup prompts go to the phone being set up, not to every subscriber).
+
+    The caller has already checked that the device belongs to ``operator``,
+    so the device gets the full body. Same contracts as ``notify``: NEVER
+    raises, never blocks past the per-device timeout, never mints; a device
+    with no pairing secret is counted unreachable without a request.
+    """
+    notif_id = _make_notif_id(dedup_key)
+    device = {"device_id": device_id, "node": {"ip": tailnet_ip or "", "dns_name": ""}}
+    payload = {"title": title, "category": category, "operator": operator,
+               "notif_id": notif_id, "body": body}
+    delivered, unreachable = await _fan_out([device], [payload])
+    logger.info("[NOTIFY] device cat=%s delivered=%d/1 id=%s", category, len(delivered), notif_id)
+    return NotifyResult(notif_id=notif_id, delivered=delivered, unreachable=unreachable,
+                        recorded=False)
+
+
 # The payload ``operator`` of a box-wide alert. The Android receiver only uses
 # the field as a label; it never routes or navigates on it.
 BOX_OPERATOR = "system"

@@ -225,3 +225,15 @@ serve_dev_pages = false
 # rollout. A paired device always gets its secret either way. Turn it on once
 # every device runs the current app.
 require_pairing = false
+
+[wellness]
+# Health tracking (each operator's own phone as their health source; set up in
+# the BlackBox app, Settings, Health). enabled is the box-wide kill switch: it
+# is read fresh on every request, so false stops collection and every health
+# answer at once, with no restart. It does nothing until someone enrolls.
+enabled = true
+# simulator = true lets scripts/wellness_sim_phone.py stand in for a phone on a
+# loopback address (127.0.0.2 by default, called on simulator_port). Dev boxes
+# only; leave it unset on a box people use.
+# simulator = false
+# simulator_port = 8765

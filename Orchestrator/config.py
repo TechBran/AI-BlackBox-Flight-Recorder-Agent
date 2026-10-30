@@ -160,6 +160,48 @@ DEBUG_SERVE_DEV_PAGES = CFG.getboolean("debug", "serve_dev_pages", fallback=Fals
 # gets its bearer either way. Set true once every device runs the new app.
 DEVICES_REQUIRE_PAIRING = CFG.getboolean("devices", "require_pairing", fallback=False)
 
+
+# [wellness] (health tracking, design M7): read FRESH from config.ini on every
+# call, so the kill switch takes effect on the next request with no restart.
+# enabled defaults to true (decision D19: inert until someone enrolls); a
+# config.ini that cannot be read or parsed reads as OFF (fail closed).
+# simulator (default false) lets scripts/wellness_sim_phone.py stand in for a
+# phone on a loopback address; never set it on a box people use.
+def _wellness_section():
+    from Orchestrator.utils.config_ini import ConfigIniError, read_config_ini
+    try:
+        return read_config_ini()
+    except ConfigIniError:
+        return None
+
+
+def wellness_enabled() -> bool:
+    cfg = _wellness_section()
+    if cfg is None:
+        return False
+    try:
+        return cfg.getboolean("wellness", "enabled", fallback=True)
+    except ValueError:
+        return False
+
+
+def wellness_simulator() -> bool:
+    cfg = _wellness_section()
+    try:
+        return bool(cfg is not None and cfg.getboolean("wellness", "simulator", fallback=False))
+    except ValueError:
+        return False
+
+
+def wellness_simulator_port() -> int:
+    cfg = _wellness_section()
+    try:
+        port = cfg.getint("wellness", "simulator_port", fallback=8765) if cfg else 8765
+    except ValueError:
+        return 8765
+    return port if 1 <= port <= 65535 else 8765
+
+
 AUDIO_ENGINE  = CFG.get("audio","engine",fallback="auto").strip().lower()
 # Quality-first fallback (matches config.ini.template): the box default for every
 # client now that the Portal and Android no longer pin their own OpenAI model.

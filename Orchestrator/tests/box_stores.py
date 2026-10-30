@@ -62,6 +62,11 @@ STORE_PATHS = [
     # its own copy of the name; contacts reads the config module's at call time.
     ("Orchestrator.asterisk.config", "GATEWAYS_FILE", "asterisk/gateways.json"),
     ("Orchestrator.asterisk.gateway_manager", "GATEWAYS_FILE", "asterisk/gateways.json"),
+    # Health tracking: the per-operator stores, the enrollments and the device
+    # keys (Orchestrator/wellness/paths.py, read at call time).
+    ("Orchestrator.wellness.paths", "DATA_DIR", "data/wellness"),
+    ("Orchestrator.wellness.paths", "KEYS_PATH", "credentials/wellness_device_keys.json"),
+    ("Orchestrator.wellness.paths", "SIM_PAIRING_PATH", "credentials/wellness_sim_pairing.json"),
 ]
 
 # Singletons that captured a store path (or a store's contents) at
