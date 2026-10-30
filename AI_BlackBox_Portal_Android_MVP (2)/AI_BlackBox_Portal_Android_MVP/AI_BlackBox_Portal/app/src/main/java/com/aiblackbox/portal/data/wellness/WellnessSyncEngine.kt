@@ -151,6 +151,10 @@ class WellnessSyncEngine(
             }
         }
 
+        // Probe evidence (T-11): how long after a night ends does it first reach this phone?
+        val sleepLatencies = upserts.filterIsInstance<HcRecord.Sleep>()
+            .filter { dayIndex.lookup(it.meta.id) == null }
+            .map { ((now - it.endMs) / 60_000L).coerceAtLeast(0L) }
         val work = DayWork(z)
         for (r in upserts) work.addRecord(r)
         for ((type, id) in deletions) {
@@ -193,7 +197,11 @@ class WellnessSyncEngine(
         val proof = last?.let { CommitProof.Committed(it) } ?: CommitProof.NothingToCommit
         for ((type, token) in nextTokens) tokens.advance(type, token, now, proof)
         state.update {
-            it.copy(lastReconcileMs = if (reconcile || it.lastReconcileMs == 0L) now else it.lastReconcileMs)
+            it.copy(
+                lastReconcileMs = if (reconcile || it.lastReconcileMs == 0L) now else it.lastReconcileMs,
+                deletionsSeen = it.deletionsSeen + deletions.size,
+                sleepLatencyMin = (it.sleepLatencyMin + sleepLatencies).takeLast(MAX_LATENCIES),
+            )
         }
         return batches.size to batches.sumOf { it.rowCount }
     }
@@ -446,6 +454,7 @@ class WellnessSyncEngine(
         const val ITEMS_PER_BATCH = 2000
         const val MAX_CHANGE_PAGES = 200
         const val MAX_READ_PAGES = 200
+        const val MAX_LATENCIES = 30
 
         fun randomBatchId(): String = java.util.UUID.randomUUID().toString().replace("-", "")
     }

@@ -27,9 +27,33 @@ data class MeshDevice(
     val owner: String? = null,
     @SerialName("is_primary") val isPrimary: Boolean = false,
     @SerialName("default_provider") val defaultProvider: String? = null,
+    // (M7) Additive and OWNER-ONLY: the box fills these only when the request's ?operator=
+    // equals this row's owner, so the badge never tells one operator about another's health
+    // enrollment (rule W17). Absent = false / null, which an older box also yields.
+    @SerialName("health_source") val healthSource: Boolean = false,
+    @SerialName("health_state") val healthState: String? = null,
 ) {
     /** True once an operator has claimed this device (primary/provider need an owner). */
     val isClaimed: Boolean get() = !owner.isNullOrBlank()
+
+    /** "Use for health" is offered on [operator]'s own Android rows that are not the source yet. */
+    fun canUseForHealth(operator: String): Boolean =
+        type == "android" && operator.isNotBlank() && owner == operator && !healthSource
+}
+
+/**
+ * (M7) The mesh fetch scoped to the viewer (`?operator=<me>`) is the only one that carries the
+ * health fields. When the list on screen is the whole tailnet, copy them onto it from the
+ * scoped fetch, for rows the viewer owns and only those. PURE.
+ */
+fun mergeHealthFields(all: List<MeshDevice>, scoped: List<MeshDevice>, viewer: String): List<MeshDevice> {
+    if (viewer.isBlank()) return all
+    val byId = scoped.filter { it.owner == viewer }.associateBy { it.id }
+    return all.map { d ->
+        val s = byId[d.id]
+        if (s == null || d.owner != viewer) d.copy(healthSource = false, healthState = null)
+        else d.copy(healthSource = s.healthSource, healthState = s.healthState)
+    }
 }
 
 @Serializable

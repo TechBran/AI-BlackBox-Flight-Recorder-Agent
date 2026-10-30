@@ -89,6 +89,7 @@ fun MeshDevicesSection(
     val filter by viewModel.filter.collectAsState()
     val hideUnassigned by viewModel.hideUnassigned.collectAsState()
     val actionMessage by viewModel.actionMessage.collectAsState()
+    val viewer by viewModel.viewer.collectAsState()
 
     LaunchedEffect(origin) { viewModel.initialize(origin) }
 
@@ -200,6 +201,8 @@ fun MeshDevicesSection(
                             },
                             onSetPrimary = { device.owner?.let { viewModel.setPrimary(device.id, it) } },
                             onSetProvider = { p -> viewModel.setDefaultProvider(device.id, p, device.owner) },
+                            viewer = viewer,
+                            onUseForHealth = { viewModel.useForHealth(device.id) },
                         )
                     }
                 }
@@ -246,6 +249,8 @@ private fun MeshDeviceCard(
     onUnassign: () -> Unit,
     onSetPrimary: () -> Unit,
     onSetProvider: (String?) -> Unit,
+    viewer: String = "",
+    onUseForHealth: () -> Unit = {},
 ) {
     // A destructive owner change (re-home / unassign) is confirmed before firing.
     var pending by remember(device.id) { mutableStateOf<PendingOwnerAction?>(null) }
@@ -282,6 +287,20 @@ private fun MeshDeviceCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (device.healthSource) {
+                    // (M7) Owner-only: the box fills health_source only for the viewer's own rows.
+                    Text(
+                        "♥ HEALTH SOURCE",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BbxAccent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(RadiusXs))
+                            .background(BbxAccent.copy(alpha = 0.15f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
                 if (device.isPrimary) {
                     Text(
                         "★ PRIMARY",
@@ -340,6 +359,12 @@ private fun MeshDeviceCard(
             )
 
             Spacer(Modifier.height(10.dp))
+
+            // (M7) "Use for health" on the viewer's own Android rows; setup finishes on that phone.
+            if (device.canUseForHealth(viewer)) {
+                MeshActionButton("Use for health", onUseForHealth)
+                Spacer(Modifier.height(8.dp))
+            }
 
             // Primary action (claimed + not already primary)
             if (device.isClaimed && !device.isPrimary) {

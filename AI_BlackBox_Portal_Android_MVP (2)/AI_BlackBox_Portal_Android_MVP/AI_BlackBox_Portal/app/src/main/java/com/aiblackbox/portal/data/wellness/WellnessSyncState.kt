@@ -39,6 +39,15 @@ data class WellnessSyncState(
     /** Earliest record the phone could read (ms), for the "Past data: from ..." line. */
     @SerialName("earliest_available_ms") val earliestAvailableMs: Long? = null,
     val backfill: BackfillCursor = BackfillCursor(),
+    // ── M7.1 probe evidence (values-free: times of runs, counts, latencies) ────────────
+    /** The last periodic worker runs (spec T-1 / T-9: does One UI defer it overnight?). */
+    @SerialName("run_log") val runLog: List<RunLogEntry> = emptyList(),
+    /** Deletion changes seen from Health Connect (T-8: does auto-delete emit them?). */
+    @SerialName("deletions_seen") val deletionsSeen: Int = 0,
+    /** Minutes between a sleep session's end and the phone first seeing it (T-11). */
+    @SerialName("sleep_latency_min") val sleepLatencyMin: List<Long> = emptyList(),
+    /** When the box last nudged this phone (T-9: does a nudge reach a dozing phone?). */
+    @SerialName("last_nudge_ms") val lastNudgeMs: Long = 0L,
 ) {
     fun consent(): Map<WellnessCategory, WellnessConsent> =
         WellnessCategory.entries.associateWith { WellnessConsent.fromWire(categories[it.wire]) }
@@ -47,6 +56,20 @@ data class WellnessSyncState(
 
     /** The origin heart rate is read from: the user's override, else the probe's auto pick. */
     fun heartRateOrigin(): String? = if (hrOriginChoice != "auto") hrOriginChoice else hrOriginAuto
+}
+
+/** One periodic run: when, whether the screen was on, and how it ended (no data). */
+@Serializable
+data class RunLogEntry(
+    @SerialName("at_ms") val atMs: Long,
+    val interactive: Boolean,
+    val outcome: String,
+) {
+    companion object {
+        const val MAX = 96
+
+        fun append(log: List<RunLogEntry>, entry: RunLogEntry): List<RunLogEntry> = (log + entry).takeLast(MAX)
+    }
 }
 
 /** Backfill progress, newest to oldest in 7-day pages. */

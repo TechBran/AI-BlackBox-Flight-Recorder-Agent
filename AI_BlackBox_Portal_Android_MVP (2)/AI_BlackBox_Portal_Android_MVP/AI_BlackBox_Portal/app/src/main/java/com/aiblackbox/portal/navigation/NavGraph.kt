@@ -43,6 +43,7 @@ import com.aiblackbox.portal.ui.updates.UpdatesScreen
 import com.aiblackbox.portal.ui.updates.UpdatesViewModel
 import com.aiblackbox.portal.ui.settings.LocalModelSettingsScreen
 import com.aiblackbox.portal.ui.webview.WizardWebViewScreen
+import com.aiblackbox.portal.ui.wellness.WellnessScreen
 
 object Routes {
     const val CHAT = "chat"
@@ -75,6 +76,9 @@ object Routes {
     const val CONTACTS = "contacts"
     const val UPDATES = "updates"
     const val LOCAL_MODEL_SETTINGS = "local_model_settings"
+    // (M7) Settings, Health: setup, consent, providers, sync and erase for this phone as the
+    // operator's health source (ui/wellness/WellnessScreen.kt).
+    const val WELLNESS = "wellness"
     // In-app onboarding-wizard WebView (M4). Optional `suffix` nav-arg carries
     // the wizard query string, e.g. "?step=embeddings" or "?mode=manage",
     // URL-encoded by the caller (Uri.encode). Replaces the external-browser
@@ -333,6 +337,7 @@ fun BlackBoxNavGraph(
                 },
             )
         }
+        composable(Routes.WELLNESS) { WellnessScreen() }
         composable(Routes.LOCAL_MODEL_SETTINGS) {
             // On-device model settings: tune window/sampler, auto-warm, clear,
             // status -- wires to the existing ChatViewModel headless seams.

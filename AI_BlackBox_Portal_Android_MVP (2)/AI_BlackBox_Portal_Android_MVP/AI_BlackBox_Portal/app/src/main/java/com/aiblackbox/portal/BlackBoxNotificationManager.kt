@@ -524,7 +524,8 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
         taskType: String? = null,
         isSuccess: Boolean = true
     ) {
-        Log.d(TAG, "Notification Manager: Building notification - Title: $title, Body: $body")
+        // Presence only: a task title or body can carry whatever the task produced.
+        Log.d(TAG, "Notification Manager: building task notification (hasTitle=${title.isNotBlank()}, hasBody=${body.isNotBlank()})")
 
         // Open the app where the launcher would when clicked (A01-activities-root-04)
         val intent = openAppIntent(ACTION_OPEN_FROM_TASK)

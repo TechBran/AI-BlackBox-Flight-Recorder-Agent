@@ -139,7 +139,10 @@ object WellnessGraph {
             override fun enrolledOperator(): String = b.enrolledOperator()
             override fun acceptBind(request: WellnessBindRequest): BindDecision = b.acceptBind(request)
             override fun current(): WellnessBindingRecord? = b.current()
-            override fun requestSync() = WellnessScheduler.syncNow(app, foreground = AppForegroundState.isForeground())
+            override fun requestSync() {
+                state(app).update { it.copy(lastNudgeMs = System.currentTimeMillis()) }
+                WellnessScheduler.syncNow(app, foreground = AppForegroundState.isForeground())
+            }
             override fun clearAll() {
                 WellnessScheduler.cancelAll(app)
                 b.clearAll()

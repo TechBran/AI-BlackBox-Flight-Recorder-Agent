@@ -5,11 +5,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.model.MeshDevice
+import com.aiblackbox.portal.data.model.mergeHealthFields
 import com.aiblackbox.portal.data.model.parseMeshDevices
 import com.aiblackbox.portal.data.model.parseOperators
+import com.aiblackbox.portal.data.store.BlackBoxStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -91,7 +94,19 @@ class MeshDeviceViewModel(application: Application) : AndroidViewModel(applicati
                 val path = if (scope.isNullOrBlank()) "/devices/mesh"
                     else "/devices/mesh?operator=" + URLEncoder.encode(scope, "UTF-8")
                 val raw = api.get(path)
-                _devices.value = parseMeshDevices(raw)
+                val me = runCatching { BlackBoxStore(getApplication()).operator.first() }.getOrDefault("")
+                _viewer.value = me
+                var list = parseMeshDevices(raw)
+                // (M7) Only a fetch scoped to the viewer carries the owner-only health fields.
+                if (me.isNotBlank() && scope != me) {
+                    val scoped = runCatching {
+                        parseMeshDevices(api.get("/devices/mesh?operator=" + URLEncoder.encode(me, "UTF-8")))
+                    }.getOrDefault(emptyList())
+                    list = mergeHealthFields(list, scoped, me)
+                } else {
+                    list = mergeHealthFields(list, list, me)
+                }
+                _devices.value = list
                 _error.value = null
             } catch (e: Exception) {
                 _error.value = "Failed to load devices: ${e.message}"
@@ -99,6 +114,32 @@ class MeshDeviceViewModel(application: Application) : AndroidViewModel(applicati
             } finally {
                 _isLoading.value = false
                 _loadedOnce.value = true
+            }
+        }
+    }
+
+    /** The app's own operator (BlackBoxStore): "Use for health" is offered on its Android rows. */
+    private val _viewer = MutableStateFlow("")
+    val viewer: StateFlow<String> = _viewer.asStateFlow()
+
+    /**
+     * (M7) "Use for health" on one of the viewer's own Android rows: `POST /wellness/select`
+     * sets the enrollment to awaiting_phone and sends that phone ONE neutral notification.
+     * Setup itself always finishes on the phone, where the Health Connect grants live.
+     */
+    fun useForHealth(deviceId: String) {
+        val api = api ?: return
+        val me = _viewer.value.ifBlank { return }
+        viewModelScope.launch {
+            try {
+                api.post("/wellness/select", buildJsonObject {
+                    put("operator", me)
+                    put("device_id", deviceId)
+                }.toString())
+                _actionMessage.value = "Finish on that phone: BlackBox, Settings, Health"
+                refresh()
+            } catch (e: Exception) {
+                _actionMessage.value = "Couldn't start health setup: ${e.message}"
             }
         }
     }

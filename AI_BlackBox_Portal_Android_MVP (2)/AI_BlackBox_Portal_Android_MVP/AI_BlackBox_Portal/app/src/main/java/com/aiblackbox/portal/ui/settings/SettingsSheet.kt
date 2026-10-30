@@ -173,6 +173,11 @@ fun SettingsSheet(
         com.aiblackbox.portal.data.location.LocationProvider(context).hasPermission()
     }
 
+    // M7 — is this phone a health source? A cheap local read (no Health Connect call).
+    val healthBound = remember {
+        com.aiblackbox.portal.data.wellness.WellnessGraph.binding(context).current() != null
+    }
+
     // M4 — the TRUE end-to-end notification state (permission + app-level switch + the
     // navigation channel), not just the permission bit. Read-only; opening Settings never
     // re-prompts, because the ask is once-ever. Keyed on the sheet's own recomposition so a
@@ -990,6 +995,25 @@ fun SettingsSheet(
                 style = MaterialTheme.typography.bodyMedium,
                 color = BbxDim,
             )
+
+            Spacer(Modifier.height(12.dp))
+
+            // ══════════════════════════════════════════════════════════════
+            // M7 — Health (wellness), next to Location: both are personal data that
+            // ride along only by the operator's choice. The row is a door, not a
+            // control: setup, consent, providers and erase live on the Health screen
+            // (ui/wellness/WellnessScreen.kt), where Health Connect's grants can be asked.
+            // ══════════════════════════════════════════════════════════════
+            SectionHeader("Health", BbxAccent)
+            Text(
+                if (healthBound) "This phone is your health source. Manage what BlackBox may use and which AI sees it."
+                else "Use this phone's Health Connect data (watch, ring, cuff) with BlackBox, for you only.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = BbxDim,
+            )
+            FullWidthMenuButton(if (healthBound) "Health settings" else "Set up Health") {
+                onNavigate("wellness"); onDismiss()
+            }
 
             Spacer(Modifier.height(12.dp))
 

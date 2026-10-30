@@ -111,13 +111,21 @@ class WellnessSyncWorker(context: Context, params: WorkerParameters) : Coroutine
     override suspend fun doWork(): Result {
         val app = applicationContext
         val engine = WellnessGraph.engine(app) ?: return Result.success()
-        if (WellnessScheduler.TAG_PERIODIC in tags) {
-            WellnessGraph.state(app).update { it.copy(lastPeriodicRunMs = System.currentTimeMillis()) }
-        }
+        val periodic = WellnessScheduler.TAG_PERIODIC in tags
         val foreground = inputData.getBoolean(WellnessScheduler.KEY_FOREGROUND, false) || AppForegroundState.isForeground()
         return try {
             val report = engine.sync(inForeground = foreground)
             Log.d(TAG, "sync worker: ${report.outcome}")
+            if (periodic) {
+                // Probe evidence (T-1, T-9): when the periodic run actually happened, screen on or off.
+                val now = System.currentTimeMillis()
+                val interactive = runCatching {
+                    (app.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+                }.getOrDefault(false)
+                WellnessGraph.state(app).update {
+                    it.copy(lastPeriodicRunMs = now, runLog = RunLogEntry.append(it.runLog, RunLogEntry(now, interactive, report.outcome)))
+                }
+            }
             runCatching { WellnessGraph.pushCapabilities(app) }
             Result.success()
         } catch (e: kotlinx.coroutines.CancellationException) {
