@@ -885,6 +885,9 @@ def test_a_count_of_awakenings_is_masked_by_the_unit_rule():
         "You had four awakenings.": "You had [·] awakenings.",
         "Te despertaste 3 veces anoche.": "Te despertaste [·] veces anoche.",
         "Tuviste 3 despertares.": "Tuviste [·] despertares.",
+        # The participle and the plain noun (review of wave 3b).
+        "You were woken up 3 times last night.": "You were woken up [·] times last night.",
+        "There were 3 wakings after midnight.": "There were [·] wakings after midnight.",
         # The glyph is still one number token: "[·] and 3" stays one phrase.
         "You woke [·] and 3 times on the nights after.": "You woke [·] times on the nights after.",
     }
@@ -902,7 +905,8 @@ def test_the_grounding_check_sees_the_awakenings_the_mask_masks():
     from Orchestrator.wellness import evals
     for text in ("You woke up 14 times last night.", "There were 14 wake-ups.",
                  "You were awake 14 times.", "Te despertaste 14 veces anoche.",
-                 "Tuviste 14 despertares.", "You had fourteen awakenings."):
+                 "Tuviste 14 despertares.", "You had fourteen awakenings.",
+                 "You were woken up 14 times.", "There were 14 wakings."):
         assert "[·]" in mask.mask_text(text, frozenset()), text
         assert len(evals.grounding(text).offending) == 1, text
     assert evals.grounding("I called the office 14 times.").ok

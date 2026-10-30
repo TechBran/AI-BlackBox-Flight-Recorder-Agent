@@ -85,15 +85,18 @@ _PERIOD_COUNTS = re.compile(
     r"(?P<unit>days?|nights?|weeks?|months?|years?|occasions?|times|instances?|"
     r"d[ií]as?|noches?|semanas?|mes(?:es)?|años?|ocasiones|ocasión|ocasion|veces)\b",
     re.I)
-_WAKE_WORDS = re.compile(r"\b(?:woke|wake|wakes|waking|awake|awoke|awakened|despert\w*)\b",
-                         re.I)
+# The mask's wake words (a Spanish one is any form of despertar), so A1 and
+# the mask agree on what a count of awakenings is.
+_WAKE_RX = ("(?:" + "|".join(sorted(mask._WAKE_WORDS, key=len, reverse=True))
+            + r"|despert\w*)")
+_WAKE_WORDS = re.compile(rf"\b{_WAKE_RX}\b", re.I)
 # "You woke up 14 times", "4 awakenings", "te despertaste 3 veces": a reading
 # no unit word marks (the mask's unit rule does not see it).
 _WAKE_COUNT = re.compile(
-    rf"\b(?:woke|wake|wakes|waking|awake|awoke|awakened|despert\w*)\b[^.!?\n;:]{{0,40}}?"
+    rf"\b{_WAKE_RX}\b[^.!?\n;:]{{0,40}}?"
     rf"(?<![\w.,])(?P<n>\d+|{_NUMBER_WORD_RX}(?:-{_NUMBER_WORD_RX})?)\s+(?:times|veces)\b"
     rf"|(?<![\w.,])(?P<m>\d+|{_NUMBER_WORD_RX}(?:-{_NUMBER_WORD_RX})?)\s+"
-    r"(?:awakenings?|wake-?ups|despertares)\b",
+    r"(?:awakenings?|wake-?ups|wakings|despertares)\b",
     re.I)
 # "The 95th percentile", "p10": a statistic's name, not a reading.
 _PERCENTILE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)\s+percentile\b|\bp\d{1,2}\b", re.I)

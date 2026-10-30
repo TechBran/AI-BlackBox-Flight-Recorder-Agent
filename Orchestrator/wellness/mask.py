@@ -295,15 +295,15 @@ pasos presión presion arterial sistólica sistolica diastólica diastolica oxí
 saturación saturacion peso caloría calorías caloria calorias respiración respiracion
 respiraciones temperatura grado grados kilómetro kilómetros kilometro kilometros metros
 reposo glucosa
-wake-up wake-ups wakeup wakeups awakening awakenings despertares
+wake-up wake-ups wakeup wakeups awakening awakenings wakings despertares
 """.split())
 # A count of awakenings has no unit word ("you woke up 3 times", "te
 # despertaste 3 veces"): "times" / "veces" is one only within reach of a wake
 # word (a Spanish one is any form of despertar). A tally elsewhere ("I called
 # 3 times") stays readable.
 _TALLY_WORDS = frozenset({"times", "veces"})
-_WAKE_WORDS = frozenset({"woke", "wake", "wakes", "waking", "awake", "awoke", "awoken",
-                         "awakened"})
+_WAKE_WORDS = frozenset({"woke", "woken", "wake", "wakes", "waking", "awake", "awoke",
+                         "awoken", "awakened"})
 _TIME_WORDS = frozenset("""
 h hr hrs hour hours min mins minute minutes am pm hora horas minuto minutos
 """.split())
