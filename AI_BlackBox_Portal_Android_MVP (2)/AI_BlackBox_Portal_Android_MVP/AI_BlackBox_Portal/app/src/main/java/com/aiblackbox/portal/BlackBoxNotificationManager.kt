@@ -33,6 +33,16 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
          *  Public since M4 so `readNotificationDeliveryState` inspects the SAME channel
          *  this class posts to, by construction rather than by a duplicated string. */
         const val CHANNEL_ID_NAVIGATION = "blackbox_navigation"
+
+        /** (M7) Health notices: setup and trouble notices, briefings later. VISIBILITY_PRIVATE,
+         *  with a neutral public version, so nothing about health shows on a locked screen. */
+        const val CHANNEL_ID_WELLNESS = "blackbox_wellness"
+
+        /** The bus category that routes a `/notify` push onto [CHANNEL_ID_WELLNESS]. */
+        const val CATEGORY_WELLNESS = "wellness"
+
+        /** What a locked screen shows for any health notice (rule W33: no numbers, no topic). */
+        const val WELLNESS_PUBLIC_TEXT = "New message from BlackBox"
         private const val TAG = "BlackBoxBridge"
 
         /** (A01-activities-root-04) One intent action per notification KIND. The action is
@@ -41,9 +51,13 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
          *  overwrite — one PendingIntent. */
         internal const val ACTION_OPEN_FROM_TASK = "com.aiblackbox.portal.action.OPEN_FROM_TASK_NOTIFICATION"
         internal const val ACTION_OPEN_FROM_REMOTE = "com.aiblackbox.portal.action.OPEN_FROM_REMOTE_NOTIFICATION"
+        internal const val ACTION_OPEN_FROM_WELLNESS = "com.aiblackbox.portal.action.OPEN_FROM_WELLNESS_NOTIFICATION"
 
         /** Task notifications all open the same screen, so they share one PendingIntent. */
         internal const val REQUEST_CODE_TASK = 4101
+
+        /** The health workers' ongoing notification opens the app through this one. */
+        internal const val REQUEST_CODE_WELLNESS = 4102
     }
 
     /**
@@ -112,13 +126,26 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             }
 
+            // (M7) Health. PRIVATE on the lock screen (the public version below is all it
+            // shows), DEFAULT importance: a setup or trouble notice should be seen, not ring.
+            val wellnessChannel = NotificationChannel(
+                CHANNEL_ID_WELLNESS,
+                "Health",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Health setup and sync notices. Contents stay hidden on the lock screen."
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+                setShowBadge(true)
+            }
+
             val notificationManager = context.getSystemService(NotificationManager::class.java)
             if (notificationManager != null) {
                 notificationManager.createNotificationChannel(taskChannel)
                 notificationManager.createNotificationChannel(systemChannel)
                 notificationManager.createNotificationChannel(downloadChannel)
                 notificationManager.createNotificationChannel(navigationChannel)
-                Log.d(TAG, "Notification channels created: $CHANNEL_ID_TASKS, $CHANNEL_ID_SYSTEM, $CHANNEL_ID_DOWNLOADS, $CHANNEL_ID_NAVIGATION")
+                notificationManager.createNotificationChannel(wellnessChannel)
+                Log.d(TAG, "Notification channels created: $CHANNEL_ID_TASKS, $CHANNEL_ID_SYSTEM, $CHANNEL_ID_DOWNLOADS, $CHANNEL_ID_NAVIGATION, $CHANNEL_ID_WELLNESS")
             } else {
                 Log.e(TAG, "Failed to get NotificationManager service")
             }
@@ -255,7 +282,14 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
         category: String? = null,
         notifId: String? = null,
     ) {
-        Log.d(TAG, "showRemoteNotification: title=$title, hasBody=${body.isNotBlank()}, notifId=$notifId")
+        // Never the title or body: a remote notification can carry anything its sender wrote.
+        Log.d(TAG, "showRemoteNotification: hasTitle=${title.isNotBlank()}, hasBody=${body.isNotBlank()}, notifId=$notifId")
+
+        // (M7) A wellness push goes to the private Health channel with a neutral public version.
+        if (category.equals(CATEGORY_WELLNESS, ignoreCase = true)) {
+            showWellnessNotice(title, body, notifId?.takeIf { it.isNotBlank() } ?: "wellness-remote")
+            return
+        }
 
         // Opens the app where the launcher would (A01-activities-root-04). No extras: no
         // screen deep-links from a notification yet, and nothing read the old ones.
@@ -402,6 +436,77 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
             Log.e(TAG, "Error posting navigation prompt (${e.javaClass.simpleName})", e)
             NavigationNotifyOutcome.FAILED
         }
+    }
+
+    /**
+     * (M7) Post a health notice on [CHANNEL_ID_WELLNESS]: VISIBILITY_PRIVATE with the neutral
+     * [WELLNESS_PUBLIC_TEXT] public version, so a locked screen never shows a health word or
+     * number (rule W33). [key] collapses repeats (a pending notice can arrive twice). Tapping
+     * opens the app. Never logs the text.
+     */
+    fun showWellnessNotice(title: String, body: String, key: String) {
+        val id = stableNotificationId(key)
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            id,
+            openAppIntent(ACTION_OPEN_FROM_WELLNESS),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val publicVersion = NotificationCompat.Builder(context, CHANNEL_ID_WELLNESS)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(WELLNESS_PUBLIC_TEXT)
+            .build()
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID_WELLNESS)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title.ifBlank { WELLNESS_PUBLIC_TEXT })
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        try {
+            if (hasNotificationPermission()) {
+                NotificationManagerCompat.from(context).notify(key, id, notification)
+                Log.d(TAG, "wellness notice POSTED (id=$id)")
+            } else {
+                Log.w(TAG, "Notification permission NOT granted, wellness notice not shown")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing wellness notice (${e.javaClass.simpleName})")
+        }
+    }
+
+    /**
+     * (M7) The ongoing notification of the health workers ("Importing health history 42%"):
+     * visible by design (rule W36, no hidden reads), private on the lock screen, silent.
+     */
+    fun buildWellnessProgress(title: String, progressPct: Int?): android.app.Notification {
+        val publicVersion = NotificationCompat.Builder(context, CHANNEL_ID_WELLNESS)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(WELLNESS_PUBLIC_TEXT)
+            .build()
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID_WELLNESS)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(title)
+            .setContentText("BlackBox is reading from Health Connect")
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
+            .setOngoing(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    context, REQUEST_CODE_WELLNESS, openAppIntent(ACTION_OPEN_FROM_WELLNESS),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
+        if (progressPct != null) builder.setProgress(100, progressPct.coerceIn(0, 100), false)
+        else builder.setProgress(0, 0, true)
+        return builder.build()
     }
 
     /** Stable positive int id derived from a string key (the bus notif_id), so retries

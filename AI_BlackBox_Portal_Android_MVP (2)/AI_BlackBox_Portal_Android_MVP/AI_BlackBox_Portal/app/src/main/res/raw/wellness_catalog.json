@@ -1,0 +1,272 @@
+{
+  "schema": "bbx.wellness.catalog/1",
+  "note": "Mirror of data/wellness/WellnessCatalog.kt (WellnessCatalogTest keeps them equal). Read-only Health Connect types; never READ_EXERCISE_ROUTE.",
+  "categories": [
+    {
+      "id": "sleep",
+      "label": "Sleep",
+      "default_consent": "ask",
+      "default_local_only": false,
+      "hc_types": [
+        "sleep"
+      ]
+    },
+    {
+      "id": "heart",
+      "label": "Heart",
+      "default_consent": "ask",
+      "default_local_only": false,
+      "hc_types": [
+        "heart_rate",
+        "resting_heart_rate",
+        "hrv",
+        "spo2",
+        "respiratory_rate"
+      ]
+    },
+    {
+      "id": "activity",
+      "label": "Activity",
+      "default_consent": "ask",
+      "default_local_only": false,
+      "hc_types": [
+        "steps",
+        "distance",
+        "active_calories",
+        "total_calories",
+        "exercise"
+      ]
+    },
+    {
+      "id": "blood_pressure",
+      "label": "Blood pressure",
+      "default_consent": "off",
+      "default_local_only": true,
+      "hc_types": [
+        "blood_pressure"
+      ]
+    }
+  ],
+  "hc_types": [
+    {
+      "id": "sleep",
+      "record": "SleepSessionRecord",
+      "permission": "android.permission.health.READ_SLEEP",
+      "shape": "session",
+      "category": "sleep"
+    },
+    {
+      "id": "heart_rate",
+      "record": "HeartRateRecord",
+      "permission": "android.permission.health.READ_HEART_RATE",
+      "shape": "bucketed",
+      "category": "heart"
+    },
+    {
+      "id": "resting_heart_rate",
+      "record": "RestingHeartRateRecord",
+      "permission": "android.permission.health.READ_RESTING_HEART_RATE",
+      "shape": "reading",
+      "category": "heart"
+    },
+    {
+      "id": "hrv",
+      "record": "HeartRateVariabilityRmssdRecord",
+      "permission": "android.permission.health.READ_HEART_RATE_VARIABILITY",
+      "shape": "reading",
+      "category": "heart"
+    },
+    {
+      "id": "spo2",
+      "record": "OxygenSaturationRecord",
+      "permission": "android.permission.health.READ_OXYGEN_SATURATION",
+      "shape": "reading",
+      "category": "heart"
+    },
+    {
+      "id": "respiratory_rate",
+      "record": "RespiratoryRateRecord",
+      "permission": "android.permission.health.READ_RESPIRATORY_RATE",
+      "shape": "reading",
+      "category": "heart"
+    },
+    {
+      "id": "steps",
+      "record": "StepsRecord",
+      "permission": "android.permission.health.READ_STEPS",
+      "shape": "bucketed",
+      "category": "activity"
+    },
+    {
+      "id": "distance",
+      "record": "DistanceRecord",
+      "permission": "android.permission.health.READ_DISTANCE",
+      "shape": "bucketed",
+      "category": "activity"
+    },
+    {
+      "id": "active_calories",
+      "record": "ActiveCaloriesBurnedRecord",
+      "permission": "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+      "shape": "bucketed",
+      "category": "activity"
+    },
+    {
+      "id": "total_calories",
+      "record": "TotalCaloriesBurnedRecord",
+      "permission": "android.permission.health.READ_TOTAL_CALORIES_BURNED",
+      "shape": "bucketed",
+      "category": "activity"
+    },
+    {
+      "id": "exercise",
+      "record": "ExerciseSessionRecord",
+      "permission": "android.permission.health.READ_EXERCISE",
+      "shape": "session",
+      "category": "activity"
+    },
+    {
+      "id": "blood_pressure",
+      "record": "BloodPressureRecord",
+      "permission": "android.permission.health.READ_BLOOD_PRESSURE",
+      "shape": "reading",
+      "category": "blood_pressure"
+    }
+  ],
+  "metrics": [
+    {
+      "id": "sleep_duration",
+      "category": "sleep",
+      "kind": "session",
+      "sources": [
+        "sleep"
+      ]
+    },
+    {
+      "id": "sleep_stages",
+      "category": "sleep",
+      "kind": "session",
+      "sources": [
+        "sleep"
+      ]
+    },
+    {
+      "id": "sleeping_hr_median",
+      "category": "heart",
+      "kind": "derived",
+      "sources": [
+        "heart_rate",
+        "sleep"
+      ]
+    },
+    {
+      "id": "sleeping_hr_p10",
+      "category": "heart",
+      "kind": "derived",
+      "sources": [
+        "heart_rate",
+        "sleep"
+      ]
+    },
+    {
+      "id": "resting_hr",
+      "category": "heart",
+      "kind": "reading",
+      "sources": [
+        "resting_heart_rate"
+      ]
+    },
+    {
+      "id": "heart_rate",
+      "category": "heart",
+      "kind": "bucket",
+      "sources": [
+        "heart_rate"
+      ]
+    },
+    {
+      "id": "hrv",
+      "category": "heart",
+      "kind": "reading",
+      "sources": [
+        "hrv"
+      ]
+    },
+    {
+      "id": "spo2",
+      "category": "heart",
+      "kind": "reading",
+      "sources": [
+        "spo2"
+      ]
+    },
+    {
+      "id": "respiratory_rate",
+      "category": "heart",
+      "kind": "reading",
+      "sources": [
+        "respiratory_rate"
+      ]
+    },
+    {
+      "id": "steps",
+      "category": "activity",
+      "kind": "bucket",
+      "sources": [
+        "steps"
+      ]
+    },
+    {
+      "id": "distance",
+      "category": "activity",
+      "kind": "bucket",
+      "sources": [
+        "distance"
+      ]
+    },
+    {
+      "id": "active_calories",
+      "category": "activity",
+      "kind": "bucket",
+      "sources": [
+        "active_calories"
+      ]
+    },
+    {
+      "id": "total_calories",
+      "category": "activity",
+      "kind": "bucket",
+      "sources": [
+        "total_calories"
+      ]
+    },
+    {
+      "id": "exercise",
+      "category": "activity",
+      "kind": "session",
+      "sources": [
+        "exercise"
+      ]
+    },
+    {
+      "id": "bp_systolic",
+      "category": "blood_pressure",
+      "kind": "reading",
+      "sources": [
+        "blood_pressure"
+      ]
+    },
+    {
+      "id": "bp_diastolic",
+      "category": "blood_pressure",
+      "kind": "reading",
+      "sources": [
+        "blood_pressure"
+      ]
+    }
+  ],
+  "special_permissions": {
+    "history": "android.permission.health.READ_HEALTH_DATA_HISTORY",
+    "background": "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+  }
+}

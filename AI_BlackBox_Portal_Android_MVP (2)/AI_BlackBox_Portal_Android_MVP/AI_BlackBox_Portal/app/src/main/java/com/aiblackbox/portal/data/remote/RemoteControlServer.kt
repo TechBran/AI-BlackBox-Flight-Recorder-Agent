@@ -10,6 +10,10 @@ import com.aiblackbox.portal.overlay.NavigationPush
 import com.aiblackbox.portal.overlay.navigationDedupKey
 import com.aiblackbox.portal.overlay.navigationRejectionReason
 import com.aiblackbox.portal.overlay.navigationTargetPackage
+import com.aiblackbox.portal.data.wellness.WELLNESS_ROUTE_PREFIX
+import com.aiblackbox.portal.data.wellness.WellnessPort
+import com.aiblackbox.portal.data.wellness.routeWellness
+import com.aiblackbox.portal.data.wellness.wellnessOperatorFor
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.SerialName
@@ -712,15 +716,27 @@ suspend fun handleActionRequest(
  *    until a subscription is recorded the allow-list is empty == accept-all, so a fresh
  *    box still receives tailnet-sourced notifications.
  *
+ *  - (M7) every /wellness/ route additionally: the request's `operator` must equal
+ *    [wellnessOperator], the operator THIS PHONE's health enrollment belongs to, which is
+ *    deliberately not the chat-bound operator (rule E4: switching the app to another
+ *    operator for a chat never re-routes health data). For `/wellness/bind` it is the
+ *    operator the user chose when they started setup (the live intent). Fail-closed: no
+ *    enrollment / no live intent (blank) rejects every method.
+ *
  * [sourceAdmitted] is the source decision; [RemoteControlServer] passes the verdict its peer
  * policy already reached in the pre-body gate, so both checks judge the peer the same way.
  */
 fun authorize(method: String, path: String, remoteIp: String,
               requestOperator: String, boundOperator: String,
               isSubscribed: (operator: String) -> Boolean = { true },
-              sourceAdmitted: Boolean = isTailnetSource(remoteIp)): RemoteResponse? {
+              sourceAdmitted: Boolean = isTailnetSource(remoteIp),
+              wellnessOperator: String = ""): RemoteResponse? {
     if (!sourceAdmitted)
         return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
+    if (path.startsWith(WELLNESS_ROUTE_PREFIX)) {
+        if (wellnessOperator.isBlank() || requestOperator != wellnessOperator)
+            return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for health on this device")))
+    }
     val m = method.uppercase()
     if (path == "/task" && m == "POST") {
         if (boundOperator.isBlank() || requestOperator != boundOperator)
@@ -876,6 +892,9 @@ class RemoteControlServer(
     // to the process-wide [BusTelemetryReader].
     private val telemetryReaderProvider: () -> TelemetryReader = { BusTelemetryReader },
     private val pairingSecretProvider: () -> String? = { null },
+    // (M7) The health enrollment the box -> phone `/wellness/*` routes act on. Null (the
+    // default) answers 503 and authorize() refuses every /wellness/ call (no operator).
+    private val wellnessPortProvider: () -> WellnessPort? = { null },
     ownAddressesProvider: () -> Set<String> = { OwnAddresses.current() },
     private val peerPolicy: (remoteIp: String) -> String? =
         { ip -> peerRejection(ip, ownAddressesProvider()) },
@@ -961,14 +980,22 @@ class RemoteControlServer(
         // as the ?operator= query param.
         val requestOperator = when {
             path == "/task" || path == "/notify" || path == "/action" ||
-                path == "/kill-all" || path.startsWith("/kill/") -> extractOperator(body)
+                path == "/kill-all" || path.startsWith("/kill/") ||
+                path.startsWith(WELLNESS_ROUTE_PREFIX) -> extractOperator(body)
             path.startsWith("/stream/") || path.startsWith("/telemetry") ->
                 session.parameters?.get("operator")?.firstOrNull()?.trim() ?: ""
             else -> ""
         }
+        val wellnessPort = if (path.startsWith(WELLNESS_ROUTE_PREFIX)) wellnessPortProvider() else null
         authorize(method, path, remoteIp, requestOperator, operatorProvider(), subscriptionPredicate,
-            sourceAdmitted = peerRefusal == null)?.let { denied ->
+            sourceAdmitted = peerRefusal == null,
+            wellnessOperator = wellnessOperatorFor(path, wellnessPort))?.let { denied ->
             return newFixedLengthResponse(statusOf(denied.status), "application/json", denied.json)
+        }
+        // (M7) Box -> phone health routes: bind (needs the live intent nonce), sync, unbind.
+        if (path.startsWith(WELLNESS_ROUTE_PREFIX)) {
+            val routed = routeWellness(method, path, body, wellnessPort)
+            return newFixedLengthResponse(statusOf(routed.status), "application/json", routed.json)
         }
         // (M8.3) The telemetry GETs return a fixed-length JSON body (operator-scoped above).
         if (path.startsWith("/telemetry")) {

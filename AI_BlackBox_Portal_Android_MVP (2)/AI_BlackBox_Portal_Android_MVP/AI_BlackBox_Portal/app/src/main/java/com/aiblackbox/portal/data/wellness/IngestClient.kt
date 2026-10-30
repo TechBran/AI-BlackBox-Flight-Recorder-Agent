@@ -1,0 +1,116 @@
+package com.aiblackbox.portal.data.wellness
+
+import com.aiblackbox.portal.data.api.HttpClients
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+
+/**
+ * The phone's HTTP calls to the box's `/wellness/` routes (wire contract). Signed calls
+ * carry `X-BlackBox-Origin` from [OriginSigner] over the EXACT bytes sent; the ingest body is
+ * gzip with `Content-Encoding: gzip`. Enrollment is the one unsigned POST (there is no key
+ * yet). Answers come back as [WellnessHttp] (status -1 = no answer), never as exceptions, so
+ * the outbox table and the UI handle every outcome the same way.
+ *
+ * Never logs a body, a header or a key.
+ */
+class IngestClient(
+    private val baseUrl: String,
+    base: OkHttpClient = HttpClients.base,
+    private val nowSec: () -> Long = { System.currentTimeMillis() / 1000 },
+) {
+    private val client: OkHttpClient = base.newBuilder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
+
+    private val jsonType = "application/json; charset=utf-8".toMediaType()
+
+    /** POST /wellness/ingest with a gzip body (already compressed, from the outbox). */
+    suspend fun ingest(gzipBody: ByteArray, signer: OriginSigner): WellnessHttp =
+        send("POST", INGEST, gzipBody, signer, gzip = true)
+
+    suspend fun capabilities(report: String, signer: OriginSigner): WellnessHttp =
+        send("POST", CAPABILITIES, report.toByteArray(Charsets.UTF_8), signer)
+
+    /** POST /wellness/enroll (unsigned: the key does not exist yet). */
+    suspend fun enroll(body: String): WellnessHttp = send("POST", ENROLL, body.toByteArray(Charsets.UTF_8), null)
+
+    /** GET /wellness/status; signed it returns the credentialed fields. */
+    suspend fun status(operator: String, signer: OriginSigner?): WellnessHttp =
+        send("GET", "$STATUS?operator=${enc(operator)}", null, signer)
+
+    suspend fun putSettings(body: String, signer: OriginSigner?): WellnessHttp =
+        send("PUT", SETTINGS, body.toByteArray(Charsets.UTF_8), signer)
+
+    /** pause / resume / disconnect / erase: POST with a small JSON body. */
+    suspend fun action(path: String, body: String, signer: OriginSigner?): WellnessHttp =
+        send("POST", path, body.toByteArray(Charsets.UTF_8), signer)
+
+    suspend fun get(pathWithQuery: String, signer: OriginSigner?): WellnessHttp =
+        send("GET", pathWithQuery, null, signer)
+
+    suspend fun send(
+        method: String,
+        pathWithQuery: String,
+        body: ByteArray?,
+        signer: OriginSigner?,
+        gzip: Boolean = false,
+    ): WellnessHttp = withContext(Dispatchers.IO) {
+        try {
+            val builder = Request.Builder()
+                .url(baseUrl.trimEnd('/') + pathWithQuery)
+                .header("X-BlackBox-Client", "native-android/1.0")
+            if (signer != null) builder.header(OriginSigner.HEADER, signer.header(method, pathWithQuery, body, nowSec()))
+            if (gzip) builder.header("Content-Encoding", "gzip")
+            val requestBody = body?.toRequestBody(jsonType)
+            builder.method(method, if (method == "GET") null else (requestBody ?: ByteArray(0).toRequestBody(jsonType)))
+            client.newCall(builder.build()).execute().use { response ->
+                WellnessHttp(
+                    status = response.code,
+                    body = response.body?.string().orEmpty().take(MAX_REPLY_CHARS),
+                    retryAfterS = response.header("Retry-After")?.trim()?.toLongOrNull(),
+                    policyVersion = response.header("X-Policy-Version"),
+                )
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            WellnessHttp(status = -1, body = "", error = e.javaClass.simpleName)
+        }
+    }
+
+    companion object {
+        const val ENROLL = "/wellness/enroll"
+        const val INGEST = "/wellness/ingest"
+        const val CAPABILITIES = "/wellness/capabilities"
+        const val STATUS = "/wellness/status"
+        const val SETTINGS = "/wellness/settings"
+        const val PAUSE = "/wellness/pause"
+        const val RESUME = "/wellness/resume"
+        const val DISCONNECT = "/wellness/disconnect"
+        const val ERASE = "/wellness/erase"
+        const val DISCLOSURES = "/wellness/disclosures"
+        const val PRIVACY_POLICY = "/wellness/privacy-policy"
+        private const val MAX_REPLY_CHARS = 1_000_000
+
+        private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+    }
+}
+
+data class WellnessHttp(
+    val status: Int,
+    val body: String,
+    val retryAfterS: Long? = null,
+    val policyVersion: String? = null,
+    val error: String? = null,
+) {
+    val ok: Boolean get() = status in 200..299
+    val reached: Boolean get() = status > 0
+}

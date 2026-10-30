@@ -9,6 +9,7 @@ import com.aiblackbox.portal.data.remote.RemoteTaskRunner
 import com.aiblackbox.portal.data.remote.remoteTaskHandlerFactory
 import com.aiblackbox.portal.data.repository.ModelCatalogs
 import com.aiblackbox.portal.data.voice.AudioPlaybackManager
+import com.aiblackbox.portal.data.wellness.WellnessScheduler
 import com.aiblackbox.portal.overlay.AppForegroundState
 import com.aiblackbox.portal.ui.cli_agent.TerminalSessionManager
 
@@ -58,6 +59,9 @@ class PortalApplication : Application() {
             override fun onStart(owner: LifecycleOwner) {
                 AppForegroundState.onForeground()
                 AudioPlaybackManager.onAppForeground()
+                // (M7) Health: an expedited sync on open (debounced to 10 minutes) and resume an
+                // unfinished history import. A no-op on a phone that is not a health source.
+                runCatching { WellnessScheduler.onAppForeground(this@PortalApplication) }
             }
         })
     }

@@ -25,6 +25,7 @@ import com.aiblackbox.portal.data.remote.RemoteSessionBus
 import com.aiblackbox.portal.data.remote.RemoteTaskHandlerHolder
 import com.aiblackbox.portal.data.remote.pairingRetryDelayMs
 import com.aiblackbox.portal.data.local.AutonomyStore
+import com.aiblackbox.portal.data.wellness.WellnessGraph
 import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.NotificationSubscriptionStore
 import com.aiblackbox.portal.overlay.AndroidPhoneController
@@ -220,6 +221,8 @@ class NotificationListenerFgs : Service() {
                 observationProvider = { ObservationBuilder.fromDevice(appContext).build() },
                 // (X02/X04) the secret the box must present on every route but /healthz.
                 pairingSecretProvider = { RemoteControlPairing.secret(appContext) },
+                // (M7) /wellness/bind, /sync, /unbind: this phone's health enrollment.
+                wellnessPortProvider = { WellnessGraph.port(appContext) },
             ).also {
                 it.startServer()
                 server = it

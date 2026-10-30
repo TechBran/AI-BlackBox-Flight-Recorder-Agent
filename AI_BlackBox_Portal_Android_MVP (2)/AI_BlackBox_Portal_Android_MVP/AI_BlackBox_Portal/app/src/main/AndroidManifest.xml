@@ -51,6 +51,28 @@
     <!-- Alarm clock access for the set_alarm/set_timer on-device intent actions -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
 
+    <!-- M7 HEALTH (wellness): READ-ONLY Health Connect access for the v1 categories (sleep,
+         heart, activity, blood pressure). Each is a separate user grant asked for only when
+         the user turns its category on (WellnessRules.permissionsToRequest). NEVER a write
+         permission and NEVER READ_EXERCISE_ROUTE (routes are location history).
+         READ_HEALTH_DATA_HISTORY (older than 30 days) and READ_HEALTH_DATA_IN_BACKGROUND
+         (decision D1) are their own grants, offered only when Health Connect says they are
+         available and never pre-selected. WellnessManifestPermissionsTest pins this set. -->
+    <uses-permission android:name="android.permission.health.READ_SLEEP"/>
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
+    <uses-permission android:name="android.permission.health.READ_RESTING_HEART_RATE"/>
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE_VARIABILITY"/>
+    <uses-permission android:name="android.permission.health.READ_OXYGEN_SATURATION"/>
+    <uses-permission android:name="android.permission.health.READ_RESPIRATORY_RATE"/>
+    <uses-permission android:name="android.permission.health.READ_STEPS"/>
+    <uses-permission android:name="android.permission.health.READ_DISTANCE"/>
+    <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED"/>
+    <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED"/>
+    <uses-permission android:name="android.permission.health.READ_EXERCISE"/>
+    <uses-permission android:name="android.permission.health.READ_BLOOD_PRESSURE"/>
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY"/>
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"/>
+
     <!-- Package-visibility (Android 11+). Decision 9 / M1.5: the frontier model must
          be able to RESOLVE and LAUNCH arbitrary installed apps + deep links via the
          intent path (and the gesture layer's open_app, which uses
@@ -105,6 +127,11 @@
         <intent><action android:name="android.intent.action.SET_ALARM" /></intent>
         <intent><action android:name="android.intent.action.SET_TIMER" /></intent>
         <intent><action android:name="android.intent.action.SHOW_ALARMS" /></intent>
+
+        <!-- M7 health: Health Connect (the APK provider on Android 13 and lower) and Samsung
+             Health, whose presence and version the capability probe reports (spec T-4). -->
+        <package android:name="com.google.android.apps.healthdata" />
+        <package android:name="com.sec.android.app.shealth" />
     </queries>
 
     <application
@@ -235,6 +262,39 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.AIBlackBox.NoBar"/>
+
+        <!-- M7 health: the privacy-policy RATIONALE screen Health Connect requires (Android 16
+             revokes health permissions from an app without one). Android 13 and lower reach it
+             with ACTION_SHOW_PERMISSIONS_RATIONALE; Android 14+ through the alias below. -->
+        <activity
+            android:name=".WellnessRationaleActivity"
+            android:exported="true"
+            android:theme="@style/Theme.AIBlackBox.NoBar">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity>
+
+        <!-- Android 14+: Health Connect's own settings open the rationale through this alias.
+             Only the system (START_VIEW_PERMISSION_USAGE is a signature permission) can start it. -->
+        <activity-alias
+            android:name=".WellnessPermissionUsageActivity"
+            android:exported="true"
+            android:targetActivity=".WellnessRationaleActivity"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- M7 health: WorkManager's foreground service hosts the history import
+             (WellnessBackfillWorker, a VISIBLE dataSync worker with a progress notification)
+             and expedited syncs on Android 11 and lower. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
         <!-- XR Overlay Activity — transparent floating panel in Home Space (Galaxy XR) -->
         <activity

@@ -230,6 +230,12 @@ dependencies {
     // foldable / large-screen device-control path (FoldingFeatureMonitor).
     implementation libs.androidx.window
 
+    // M7 health (wellness). Health Connect is READ-ONLY here: the manifest declares read
+    // permissions only (WellnessManifestPermissionsTest pins the exact set). WorkManager runs
+    // the hourly sync and the visible dataSync backfill (data/wellness/WellnessWorkers.kt).
+    implementation libs.androidx.health.connect.client
+    implementation libs.androidx.work.runtime.ktx
+
     // Serialization
     implementation libs.serialization.json
 

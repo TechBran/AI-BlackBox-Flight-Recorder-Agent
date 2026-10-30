@@ -21,12 +21,15 @@ object NotificationIds {
     const val NOTIFICATION_LISTENER = 9095
     const val REMOTE_CONTROL_BANNER = 9096
     const val MODEL_DOWNLOAD = 9097
+    /** (M7) The health sync / history import workers' foreground notifications. */
+    const val WELLNESS_SYNC = 9098
+    const val WELLNESS_BACKFILL = 9100
     const val KEEP_ALIVE = 9999
 
     /** The fixed ids above (unit-tested to be distinct). */
     val FIXED = listOf(
         OVERLAY, BACKGROUND_TASK, LOCAL_MODEL, TERMINAL, NOTIFICATION_LISTENER,
-        REMOTE_CONTROL_BANNER, MODEL_DOWNLOAD, KEEP_ALIVE,
+        REMOTE_CONTROL_BANNER, MODEL_DOWNLOAD, WELLNESS_SYNC, WELLNESS_BACKFILL, KEEP_ALIVE,
     )
 
     /** Per-file download notifications use this band, which no fixed id falls in. */
