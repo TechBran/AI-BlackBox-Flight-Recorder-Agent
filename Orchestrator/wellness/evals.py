@@ -29,6 +29,7 @@ Nothing here reads the clock, the network, a store or a file.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import math
 import re
@@ -932,10 +933,6 @@ def a2_leaks(block: str, values: frozenset, sentinels: Sequence[str] = ()) -> Li
     return list(dict.fromkeys(hits))
 
 
-def _boundary(token: str):
-    return re.compile(rf"(?<![\d.,]){re.escape(token)}(?![\d])")
-
-
 # Not "43 ms" (every log line times something) nor "96 %": an HRV or SpO2
 # value is caught next to its own unit word by the recall rule instead.
 _UNIT_PHRASE = re.compile(r"^\d[\d.,]*\s?(?:bpm|kcal|km|mmHg|steps|breaths/min)$|"
@@ -948,6 +945,31 @@ def unit_phrases(values: frozenset) -> frozenset:
     return frozenset(v for v in values if _UNIT_PHRASE.match(v))
 
 
+@functools.lru_cache(maxsize=8)
+def _scanner(values: frozenset, sentinels: Tuple[str, ...]):
+    """The compiled pieces of a leak scan, built once per value set: the
+    sentinels and unit phrases ending in a digit and in a letter, the
+    distinctive members, and a prefilter every line the recall rule could
+    flag passes (a distinctive member, a pair, or a reading's unit word)."""
+    tokens = list(sentinels) + sorted(unit_phrases(values))
+    digit_end = [t for t in tokens if t[-1:].isdigit()]
+    word_end = [t for t in tokens if t and not t[-1:].isdigit()]
+
+    def alt(items):
+        return "|".join(re.escape(t) for t in sorted(set(items), key=len, reverse=True))
+    digit_rx = re.compile(rf"(?<![\d.,])(?:{alt(digit_end)})(?![\d])") if digit_end else None
+    word_rx = re.compile(rf"(?<![\d.,])(?:{alt(word_end)})(?![\w])", re.I) if word_end else None
+    distinct = mask._distinctive(values)
+    distinct_rx = mask._value_regex(distinct, tails=False) if distinct else None
+    units = alt(mask._RECALL_UNITS)
+    pre = [rf"\d{{2,3}}/\d{{2,3}}", rf"(?i:\b(?:{units})\b)"]
+    if distinct:
+        pre.append(alt(distinct))
+    prefilter = re.compile("|".join(pre))
+    canon = {t.lower(): t for t in tokens}
+    return digit_rx, word_rx, distinct_rx, prefilter, canon
+
+
 def leak_counts(text: str, values: frozenset, sentinels: Sequence[str] = ()) -> dict:
     """A11b: how often `text` repeats a delivered result, by token: a
     sentinel or one of V's unit phrases anywhere, or, on a line the mask's
@@ -957,18 +979,17 @@ def leak_counts(text: str, values: frozenset, sentinels: Sequence[str] = ()) -> 
     never the line."""
     counts: dict = {}
     text = text or ""
-    for s in list(sentinels) + sorted(unit_phrases(values or frozenset())):
-        n = len(re.compile(rf"(?<![\d.,]){re.escape(s)}(?![\w])", re.I).findall(text)) \
-            if not s[-1].isdigit() else len(_boundary(s).findall(text))
-        if n:
-            counts[s] = counts.get(s, 0) + n
+    values = frozenset(values or ())
+    digit_rx, word_rx, distinct_rx, prefilter, canon = _scanner(values, tuple(sentinels))
+    for rx in (digit_rx, word_rx):
+        for m in rx.finditer(text) if rx is not None else ():
+            tok = canon.get(m.group(0).lower(), m.group(0))
+            counts[tok] = counts.get(tok, 0) + 1
     if values:
-        distinct = mask._distinctive(values)
-        rx = mask._value_regex(distinct, tails=False) if distinct else None
         for line in text.splitlines():
-            if not line.strip() or not mask.quotes_results(line, values):
+            if not prefilter.search(line) or not mask.quotes_results(line, values):
                 continue
-            found = [m.group(0) for m in rx.finditer(line)] if rx is not None else []
+            found = [m.group(0) for m in distinct_rx.finditer(line)] if distinct_rx else []
             if not found:
                 found = [tok for tok in re.findall(r"\d+(?:[.,/]\d+)*", line) if tok in values]
             for tok in found or ["(a number of V next to its unit)"]:

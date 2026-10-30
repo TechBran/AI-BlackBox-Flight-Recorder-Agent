@@ -481,6 +481,21 @@ def test_a2_a_masked_minted_turn_passes_and_an_unmasked_one_is_caught(isolated_s
                             SENTINELS)["applies"] is False
 
 
+def test_a11b_scans_a_large_index_quickly(answers):
+    """A run rewrites Manifest/snapshot_index.json (hundreds of thousands of
+    lines on a real box) and the scan diffs it whole: the compiled scanner and
+    its prefilter keep that to seconds (the first live run's scan, compiling
+    per line, took most of an hour)."""
+    import time
+    values = mask.value_set(list(answers.values()))
+    lines = ['  "SNAP-20261030-1234": {', '    "byte_start": 123456,',
+             '    "operator": "someone",', '    "timestamp": "2026-10-30T09:00:00Z"', '  },']
+    big = "\n".join(lines * 20_000)                            # 100,000 lines
+    t = time.monotonic()
+    assert evals.new_leaks(big, big + '\n"note": "47.3"', values, SENTINELS) == ["47.3"]
+    assert time.monotonic() - t < 20
+
+
 def test_a11b_leak_counts_and_what_a_run_added(answers):
     values = mask.value_set([answers["night"], answers["steps"]])
     log = ("2026-10-30T06:00:01 blackbox[1]: [CHAT/SAVE] Wellness turn: preview skipped\n"
