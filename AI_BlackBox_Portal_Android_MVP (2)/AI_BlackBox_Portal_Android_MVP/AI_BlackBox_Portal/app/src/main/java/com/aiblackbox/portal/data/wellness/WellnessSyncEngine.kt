@@ -521,6 +521,7 @@ class WellnessSyncEngine(
                         else st.copy(
                             categories = categories.mapKeys { it.key.wire }.mapValues { it.value.wire },
                             state = box.state.wire,
+                            sourceLabel = box.sourceLabel ?: st.sourceLabel,
                             lastStatusMs = now,
                         )
                     }

@@ -50,6 +50,7 @@ import com.aiblackbox.portal.data.model.TokenCount
 import com.aiblackbox.portal.data.model.ToolResult
 import com.aiblackbox.portal.data.model.ToolSchema
 import com.aiblackbox.portal.data.model.UiMessage
+import com.aiblackbox.portal.data.wellness.WellnessUsed
 import com.aiblackbox.portal.data.repository.ChatRepository
 import com.aiblackbox.portal.data.repository.TaskPoller
 import com.aiblackbox.portal.data.repository.TaskRepository
@@ -1614,7 +1615,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         isStreaming = true,
                         isThinking = _chatState.value == ChatState.THINKING,
                         model = acc.model,
-                        mediaTasks = acc.mediaTasks
+                        mediaTasks = acc.mediaTasks,
+                        wellnessUsed = acc.wellnessUsed
                     )
                 }
 
@@ -1659,7 +1661,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     model = acc.model,
                     tokens = acc.tokens,
                     provenance = acc.provenance,
-                    mediaTasks = acc.mediaTasks
+                    mediaTasks = acc.mediaTasks,
+                    wellnessUsed = acc.wellnessUsed
                 )
 
                 // Resolve media tasks — uses the robust resolver that handles
@@ -1683,9 +1686,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     // (A04-chat-viewmodel-14); nothing for a computer-use turn, which the
                     // backend CU loop already saved and minted (A04-chat-viewmodel-02);
                     // nothing for an empty completion (A04-chat-viewmodel-15).
-                    // provenance is forwarded so backend auto-mint records context lineage.
+                    // provenance is forwarded so backend auto-mint records context lineage;
+                    // the wellness turn key so the ledger copy masks this turn's health results.
                     ledgerResponseFor(turn.provider, realContent)?.let { response ->
-                        saveConversation(turn, text, response, acc.reasoning, acc.model, acc.tokens, acc.provenance)
+                        saveConversation(turn, text, response, acc.reasoning, acc.model, acc.tokens, acc.provenance,
+                            wellnessTurn = acc.wellnessTurn)
                     }
 
                     // Persist to local storage
@@ -1793,9 +1798,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         provenance: Provenance? = null,
         mediaTasks: List<String> = emptyList(),
         messageId: String? = null,
+        wellnessUsed: WellnessUsed? = null,
     ) {
         _messages.value = updateMessageById(_messages.value, messageId) { last ->
-            last.copy(
+            withWellnessUsed(last.copy(
                 content = content,
                 reasoning = reasoning ?: last.reasoning,
                 isStreaming = isStreaming,
@@ -1804,7 +1810,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 tokens = tokens ?: last.tokens,
                 provenance = provenance ?: last.provenance,
                 mediaTasks = mediaTasks.ifEmpty { last.mediaTasks }
-            )
+            ), wellnessUsed)
         }
     }
 
@@ -1829,6 +1835,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         model: String?,
         tokens: TokenCount?,
         provenance: Provenance? = null,
+        wellnessTurn: String? = null,
     ) {
         val repo = repository ?: return
         // The operator and model the turn was SENT with (A04-chat-viewmodel-16).
@@ -1840,6 +1847,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             model = model ?: turn.model,
             tokens = tokens,
             provenance = provenance,
+            wellnessTurn = wellnessTurn,
         )
         viewModelScope.launch {
             try {
@@ -3671,6 +3679,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
          *   - reasoning is normalized to null when blank
          *   - model passes through as-is (caller substitutes currentModel)
          *   - provenance is passed through, may be null
+         *   - (M7) wellnessTurn, stream_start's `wellness_turn`, is echoed when the turn
+         *     carried one (blank counts as none), so the save masks exactly that turn
          */
         @VisibleForTesting
         internal fun buildSaveRequest(
@@ -3680,7 +3690,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             reasoning: String,
             model: String?,
             tokens: TokenCount?,
-            provenance: Provenance?
+            provenance: Provenance?,
+            wellnessTurn: String? = null,
         ): SaveRequest = SaveRequest(
             operator = operator,
             userMessage = userMessage,
@@ -3689,6 +3700,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             model = model,
             tokens = tokens,
             provenance = provenance,
+            wellnessTurn = wellnessTurn?.takeIf { it.isNotBlank() },
         )
+
+        /**
+         * [message] carrying what its turn used of the person's health data ([used]; null
+         * leaves what it has): the footer's details, and its first ref as the bubble's
+         * wellnessRef (the history scrub's tag).
+         */
+        fun withWellnessUsed(message: UiMessage, used: WellnessUsed?): UiMessage =
+            if (used == null) message else message.copy(wellnessUsed = used, wellnessRef = used.ref)
     }
 }

@@ -17,6 +17,8 @@ data class WellnessSyncState(
     val categories: Map<String, String> = WellnessCatalog.DEFAULT_CONSENT.mapKeys { it.key.wire }.mapValues { it.value.wire },
     /** The box's enrollment state as last seen (wire id). */
     val state: String = WellnessRules.EnrollmentState.NOT_SET_UP.wire,
+    /** The source phone's label as the last credentialed status gave it (the chat footer's source). */
+    @SerialName("source_label") val sourceLabel: String? = null,
     @SerialName("interval_min") val intervalMin: Int = WellnessRules.INTERVAL_DEFAULT,
     /** "auto" or a package name (the status screen's "Use heart rate from" override). */
     @SerialName("hr_origin_choice") val hrOriginChoice: String = "auto",

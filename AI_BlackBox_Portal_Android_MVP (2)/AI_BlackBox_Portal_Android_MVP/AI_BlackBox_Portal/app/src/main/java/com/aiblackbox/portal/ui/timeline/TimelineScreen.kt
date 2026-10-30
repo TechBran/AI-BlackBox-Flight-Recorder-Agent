@@ -69,6 +69,7 @@ import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.theme.RadiusLg
 import com.aiblackbox.portal.ui.theme.SolidGreen
 import com.aiblackbox.portal.ui.theme.glassSurface
+import com.aiblackbox.portal.ui.wellness.SnapshotShowNumbers
 
 // =============================================================================
 // TimelineScreen — aligned with Portal timeline-browser.js + _timeline.css
@@ -417,6 +418,10 @@ private fun SnapshotDetail(
                 MetaBadge(label = "Type", value = snapshot.type, color = Neutral500)
             }
         }
+
+        // (M7) A health turn from the ledger is masked ("[·]"): its own operator's enrolled
+        // phone can show the numbers again from the box's health store (signed /wellness/ref).
+        SnapshotShowNumbers(text = fullContent, snapshotOperator = snapshot.operator)
 
         Spacer(Modifier.height(12.dp))
 

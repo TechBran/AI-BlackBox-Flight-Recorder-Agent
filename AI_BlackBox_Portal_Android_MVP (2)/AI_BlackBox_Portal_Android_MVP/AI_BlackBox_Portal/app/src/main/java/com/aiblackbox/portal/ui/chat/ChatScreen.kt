@@ -27,6 +27,8 @@ import com.aiblackbox.portal.ui.components.ChatBubble
 import com.aiblackbox.portal.ui.components.EmberOverlay
 import com.aiblackbox.portal.ui.components.LiveTextSection
 import com.aiblackbox.portal.ui.components.SnapshotPeekSheet
+import com.aiblackbox.portal.ui.wellness.WellnessChatContext
+import com.aiblackbox.portal.ui.wellness.rememberWellnessChatContext
 
 /**
  * ChatScreen displays the message list.
@@ -52,6 +54,9 @@ fun ChatScreen(
     // turn. Passed ONLY to the streaming bubble below; never persisted on a message.
     val signalLabel by viewModel.signalLabel.collectAsState()
     val listState = rememberLazyListState()
+    // (M7) Health: the source label for the footer and whether this phone is the chat
+    // operator's source (Show numbers); re-read off the main thread as turns land.
+    val wellness = rememberWellnessChatContext(operator, messages.size)
 
     var peekSnapId by remember { mutableStateOf<String?>(null) }
 
@@ -86,6 +91,7 @@ fun ChatScreen(
                 onSnapshotClick = { peekSnapId = it },
                 onRetry = viewModel::retryMessage,
                 bottomFocalGeometry = bottomFocalGeometry,
+                wellness = wellness,
             )
         }
     }
@@ -112,6 +118,7 @@ internal fun MainChatContent(
     onSnapshotClick: (String) -> Unit = {},
     onRetry: (String) -> Unit = {},
     bottomFocalGeometry: BottomFocalGeometry? = null,
+    wellness: WellnessChatContext? = null,
 ) {
     // Live turn = the assistant message only while it is the FINAL element.
     // (lastOrNull { assistant } kept the PREVIOUS turn's bubble selected as
@@ -196,6 +203,7 @@ internal fun MainChatContent(
                     } else null,
                     useCompletedReturnAnchor = isLiveTurn &&
                         expectedSection == LiveTextSection.COMPLETED_RETURN,
+                    wellness = wellness,
                 )
             }
         }

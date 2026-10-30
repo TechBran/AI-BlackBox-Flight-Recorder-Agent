@@ -24,7 +24,13 @@ data class UiMessage(
     val ttsAudioUrl: String? = null,              // URL of generated TTS audio for inline player
     val ttsGenerating: Boolean = false,            // true while TTS is being generated
     val ttsStatus: String? = null,                 // B3 queue chip text ("Queued — 2 ahead" / "Generating 1/3…"); only meaningful while ttsGenerating
-    val sendFailed: Boolean = false                // user turn whose send failed with nothing usable arrived — UI offers retry (default keeps old persisted history loading)
+    val sendFailed: Boolean = false,               // user turn whose send failed with nothing usable arrived — UI offers retry (default keeps old persisted history loading)
+    // M7 (additive; old persisted history loads with both null): an assistant turn that used
+    // the person's health data. wellnessRef = the first wellness_used ref (sent back as
+    // ChatMessage.wellness_ref for the box's history scrub); wellnessUsed = what the footer
+    // shows (refs, categories, as-of, the AI it was shared with). Never sent to the box.
+    val wellnessRef: String? = null,
+    val wellnessUsed: com.aiblackbox.portal.data.wellness.WellnessUsed? = null
 )
 
 /**

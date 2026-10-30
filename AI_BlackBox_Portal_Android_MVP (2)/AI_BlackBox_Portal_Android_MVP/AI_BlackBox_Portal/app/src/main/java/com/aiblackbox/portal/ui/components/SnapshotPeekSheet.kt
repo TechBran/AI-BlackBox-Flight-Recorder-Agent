@@ -49,6 +49,7 @@ import com.aiblackbox.portal.ui.theme.RadiusMd
 import com.aiblackbox.portal.ui.timeline.PeekView
 import com.aiblackbox.portal.ui.timeline.TimelineViewModel
 import com.aiblackbox.portal.ui.timeline.peekViewFor
+import com.aiblackbox.portal.ui.wellness.SnapshotShowNumbers
 
 /**
  * Inline bottom sheet for peeking at a snapshot's content from the chat surface.
@@ -111,6 +112,10 @@ fun SnapshotPeekSheet(
                     if (snap.operator.isNotBlank()) MetaBadge("Operator", snap.operator, BbxDim)
                     if (snap.timestamp.isNotBlank()) MetaBadge("Time", snap.timestamp, Neutral500)
                     if (snap.type.isNotBlank()) MetaBadge("Type", snap.type, Neutral500)
+                }
+                // (M7) A masked health turn: Show numbers for its own operator's enrolled phone.
+                (peekViewFor(peek, currentSnapId) as? PeekView.Body)?.let { body ->
+                    SnapshotShowNumbers(text = body.text, snapshotOperator = snap.operator)
                 }
                 Spacer(Modifier.height(12.dp))
             }

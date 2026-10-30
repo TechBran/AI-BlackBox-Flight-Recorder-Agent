@@ -52,6 +52,8 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.aiblackbox.portal.data.model.ArtifactRef
 import com.aiblackbox.portal.data.model.UiMessage
+import com.aiblackbox.portal.ui.wellness.WellnessBubbleExtras
+import com.aiblackbox.portal.ui.wellness.WellnessChatContext
 import com.aiblackbox.portal.util.SpeakableText
 import com.aiblackbox.portal.ui.theme.AssistantBubbleShape
 import com.aiblackbox.portal.ui.theme.BbxAccent
@@ -107,6 +109,10 @@ fun ChatBubble(
     onLiveEdgePositioned: ((LiveTextSection, Float) -> Unit)? = null,
     useToolFallbackAnchor: Boolean = false,
     useCompletedReturnAnchor: Boolean = false,
+    // (M7) The chat's Health context (the source label, who the chat and this phone are
+    // for): the health footer and Show numbers under an assistant bubble. Null = no Show
+    // numbers; the footer still shows, with "your phone" as the source.
+    wellness: WellnessChatContext? = null,
 ) {
     val isUser = message.role == "user"
     val view = LocalView.current
@@ -463,6 +469,12 @@ fun ChatBubble(
             // so an artifact still surfaces even when the prose is empty.
             if (message.artifacts.isNotEmpty()) {
                 ArtifactChips(artifacts = message.artifacts)
+            }
+
+            // ── (M7) Health: the footer when the turn used health data, Show numbers on a
+            // masked turn (spec §6.1 "Chat"). Never while the reply is still streaming.
+            if (!isUser && !message.isStreaming) {
+                WellnessBubbleExtras(message.content, message.wellnessRef, message.wellnessUsed, wellness)
             }
 
             // ── TTS Audio Player (shown when ttsAudioUrl file exists) ──

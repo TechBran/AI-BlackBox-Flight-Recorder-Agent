@@ -4,6 +4,8 @@ import android.util.Log
 import com.aiblackbox.portal.data.api.SSEEvent
 import com.aiblackbox.portal.data.model.Provenance
 import com.aiblackbox.portal.data.model.TokenCount
+import com.aiblackbox.portal.data.wellness.WellnessChatRules
+import com.aiblackbox.portal.data.wellness.WellnessUsed
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -44,6 +46,11 @@ data class SseTurnState(
     // appended after a separator, so "done" must not replace the accumulated content.
     val queueAppend: Boolean = false,
     val signal: SignalState = SignalState(),
+    // M7: stream_start's `wellness_turn` (the turn key /chat/save echoes so the ledger copy
+    // masks exactly this turn's health results), and what the turn's UI-only wellness_used
+    // frames said (the bubble's footer, its wellness_ref). Neither is ever reply text.
+    val wellnessTurn: String? = null,
+    val wellnessUsed: WellnessUsed? = null,
 )
 
 /** A write to the Signal line: leave it, show [Show.label], or clear it. */
@@ -189,6 +196,9 @@ object SseTurnReducer {
                     // standalone "provenance" event for /chat/stream (that branch is defensive).
                     val prov = ChatViewModel.extractProvenanceFromStreamStart(data)
                     meta(model = model, provenance = prov)
+                    // M7: present only for an operator with a health store (else byte-identical).
+                    (o["wellness_turn"] as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }
+                        ?.let { turn = turn.copy(wellnessTurn = it.content) }
                     if (prov != null) {
                         Log.d(TAG, "stream_start provenance: recent=${prov.recent.size} " +
                             "keyword=${prov.keyword.size} semantic=${prov.semantic.size} " +
@@ -449,6 +459,14 @@ object SseTurnReducer {
                         val d = data.trim()
                         if (d.isNotBlank()) pushSignal("tool · " + (if (d.length > 40) d.substring(0, 40) else d))
                     }
+                }
+
+                // ── M7: a wellness tool answered (UI-only, like the Signal frames) ──
+                // data = {ref, categories, as_of, provider, provider_label}: no values. It
+                // lands on the turn (the assistant bubble being built, text or no text yet),
+                // never in content/reasoning, the /chat/save payload or the ledger.
+                "wellness_used" -> WellnessChatRules.parseUsedFrame(data)?.let {
+                    turn = turn.copy(wellnessUsed = WellnessChatRules.merge(turn.wellnessUsed, it))
                 }
 
                 // ── Unknown events — log but don't crash ──

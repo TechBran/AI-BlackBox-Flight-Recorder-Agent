@@ -1,5 +1,8 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package com.aiblackbox.portal.data.model
 
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -14,7 +17,14 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis(),
     val model: String? = null,
     val provider: String? = null,
-    val reasoning: String? = null
+    val reasoning: String? = null,
+    // M7: the ref of the health result an assistant turn used (the stream's UI-only
+    // wellness_used frame, kept on UiMessage.wellnessRef), so the box's history scrub can
+    // mask that bubble before a provider the operator did not allow sees it (spec §3.7).
+    // Only when there is one: a message without it serializes exactly as before. Nothing
+    // else about the health use travels back to the box. (The native chat sends no history
+    // today, ChatViewModel.buildApiHistory; a history it sends carries this.)
+    @SerialName("wellness_ref") @EncodeDefault(EncodeDefault.Mode.NEVER) val wellnessRef: String? = null
 )
 
 @Serializable
@@ -57,7 +67,11 @@ data class SaveRequest(
     val reasoning: String? = null,
     val model: String? = null,
     val tokens: TokenCount? = null,
-    val provenance: Provenance? = null
+    val provenance: Provenance? = null,
+    // M7: the stream_start's `wellness_turn` echoed back, so /chat/save masks exactly this
+    // turn's health results in the ledger copy (spec §3.7, durable carry). Only for a turn
+    // that carried one: every other save serializes exactly as before.
+    @SerialName("wellness_turn") @EncodeDefault(EncodeDefault.Mode.NEVER) val wellnessTurn: String? = null
 )
 
 @Serializable
