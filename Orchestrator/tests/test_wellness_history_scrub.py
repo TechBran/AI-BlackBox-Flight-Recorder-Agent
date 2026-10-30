@@ -49,7 +49,17 @@ def op(isolated_stores, monkeypatch, tmp_path):
     envs = envelopes()
     rec = write_record(providers_allowed=["anthropic"], last_push_at=rec["last_push_at"])
     refs = {k: deliver(st, envs[k], "wt_hist", categories=CATS[k]) for k in CATS}
-    return {"rec": rec, "st": st, "envs": envs, "refs": refs}
+    # The operator's own credentialed chat turn: its key may deliver, so the
+    # scrub judges the history against the stored values (turn.may_deliver).
+    from Orchestrator.wellness import turn as turn_mod
+    turn = turn_mod.WellnessTurn(OPERATOR, turn_mod.SURFACE_ANDROID, True, provider="anthropic",
+                                 turn_key=turn_mod.new_turn_key())
+    turn_mod.remember(turn, True)
+    token = turn_mod.stamp(turn)
+    try:
+        yield {"rec": rec, "st": st, "envs": envs, "refs": refs}
+    finally:
+        turn_mod.clear(token)
 
 
 def _history(ref=None, content=BUBBLE):
@@ -252,8 +262,92 @@ def test_a_computer_use_turn_gets_no_health_numbers(op):
 @pytest.mark.parametrize("provider", ("anthropic", "openai"))
 def test_an_allowed_provider_still_receives_the_history_as_is(op, monkeypatch, tmp_path,
                                                               provider):
+    """On a turn that could deliver (here household mode: one human on the
+    box, so the unsigned stream is the operator's own) an allowed provider
+    gets the history as the client sent it, minus the ref key."""
     from Orchestrator.tests.wellness_support import write_record
+    roster(monkeypatch, OPERATOR, "Flight Recorder")
     write_record(providers_allowed=[provider], last_push_at=op["rec"]["last_push_at"])
     upstream = _stream(_spec(provider), monkeypatch, tmp_path, _history(op["refs"]["night"]))
     blob = json.dumps([u["json"] for u in upstream], ensure_ascii=False)
     assert "47.3" in blob and "wellness_ref" not in blob
+
+
+# ── An unproven turn never reads the store ─────────────────────────────────
+
+def _unproven(monkeypatch):
+    """No turn stamped (a direct call), or a stamped unsigned turn: the scrub
+    cannot know the history is this operator's own."""
+    from Orchestrator.wellness import turn as turn_mod
+    monkeypatch.setattr(turn_mod, "current", lambda: None)
+
+
+def test_an_unproven_turn_loses_every_number_of_a_tagged_bubble_hit_or_miss(op, monkeypatch):
+    """/chat/stream takes the operator, the history and its refs from an
+    unsigned body, and what the provider receives comes back through the
+    model. A masked history that depended on the stored values would tell
+    such a caller which numbers are the operator's. So for an unproven turn
+    the scrub reads nothing: a bubble tagged wellness_ref loses every number,
+    whichever provider, and a hit reads like a miss."""
+    _unproven(monkeypatch)
+    hit = _history(op["refs"]["night"], "Last night it was 47.3; also 12,345 and 118/79.")
+    miss = _history(op["refs"]["night"], "Last night it was 48.3; also 12,346 and 118/80.")
+    for provider in ("anthropic", "custom:lan-box", "openai"):
+        out_hit = mask.scrub_history(hit, OPERATOR, provider)[1]["content"]
+        out_miss = mask.scrub_history(miss, OPERATOR, provider)[1]["content"]
+        assert out_hit == out_miss == "Last night it was [·]; also [·] and [·]."
+    # Untagged: the unit rule, and only for a provider that may not have the
+    # operator's data (openai is not ticked; anthropic is).
+    out = mask.scrub_history(_history(), OPERATOR, "openai")
+    assert out[1]["content"] == mask.mask_text(BUBBLE, frozenset()) and "wellness_ref" not in out[1]
+    assert "47.3" not in out[1]["content"] and "12,345" not in out[1]["content"]
+    assert mask.scrub_history(_history(), OPERATOR, "anthropic")[1]["content"] == BUBBLE
+
+
+def test_an_unproven_turn_never_looks_a_ref_up(op, monkeypatch):
+    """Refs are client-supplied names: a guessed one (or a real one) is not
+    read for an unproven turn, so the store is never opened for a lookup."""
+    from Orchestrator.wellness import store as store_mod
+    _unproven(monkeypatch)
+
+    def never(*a, **k):
+        raise AssertionError("the store was read for an unproven turn")
+    monkeypatch.setattr(store_mod.Store, "get_delivery", never)
+    monkeypatch.setattr(mask, "_recent_history_rows", never)
+    for ref in (op["refs"]["night"], "w-20261029-ffff", "not-a-ref"):
+        out = mask.scrub_history(_history(ref, "It was 47.3 and 12,345."), OPERATOR, "anthropic")
+        assert out[1] == {"role": "assistant", "content": "It was [·] and [·]."}
+
+
+def test_a_proven_turn_still_judges_by_the_stored_values(op):
+    """The operator's own turn (the fixture stamps one that may deliver): the
+    allowed provider gets the numbers it may have, the ref key dropped."""
+    out = mask.scrub_history(_history(op["refs"]["night"], NO_BP), OPERATOR, "anthropic")
+    assert out[1] == {"role": "assistant", "content": NO_BP}
+
+
+def test_an_unproven_turn_keeps_ordinary_numbers_for_an_allowed_provider(op, monkeypatch):
+    """The unit rule on an unproven turn's untagged bubbles applies only when
+    the provider may not have the operator's data (the enrollment record
+    decides, never the store): an allowed provider keeps "250 ms" and "0.7"."""
+    from Orchestrator.tests.wellness_support import write_record
+    _unproven(monkeypatch)
+    plain = "The request took 250 ms and coverage rose to 87%. Set temperature to 0.7."
+    assert mask.scrub_history(_history(None, plain), OPERATOR, "anthropic")[1]["content"] == plain
+    write_record(providers_allowed=[], last_push_at=op["rec"]["last_push_at"])
+    out = mask.scrub_history(_history(None, plain), OPERATOR, "anthropic")[1]["content"]
+    assert out == mask.mask_text(plain, frozenset()) and "250 ms" not in out
+
+
+def test_the_scrubs_failure_path_masks_a_tagged_bubble_entirely(op, monkeypatch):
+    """When the scrub itself fails (the store locked, a broken record), a
+    bubble tagged wellness_ref loses every number and the rest get the unit
+    rule: the failure path can never say more than the unproven path."""
+    from Orchestrator.wellness import enroll
+    monkeypatch.setattr(enroll, "effective_state", lambda rec: (_ for _ in ()).throw(RuntimeError("x")))
+    out = mask.scrub_history(_history(op["refs"]["night"], "47.3 is within range, 12,345 too."),
+                             OPERATOR, "anthropic")
+    assert out[1] == {"role": "assistant", "content": "[·] is within range, [·] too."}
+    out = mask.scrub_history(_history(None, "Your sleeping heart rate was 47.3 and 12,345 steps."),
+                             OPERATOR, "anthropic")
+    assert "47.3" not in out[1]["content"] and "12,345" not in out[1]["content"]

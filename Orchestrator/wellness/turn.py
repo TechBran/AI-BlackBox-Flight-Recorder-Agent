@@ -21,7 +21,9 @@ from __future__ import annotations
 import contextvars
 import dataclasses
 import secrets
-from typing import Optional
+import threading
+import time
+from typing import Dict, Optional, Tuple, Union
 
 # Surfaces a wellness turn can come from. Allowed ones still need a credential
 # (or household mode); the never-list is refused whatever it carries.
@@ -78,6 +80,76 @@ _WELLNESS_TURN: contextvars.ContextVar = contextvars.ContextVar("_WELLNESS_TURN"
 def new_turn_key() -> str:
     """A fresh turn key ("wt_" + 16 hex): the durable mask carry's join key."""
     return "wt_" + secrets.token_hex(8)
+
+
+# ------------------------------------------------------------------ issued keys
+#
+# A turn key is announced to any client (stream_start carries it for every
+# operator who has a health store, signed or not), so the key alone proves
+# nothing. What the box knows at stamp time is whether the turn COULD receive
+# a wellness delivery (a credential, or household mode) and for WHOM. The
+# ledger's fallback and recall rules (mask.carry_for) and the history scrub's
+# store reads (mask.scrub_history) run only for such a key, under that
+# operator: a save or a stream that proves nothing is treated without ever
+# reading the store, so an unsigned caller, or a household member replaying
+# their own key under someone else's name, can never learn from what the box
+# kept, hid, masked or sent whether a text matched another operator's results.
+# Only keys that may deliver are kept, in process, for KEY_MEMORY_MS (a save
+# follows its stream within seconds; a long tool loop within minutes); a
+# restart forgets them, and a key whose rows are on disk still matches them
+# exactly without it (W28).
+KEY_MEMORY_MS = 60 * 60 * 1000
+BY_CREDENTIAL = "credential"      # the operator's own phone signed the turn
+BY_HOUSEHOLD = "household"        # household mode let an unsigned turn through
+_ISSUED: Dict[str, Tuple[int, str, str]] = {}
+_ISSUED_LOCK = threading.Lock()
+
+
+def remember(turn: Union[WellnessTurn, str, None], how: Union[str, bool, None], *,
+             operator: Optional[str] = None, now_ms: Optional[int] = None) -> None:
+    """Remember an issued turn key (a WellnessTurn's, or the key itself with
+    its `operator`) when its turn could receive a delivery: `how` is
+    BY_CREDENTIAL or BY_HOUSEHOLD (True means BY_CREDENTIAL). A key that could
+    not (False, None) is not kept: unknown and unproven keys answer alike."""
+    if isinstance(turn, WellnessTurn):
+        key, op = turn.turn_key, turn.operator
+    else:
+        key, op = turn, operator
+    how = BY_CREDENTIAL if how is True else how
+    if how not in (BY_CREDENTIAL, BY_HOUSEHOLD) or not isinstance(key, str) or not key or not op:
+        return
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    with _ISSUED_LOCK:
+        for old in [k for k, (until, _o, _h) in _ISSUED.items() if until < now]:
+            del _ISSUED[old]
+        _ISSUED[key] = (now + KEY_MEMORY_MS, op, how)
+
+
+def issued(key, operator: Optional[str], *, now_ms: Optional[int] = None) -> Optional[str]:
+    """How `key` was proven for `operator` (BY_CREDENTIAL, BY_HOUSEHOLD), or
+    None for an unknown, expired or non-string key and for another
+    operator's key (nothing is ever proven by a key the box does not remember
+    issuing for such a turn of this operator). A household-proven key is
+    only as good as household mode is NOW: callers re-check it
+    (mask.key_may_deliver), so narrowing or pausing revokes such keys."""
+    if not isinstance(key, str) or not key or not operator:
+        return None
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    with _ISSUED_LOCK:
+        entry = _ISSUED.get(key)
+    return entry[2] if entry and entry[0] >= now and entry[1] == operator else None
+
+
+def may_deliver(key, operator: Optional[str], *, now_ms: Optional[int] = None) -> bool:
+    """Was `key` issued to a turn of `operator` that could receive a delivery?
+    (The memory alone; mask.key_may_deliver adds the household re-check.)"""
+    return issued(key, operator, now_ms=now_ms) is not None
+
+
+def forget_issued() -> None:
+    """Drop the issued-key memory (tests; a box restart does the same)."""
+    with _ISSUED_LOCK:
+        _ISSUED.clear()
 
 
 def stamp(turn: WellnessTurn) -> contextvars.Token:

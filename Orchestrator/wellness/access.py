@@ -372,10 +372,40 @@ def request_turn(*, operator: str, provider: Optional[str], model: Optional[str]
                 else turn_mod.SURFACE_ANDROID
         else:
             surface = turn_mod.SURFACE_ANDROID if origin_device_id else turn_mod.SURFACE_PORTAL
-    return turn_mod.WellnessTurn(operator=operator, surface=surface, credential_ok=credential,
+    turn = turn_mod.WellnessTurn(operator=operator, surface=surface, credential_ok=credential,
                                  surface_id=surface_id, provider=provider, model=model,
                                  turn_key=turn_mod.new_turn_key(),
                                  cron_job_id=str(cron_job_id) if cron_job_id else None)
+    turn_mod.remember(turn, _may_deliver(turn))
+    return turn
+
+
+def _may_deliver(turn: turn_mod.WellnessTurn) -> Optional[str]:
+    """How this turn could receive a wellness delivery (the gate's surface and
+    credential checks, read at stamp time; consent and destination are judged
+    per call): turn.BY_CREDENTIAL, turn.BY_HOUSEHOLD, or None. What the
+    ledger's fallback and recall rules are allowed for."""
+    if turn.surface not in turn_mod.ALLOWED_SURFACES:
+        return None
+    if turn.credential_ok:
+        return turn_mod.BY_CREDENTIAL
+    if turn.surface in turn_mod.CREDENTIAL_ONLY_SURFACES:
+        return None
+    return turn_mod.BY_HOUSEHOLD if household_now(turn.operator) else None
+
+
+def household_now(operator: Optional[str]) -> bool:
+    """Is `operator` live and in household mode right now (the enrollment
+    record and the roster; never the store)?"""
+    try:
+        from Orchestrator.wellness import enroll, gate
+        rec = enroll.get_enrollment(operator) if operator else None
+        if not rec or enroll.effective_state(rec) not in gate.GATE_STATES:
+            return False
+        roster, reserved = gate._roster()
+        return gate.household(rec.get("surfaces_mode"), gate.live_humans(roster, reserved))
+    except Exception:  # noqa: BLE001 - any doubt proves nothing
+        return False
 
 
 _GRANTS: Dict[str, Tuple[float, str, str]] = {}

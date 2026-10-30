@@ -190,11 +190,13 @@ def tz_label(offset_s: int) -> str:
 
 def new_ref(ctx: Ctx) -> str:
     day = ctx.today.replace("-", "")
+    # 8 hex: a ref is a client-supplied name on the next turn (wellness_ref),
+    # so it must not be guessable (65,536 a day would be).
     for _ in range(20):
-        ref = f"w-{day}-{secrets.token_hex(2)}"
+        ref = f"w-{day}-{secrets.token_hex(4)}"
         if not ctx.st.ref_exists(ref):
             return ref
-    return f"w-{day}-{secrets.token_hex(4)}"
+    return f"w-{day}-{secrets.token_hex(8)}"
 
 
 def _round(v, nd=1):

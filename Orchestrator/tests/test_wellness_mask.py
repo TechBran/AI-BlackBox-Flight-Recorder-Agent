@@ -266,11 +266,16 @@ def box(isolated_stores, monkeypatch, tmp_path):
     return lb
 
 
-def _save(cr, **body):
+def _save(cr, proven=True, **body):
+    """A client's /chat/save. A string `wellness_turn` is, unless `proven` is
+    False, a key the box issued to a turn that could deliver (what a client
+    gets from a credentialed stream's stream_start)."""
     payload = {"operator": OPERATOR, "user_message": "how did I sleep? my BP was 118/79",
                "assistant_response": "ok", "model": "model-test",
                "tokens": {"prompt": 1, "completion": 2}}
     payload.update(body)
+    if proven and isinstance(payload.get("wellness_turn"), str):
+        turn_mod.remember(payload["wellness_turn"], True, operator=payload["operator"])
     return asyncio.run(cr.chat_save(_Req(payload)))
 
 
@@ -314,7 +319,8 @@ def test_a_save_with_no_key_masks_against_recent_unmasked_results(box, monkeypat
     now = int(time.time() * 1000)
     deliver(box.st, box.envs["night"], None, ts=now - 25 * 3600 * 1000)   # too old
     deliver(box.st, box.envs["steps"], "wt_other")                        # unmatched, recent
-    res = _save(box.cr, assistant_response="You walked 12,345 steps on that day.")
+    res = _save(box.cr, assistant_response="You walked 12,345 steps on that day.",
+                wellness_turn="wt_mine")                                  # issued, rowless
     _user, assistant = _last_turns()
     assert assistant["text"] == "You walked [·] steps on that day."
     assert "activity" in _gauge(snapshot_text(box.vol, res["snap_id"]))
@@ -329,16 +335,37 @@ def test_a_save_with_no_key_masks_against_recent_unmasked_results(box, monkeypat
 @pytest.mark.parametrize("reply", ["Your sleeping heart rate was 47.3.",
                                    "Your sleeping heart rate was 47 bpm."])
 def test_a_concurrent_turn_whose_save_lands_second_is_still_masked(box, reply):
-    """Two chats at once, neither echoing its key: B's save takes A's rows
-    first (over-masked, the safe way) and stamps them; A's save then quotes
-    them, so the recall rule masks and tags it. (A reply that quotes only a
-    duration is the residual until the clients echo the key: wave 3.)"""
+    """Two credentialed chats at once, both echoing their keys: B's rowless
+    key takes A's rows first through the fallback (over-masked, the safe
+    way) and stamps them; A's own key still finds its rows exactly. And a
+    chat that lost its rows that way but repeats the result in a later turn
+    is caught by the recall rule."""
     deliver(box.st, box.envs["night"], "wt_a")
-    _save(box.cr, assistant_response="Unrelated: the build passed.")     # B, no key, first
-    res = _save(box.cr, assistant_response=reply)                        # A, no key, second
+    _save(box.cr, assistant_response="Unrelated: the build passed.", wellness_turn="wt_b")
+    res = _save(box.cr, assistant_response=reply, wellness_turn="wt_a")
     _user, assistant = _last_turns()
     assert not _hits(assistant["text"]) and "47" not in assistant["text"]
     assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+    res = _save(box.cr, assistant_response=reply, wellness_turn="wt_a_later")
+    _user, assistant = _last_turns()
+    assert not _hits(assistant["text"]) and "47" not in assistant["text"]
+    assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+def test_a_save_that_proves_nothing_is_recorded_as_written(box):
+    """A client that echoes no key (or one the box never issued) proves
+    nothing: no fallback, no recall, the text as written and untagged, and
+    the operator's pending rows untouched. Both shipped clients echo the key;
+    this is the price of never reading the store for an unproven caller."""
+    now = int(time.time() * 1000)
+    deliver(box.st, box.envs["night"], "wt_pending")
+    for key in (None, "wt_never_issued"):
+        res = _save(box.cr, proven=False, assistant_response="Your sleeping heart rate was 47.3.",
+                    **({"wellness_turn": key} if key else {}))
+        _user, assistant = _last_turns()
+        assert assistant["text"] == "Your sleeping heart rate was 47.3."
+        assert not _gauge(snapshot_text(box.vol, res["snap_id"]))
+    assert len(mask._unmatched_rows(box.st, now)) == 1       # still pending, not stamped
 
 
 def test_a_non_wellness_turn_is_byte_identical(box, capsys):
@@ -632,7 +659,7 @@ def test_a_save_after_the_wellness_turn_saved_itself_is_byte_identical(box, monk
     next turn (ten minutes on, with or without a key) is recorded as is."""
     now = int(time.time() * 1000)
     deliver(box.st, box.envs["steps"], "wt_s1")
-    _save(box.cr, assistant_response="You walked 12,345 steps.")            # its own save, no key
+    _save(box.cr, assistant_response="You walked 12,345 steps.", wellness_turn="wt_s1")  # its own
     deliver(box.st, box.envs["night"], "wt_s2")
     _save(box.cr, assistant_response="It was 47.3.", wellness_turn="wt_s2")  # its own, keyed
     monkeypatch.setattr(mask, "_now_ms", lambda: now + 10 * 60 * 1000)
@@ -645,17 +672,32 @@ def test_a_save_after_the_wellness_turn_saved_itself_is_byte_identical(box, monk
         assert not _gauge(snapshot_text(box.vol, res["snap_id"]))
 
 
-@pytest.mark.parametrize("key", ["wt_stale", True, 1, ["wt_x"], {"key": "wt_x"}, ""])
-def test_a_key_that_matches_nothing_still_falls_back(box, key):
-    """W28: an echoed key that names no row (stale, mistyped, not a string)
-    is no reason to skip the safety net: the save is masked against the
-    unmasked deliveries of the last 24 hours."""
+def test_an_issued_key_that_matches_nothing_still_falls_back(box):
+    """W28: an echoed key the box issued to a turn that could deliver, but
+    that names no row (its rows went to another save), is no reason to skip
+    the safety net: the save is masked against the unmasked deliveries of the
+    last 24 hours."""
     deliver(box.st, box.envs["night"], "wt_x")
-    res = _save(box.cr, wellness_turn=key, assistant_response=(
+    res = _save(box.cr, wellness_turn="wt_rowless", assistant_response=(
         "Last night you reached 46 at the lowest; overall it was 52 on a usual night."))
     _user, assistant = _last_turns()
     assert "46" not in assistant["text"] and "52" not in assistant["text"], assistant["text"]
     assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+@pytest.mark.parametrize("key", ["wt_stale", True, 1, ["wt_x"], {"key": "wt_x"}, ""])
+def test_a_key_the_box_never_issued_is_no_safety_net(box, key):
+    """A stale, mistyped or non-string key proves nothing (anyone can send
+    one), so it gets neither the fallback nor the recall: recorded as
+    written, the pending row untouched."""
+    now = int(time.time() * 1000)
+    deliver(box.st, box.envs["night"], "wt_x")
+    text = "Last night you reached 46 at the lowest; overall it was 52 on a usual night."
+    res = _save(box.cr, proven=False, wellness_turn=key, assistant_response=text)
+    _user, assistant = _last_turns()
+    assert assistant["text"] == text
+    assert not _gauge(snapshot_text(box.vol, res["snap_id"]))
+    assert len(mask._unmatched_rows(box.st, now)) == 1
 
 
 @pytest.mark.parametrize("failure", ["corrupt", "io"])
@@ -672,7 +714,8 @@ def test_an_unreadable_health_store_never_loses_the_turn(box, monkeypatch, capsy
         def broken(*a, **k):
             raise sqlite3.OperationalError("disk I/O error")
         monkeypatch.setattr(store.Store, "read", broken)
-    res = _save(box.cr, assistant_response="The meeting moved to Tuesday; you slept 7 hours.")
+    res = _save(box.cr, assistant_response="The meeting moved to Tuesday; you slept 7 hours.",
+                wellness_turn="wt_broken")
     assert res["success"] is True and res["minted"] is True
     _user, assistant = _last_turns()
     assert assistant["text"] == "The meeting moved to Tuesday; you slept [·] hours."
@@ -732,6 +775,7 @@ def test_a_spanish_wellness_reply_mints_no_value(box):
 # ------------------------------------------------------------------ the worker path
 
 def _worker(box, monkeypatch, reply, *, deliver_envs=(), stamp_key=None, extra=None,
+            credentialed=False,
             task_id=None):
     import Orchestrator.routes.chat_routes as cr
     import Orchestrator.tasks as tasks
@@ -753,10 +797,16 @@ def _worker(box, monkeypatch, reply, *, deliver_envs=(), stamp_key=None, extra=N
     monkeypatch.setattr(cr, "call_anthropic", fake_call)
     data = {"messages": [{"role": "user", "content": "and then?"}], "operator": OPERATOR,
             "provider": "anthropic", "model": "m", **(extra or {})}
+    if credentialed:      # what POST /chat attaches for a request the phone signed
+        from Orchestrator.wellness import access
+        data[access.GRANT_KEY] = access.issue_grant(access._Granted(OPERATOR, "en_0000abcd"),
+                                                    OPERATOR)
     task = Task(task_id=task_id or f"wellness-worker-{time.time_ns()}", task_type=TaskType.CHAT,
                 status=TaskStatus.PENDING, created_at=now_utc_iso(), updated_at=now_utc_iso(),
                 operator=OPERATOR, result_data=data)
     task_db.save_task(task)
+    if stamp_key:
+        turn_mod.remember(stamp_key, True, operator=OPERATOR)   # issued to a credentialed turn
     token = turn_mod.stamp(turn_mod.WellnessTurn(
         OPERATOR, turn_mod.SURFACE_CRON, True, provider="anthropic",
         turn_key=stamp_key)) if stamp_key else None
@@ -787,7 +837,7 @@ def test_a_recalled_result_masks_the_ledger_copy_only(box, monkeypatch):
     """A reply quoting an earlier result (the history carried it): the user
     gets it as written; the snapshot records it masked and tagged."""
     _answered_earlier_today(box)
-    final = _worker(box, monkeypatch, "As I said this morning, it was 47.3.")
+    final = _worker(box, monkeypatch, "As I said this morning, it was 47.3.", credentialed=True)
     assert final.result_data["ui_reply"] == "As I said this morning, it was 47.3."
     body = Path("Volumes/SNAPSHOT_VOLUME.txt").read_text(encoding="utf-8")
     last = body[body.rindex("=== START SNAPSHOT"):]
@@ -939,3 +989,154 @@ def test_the_grounding_check_sees_the_awakenings_the_mask_masks():
         assert "[·]" in mask.mask_text(text, frozenset()), text
         assert len(evals.grounding(text).offending) == 1, text
     assert evals.grounding("I called the office 14 times.").ok
+
+
+# ------------------------------------------------------------------ nothing for an unproven caller
+
+def test_an_unproven_save_cannot_probe_another_operators_values(box):
+    """The oracle the speech guard's review found, on the ledger's recall
+    path: POST /chat/save and POST /chat take any operator from an unsigned
+    body, and what the ledger then kept or hid (an unsigned /fossil/snapshot
+    read, the snapshot's size, a returned modified_response) tells a caller
+    whether their text matched that operator's stored values. So no rule
+    reads the store for a save that proves nothing: hit or miss, keyed by a
+    key from an uncredentialed stream or keyless, the outcome is the same
+    and carries no mask."""
+    from Orchestrator.wellness import access, redact
+    deliver(box.st, box.envs["night"], "wt_o1")
+    deliver(box.st, box.envs["steps"], "wt_o2")
+    _save(box.cr, assistant_response="done", wellness_turn="wt_o1")
+    _save(box.cr, assistant_response="done", wellness_turn="wt_o2")
+    unsigned_key = access.request_turn(operator=OPERATOR, provider="anthropic", model=None).turn_key
+    assert unsigned_key and not turn_mod.may_deliver(unsigned_key, OPERATOR)
+    outcomes = {}
+    for guess in ("47.3", "48.3", "12,345", "12,346", "118/79", "118/80"):   # a hit, then a miss
+        for key in (None, unsigned_key):
+            text = f"Ref {guess} filed.\n[ARTIFACT:note.txt:text]The number was {guess}.[/ARTIFACT]"
+            res = _save(box.cr, proven=False, assistant_response=text,
+                        **({"wellness_turn": key} if key else {}))
+            raw = snapshot_text(box.vol, res["snap_id"])
+            seen = redact.for_reader(raw, snapshot_operator=OPERATOR)     # an unsigned read
+            outcomes[(guess, bool(key))] = (
+                redact.PLACEHOLDER in seen, _gauge(raw) != "", text.split("\n")[0] in seen,
+                res.get("modified_response") is None or guess in res["modified_response"],
+                len(raw) - 2 * len(guess))                                # the text sits in it twice
+    for hit, miss in (("47.3", "48.3"), ("12,345", "12,346"), ("118/79", "118/80")):
+        for keyed in (False, True):
+            assert outcomes[(hit, keyed)] == outcomes[(miss, keyed)], (hit, miss, keyed, outcomes)
+            assert outcomes[(hit, keyed)][:4] == (False, False, True, True)
+    # The same text from a turn that could deliver IS masked (the legit recall).
+    res = _save(box.cr, assistant_response="Ref 47.3 filed.", wellness_turn="wt_proven_later")
+    raw = snapshot_text(box.vol, res["snap_id"])
+    assert _gauge(raw) and "47.3" not in raw
+
+
+def test_which_turns_could_deliver(box, monkeypatch):
+    """turn.may_deliver: a credentialed turn, a household-mode turn on an
+    allowed surface, for THEIR operator; never an unsigned turn outside
+    household mode, a never-surface, a credential-only surface without its
+    credential, an unknown or expired key, or another operator's key."""
+    from Orchestrator.wellness import access
+    signed = access._Granted(OPERATOR, "en_0000abcd")
+    key = access.request_turn(operator=OPERATOR, provider="anthropic", model=None,
+                              signed=signed).turn_key
+    assert turn_mod.may_deliver(key, OPERATOR)
+    assert not turn_mod.may_deliver(key, "other-human")          # bound to its operator
+    assert not turn_mod.may_deliver(access.request_turn(
+        operator=OPERATOR, provider="anthropic", model=None).turn_key, OPERATOR)
+    assert not turn_mod.may_deliver(access.request_turn(
+        operator=OPERATOR, provider="anthropic", model=None, declared="cron").turn_key, OPERATOR)
+    assert not turn_mod.may_deliver(access.request_turn(
+        operator=OPERATOR, provider="anthropic", model=None, declared="sms").turn_key, OPERATOR)
+    assert not turn_mod.may_deliver("wt_unknown", OPERATOR) and not turn_mod.may_deliver(None, OPERATOR)
+    turn_mod.remember("wt_old", True, operator=OPERATOR, now_ms=0)
+    assert not turn_mod.may_deliver("wt_old", OPERATOR)          # expired
+    turn_mod.remember("wt_unproven", False, operator=OPERATOR)
+    turn_mod.remember("wt_unproven2", None, operator=OPERATOR)
+    assert "wt_unproven" not in turn_mod._ISSUED and "wt_unproven2" not in turn_mod._ISSUED
+    roster(monkeypatch, OPERATOR, "Flight Recorder")             # one human: household by default
+    assert turn_mod.may_deliver(access.request_turn(
+        operator=OPERATOR, provider="anthropic", model=None).turn_key, OPERATOR)
+    assert not turn_mod.may_deliver(access.request_turn(
+        operator=OPERATOR, provider="anthropic", model=None,
+        surface=turn_mod.SURFACE_VOICE).turn_key, OPERATOR)
+
+
+def test_another_operators_own_key_proves_nothing_here(box, monkeypatch):
+    """A household member's own credentialed key, replayed in a save under
+    another operator: the same outcome for a hit and a miss, nothing stamped.
+    The memory binds each key to the operator it was issued for."""
+    from Orchestrator.wellness import access, redact
+    now = int(time.time() * 1000)
+    deliver(box.st, box.envs["night"], "wt_v1")
+    _save(box.cr, assistant_response="done", wellness_turn="wt_v1")
+    deliver(box.st, box.envs["steps"], "wt_v_pending")              # the victim's live turn
+    theirs = access.request_turn(operator="other-human", provider="anthropic", model=None,
+                                 signed=access._Granted("other-human", "en_000other")).turn_key
+    assert turn_mod.may_deliver(theirs, "other-human")
+    outcomes = {}
+    for guess in ("47.3", "48.3"):
+        text = f"Ref {guess} filed.\n[ARTIFACT:note.txt:text]The number was {guess}.[/ARTIFACT]"
+        res = _save(box.cr, proven=False, assistant_response=text, wellness_turn=theirs)
+        raw = snapshot_text(box.vol, res["snap_id"])
+        outcomes[guess] = (redact.PLACEHOLDER in redact.for_reader(raw, snapshot_operator=OPERATOR),
+                           _gauge(raw) != "", guess in raw,
+                           res.get("modified_response") is None or guess in res["modified_response"],
+                           len(raw) - 2 * len(guess))
+    assert outcomes["47.3"] == outcomes["48.3"] == (False, False, True, True, outcomes["47.3"][4])
+    assert len(mask._unmatched_rows(box.st, now)) == 1              # the victim's row untouched
+
+
+@pytest.mark.parametrize("failure", ["corrupt", "io"])
+def test_an_unreadable_store_and_an_unproven_save(box, monkeypatch, failure):
+    """The unreadable-store precaution (the turn recorded masked by the unit
+    rule and tagged) applies to any KEYED save, remembered or not: a restart
+    forgets keys, and a credentialed turn's values must not reach the ledger
+    because the store was locked at that moment (W27). A keyless save opens
+    no store at all, so it is recorded as written: the store's health is not
+    a keyless caller's to learn."""
+    if failure == "corrupt":
+        box.st.path.write_bytes(b"not a database")
+    else:
+        def broken(*a, **k):
+            raise OSError(5, "input/output error")
+        monkeypatch.setattr(store.Store, "read", broken)
+    text = "The meeting moved to Tuesday; you slept 7 hours."
+    res = _save(box.cr, proven=False, assistant_response=text)
+    _user, assistant = _last_turns()
+    assert assistant["text"] == text and not _gauge(snapshot_text(box.vol, res["snap_id"]))
+    res = _save(box.cr, proven=False, assistant_response=text, wellness_turn="wt_forgotten")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "The meeting moved to Tuesday; you slept [·] hours."
+    assert _gauge(snapshot_text(box.vol, res["snap_id"])).startswith(
+        "WELLNESS: activity,blood_pressure,heart,sleep · health data · ")
+
+
+def test_a_household_key_is_only_as_good_as_household_mode_now(box, monkeypatch):
+    """A key household mode handed to an unsigned turn stops proving anything
+    the moment the owner narrows to credentialed, pauses or disconnects (the
+    memory records HOW a key was proven; a household key is re-checked when
+    used). A credentialed key stands for its hour."""
+    from Orchestrator.tests.wellness_support import write_record
+    from Orchestrator.wellness import access
+    now = int(time.time() * 1000)
+    roster(monkeypatch, OPERATOR, "Flight Recorder")                       # one human: household
+    household_key = access.request_turn(operator=OPERATOR, provider="anthropic", model=None).turn_key
+    signed_key = access.request_turn(operator=OPERATOR, provider="anthropic", model=None,
+                                     signed=access._Granted(OPERATOR, "en_0000abcd")).turn_key
+    assert mask.key_may_deliver(household_key, OPERATOR) and mask.key_may_deliver(signed_key, OPERATOR)
+    write_record(surfaces_mode="credentialed")                             # the owner narrows
+    assert not mask.key_may_deliver(household_key, OPERATOR)
+    assert mask.key_may_deliver(signed_key, OPERATOR)
+    deliver(box.st, box.envs["night"], "wt_after_narrowing")               # the owner's live turn
+    for guess in ("47.3", "48.3"):
+        res = _save(box.cr, proven=False, assistant_response=f"Ref {guess} filed.",
+                    wellness_turn=household_key)
+        _user, assistant = _last_turns()
+        assert assistant["text"] == f"Ref {guess} filed." and not _gauge(snapshot_text(box.vol, res["snap_id"]))
+    assert len(mask._unmatched_rows(box.st, now)) == 1                     # not stamped
+    write_record(surfaces_mode="household", state="paused")                # paused answers (gate state)
+    assert mask.key_may_deliver(household_key, OPERATOR)
+    write_record(surfaces_mode="household", state="revoked")               # disconnected: not live
+    assert not mask.key_may_deliver(household_key, OPERATOR)
+

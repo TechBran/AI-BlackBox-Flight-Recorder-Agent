@@ -17,7 +17,7 @@ DAY = FX.day_of
 NOW = FX.now_ms()
 DELIVERY = api.Delivery(turn_key="wt_test0001", surface="android", provider="anthropic",
                         model="test-model")
-REF_RE = re.compile(r"w-\d{8}-[0-9a-f]{4}")
+REF_RE = re.compile(r"w-\d{8}-[0-9a-f]{8}")
 
 
 @pytest.fixture

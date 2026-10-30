@@ -23,15 +23,22 @@ say them; the policy discloses it). Over-masking is the safe direction.
 
 The durable carry (W28): the rows live in the operator's store, so a save that
 arrives after a restart still finds them. A client that echoes the turn key
-(stream_start's `wellness_turn`) is matched exactly; one that does not (or
-whose key matches nothing) is masked against every delivery of the last 24
-hours not yet masked, and those rows are stamped. A turn whose rows another
-save stamped first (two chats at once, neither echoing its key) is caught by
-the recall rule: a reply that quotes one of the operator's results of the last
-72 hours in a distinctive form (a decimal, grouped thousands, a pair, a number
-with a heart, blood-pressure or step unit) is masked and tagged. The recall
-rule is a heuristic, so it only ever changes the ledger's copy: user-facing
-text (an SMS or cron reply, result_data) stays as the model wrote it.
+(stream_start's `wellness_turn`) is matched exactly. A key the box issued to a
+turn that could receive a delivery (a credential, or household mode:
+turn.may_deliver) but that matches no row is masked against every delivery of
+the last 24 hours not yet masked, and those rows are stamped; a reply of such
+a turn that quotes one of the operator's results of the last 72 hours in a
+distinctive form (a decimal, grouped thousands, a pair, a number with a
+heart, blood-pressure or step unit) is caught by the recall rule: masked and
+tagged. Both rules need that issued key: a save with no key, a key the box
+does not remember, or a key from an uncredentialed turn proves nothing and is
+recorded as written, because POST /chat/save and POST /chat take any operator
+from an unsigned body, so a rule that read the operator's stored values for an
+unproven caller would hand them the values one guess at a time (the oracle
+the speech guard's review found; what the ledger kept or hid, the size of the
+snapshot and a returned modified_response all tell). The recall rule is a
+heuristic, so it only ever changes the ledger's copy: user-facing text (an SMS
+or cron reply, result_data) stays as the model wrote it.
 
 scrub_history() is the provider-switch rule (A3b): earlier assistant bubbles a
 client sends back never carry health numbers to a provider the operator did
@@ -678,17 +685,32 @@ def quotes_results(text: str, values: frozenset, *, exact: Optional[frozenset] =
                for i, (kind, w) in enumerate(toks))
 
 
+def key_may_deliver(key, operator: Optional[str], *, now_ms: Optional[int] = None) -> bool:
+    """Was `key` issued to a turn of `operator` that could receive a delivery,
+    and does that still hold? A credential-proven key stands for its hour; a
+    household-proven key only while the operator is live and in household
+    mode NOW (access.household_now), so narrowing, pausing or disconnecting
+    revokes the keys household mode handed out."""
+    from Orchestrator.wellness import access, turn as turn_mod
+    how = turn_mod.issued(key, operator, now_ms=now_ms)
+    if how == turn_mod.BY_CREDENTIAL:
+        return True
+    if how == turn_mod.BY_HOUSEHOLD:
+        return access.household_now(operator)
+    return False
+
+
 def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
               extra_categories: Sequence[str] = (), recall_text: Optional[str] = None,
-              recall_window_ms: int = HISTORY_WINDOW_MS,
+              recall_window_ms: int = HISTORY_WINDOW_MS, recall_values: bool = False,
               now_ms: Optional[int] = None) -> Optional[Carry]:
     """The turn's carry, or None for a turn no wellness result reached.
 
     `turn_key` (a string; anything else is no key) matches the turn's own
-    rows; with `fallback`, a key that matches nothing (none echoed, a stale
-    one) takes every unmasked delivery of the last 24 hours instead (the
-    spec's rule for clients that do not echo the key). `extra_categories`
-    marks a turn as wellness even with no rows (an on-device wellness call).
+    rows; with `fallback`, an issued key that could deliver (turn.may_deliver)
+    but matches nothing takes every unmasked delivery of the last 24 hours
+    instead. `extra_categories` marks a turn as wellness even with no rows (an
+    on-device wellness call).
 
     `recall_text` (the assistant text) closes the recall gap: a later turn of
     the same chat sends the earlier, unmasked bubbles back to the model as
@@ -696,7 +718,14 @@ def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
     rows, so a reply can repeat a result with no row of its own. When it
     quotes one of the operator's results of the last 72 hours
     (`recall_window_ms`; quotes_results), the turn's ledger copy is masked
-    and tagged against all of them: a heuristic carry (exact False).
+    and tagged against all of them: a heuristic carry (exact False). The
+    question is asked only for a turn that could have had the result: an
+    issued key that could deliver (turn.may_deliver), or `recall_values`, a
+    caller who proved the operator another way (the speech rule, for a
+    request the operator's own phone signed). An unproven turn gets neither
+    the fallback nor the recall: its text cannot carry the operator's results
+    (the gate gave it none and its history holds none), and reading the store
+    for it would be the oracle described above.
 
     A health store that cannot be read is no reason to lose the turn: it is
     recorded, its ledger copy masked by the unit rule and tagged."""
@@ -709,16 +738,19 @@ def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
     rows: List[dict] = []
     values = frozenset()
     exact = True
+    proven = recall_values or key_may_deliver(key, operator, now_ms=now_ms)
+    if not proven and not key and not extra_categories:
+        return None         # nothing to look up: the store is not even opened
     try:
         st = enroll.store_for(rec, create=False) if rec else None
         if st is not None:
             if key:
                 rows = st.deliveries_for_turn(key)
-            if not rows and fallback:
+            if not rows and fallback and proven:
                 rows = _unmatched_rows(st, now_ms)
             if rows:
                 values = value_set(r.get("payload") for r in rows)
-            elif recall_text:
+            elif recall_text and proven:
                 recent = _recent_history_rows(st, now_ms, recall_window_ms)
                 recent_values = value_set(r.get("payload") for r in recent)
                 exact_values = value_set((r.get("payload") for r in recent), rounded=False)
@@ -730,6 +762,9 @@ def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
         # Count-only: never a value, never the store's path.
         print(f"[WELLNESS] health store unreadable ({type(e).__name__}); "
               "recording the turn masked by the unit rule")
+        # A keyed save keeps the precaution whether or not the key is still
+        # remembered (a restart forgets keys; W27 wins over telling a keyed
+        # caller that the store is unreadable, a state, not a value).
         return Carry(operator, (), frozenset(), tuple(catalog.CATEGORIES),
                      (rec or {}).get("op_key"), exact=False, note="health data")
     if not rows and not extra_categories:
@@ -907,7 +942,7 @@ def speech_recalls(operator: Optional[str], text, *, now_ms: Optional[int] = Non
         return False
     try:
         return carry_for(operator, recall_text=text, recall_window_ms=SPEECH_WINDOW_MS,
-                         now_ms=now_ms) is not None
+                         recall_values=True, now_ms=now_ms) is not None
     except Exception:  # noqa: BLE001 - a guard that cannot decide refuses
         return True
 
@@ -927,8 +962,26 @@ def speech_refused(text, *, proven_operator: Optional[str] = None,
 
 # ------------------------------------------------------------------ history scrub (A3b)
 
-def _message_text_masked(message: dict, values: frozenset, unit_rule: bool = True) -> dict:
-    fn = mask_text if unit_rule else mask_values
+def mask_every_number(text: str) -> str:
+    """`text` with every number hidden (digits, grouped, decimals, clocks,
+    number words), the unit rule included: what an unproven turn's tagged
+    bubble becomes, with no value set to judge it by."""
+    if not text:
+        return text
+    out, last = [], 0
+    for m in _TOKEN_RE.finditer(text):
+        tok = m.group(0)
+        if (m.lastgroup == "num" and tok != MASK) or \
+                (m.lastgroup == "word" and _is_number_word(tok)):
+            out.append(text[last:m.start()]); out.append(MASK); last = m.end()
+    out.append(text[last:])
+    return mask_text("".join(out), frozenset())
+
+
+def _message_text_masked(message: dict, values: frozenset, unit_rule: bool = True,
+                         every_number: bool = False) -> dict:
+    fn = (lambda t, _v: mask_every_number(t)) if every_number else \
+        (mask_text if unit_rule else mask_values)
     content = message.get("content")
     if isinstance(content, str):
         return {**message, "content": fn(content, values)}
@@ -950,7 +1003,8 @@ def _without_ref(message):
 
 
 def scrub_history(messages: list, operator: Optional[str], provider: Optional[str],
-                  model: Optional[str] = None, *, now_ms: Optional[int] = None) -> list:
+                  model: Optional[str] = None, *, now_ms: Optional[int] = None,
+                  proven: Optional[bool] = None) -> list:
     """`messages` as `provider` may receive them (A3b).
 
     `provider` is the one the turn is dispatched to (routes/chat/stream.py
@@ -972,6 +1026,15 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
         provider is not allowed for one of the operator's consented
         categories.
 
+    The stored values are read only for a turn that could have had them
+    (`proven`: by default, the stamped turn is this operator's and its key
+    may deliver, turn.may_deliver). /chat/stream takes the operator, the
+    history and its refs from an unsigned body, and what the provider receives
+    comes back through the model, so for an unproven turn the scrub never
+    reads the store: a message tagged `wellness_ref` loses every number, an
+    untagged one is masked by the unit rule, and the refs it names are not
+    looked up (the gate gives such a turn no health data anyway).
+
     User messages stay verbatim. The `wellness_ref` key never reaches the
     provider. A list with nothing to change is returned as the SAME object."""
     if not isinstance(messages, list):
@@ -979,6 +1042,7 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
     has_refs = any(isinstance(m, dict) and "wellness_ref" in m for m in messages)
     try:
         from Orchestrator.wellness import destinations, enroll, gate, store as store_mod
+        from Orchestrator.wellness import turn as turn_mod
         rec = enroll.get_enrollment(operator) if operator else None
         live = bool(rec) and enroll.effective_state(rec) in gate.GATE_STATES
         st = enroll.store_for(rec, create=False) if rec else None
@@ -996,6 +1060,26 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
         consented = [c for c in catalog.CATEGORIES
                      if ((rec or {}).get("categories") or {}).get(c) in catalog.CONSENTED]
         blanket = holds and not allowed(consented or catalog.CATEGORIES)
+        if proven is None:
+            t = turn_mod.current()
+            proven = bool(t is not None and t.operator == operator
+                          and key_may_deliver(t.turn_key, operator, now_ms=now_ms))
+        if not proven:
+            # Nothing of the store: a tagged bubble loses every number, an
+            # untagged one gets the unit rule when the provider may not have
+            # the operator's data (the enrollment record decides that).
+            out, changed = [], has_refs
+            for m in messages:
+                if not isinstance(m, dict) or m.get("role") != "assistant":
+                    out.append(_without_ref(m))
+                    continue
+                new = _message_text_masked(m, frozenset(), every_number=True) \
+                    if m.get("wellness_ref") else \
+                    (_message_text_masked(m, frozenset()) if blanket else m)
+                new = _without_ref(new)
+                changed = changed or new != m
+                out.append(new)
+            return out if changed else messages
         withheld = frozenset()
         if st is not None:
             try:
@@ -1034,7 +1118,8 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
         return out if changed else messages
     except Exception as e:  # noqa: BLE001 - a failed scrub must not send the numbers
         print(f"[WELLNESS] history scrub failed ({type(e).__name__}); masking every assistant turn")
-        return [_without_ref(_message_text_masked(m, frozenset()))
+        return [_without_ref(_message_text_masked(m, frozenset(),
+                                                  every_number=bool(m.get("wellness_ref"))))
                 if isinstance(m, dict) and m.get("role") == "assistant" else _without_ref(m)
                 for m in messages]
 
