@@ -67,6 +67,7 @@ that used to live in the v1 manifest. Validated by
 | `example` | string | A one-line usage example, surfaced in the system-prompt instructions. |
 | `notes` | string | Extra guidance, surfaced in the system-prompt instructions. |
 | `timeout_s` | number | How long the dispatcher waits for the executor, in seconds (`0 < timeout_s <= 3600`). Unset: 180 s for a plain `def execute`, no limit for an `async def`. See [Blocking work](#blocking-work-def-vs-async-def). |
+| `x-availability` | object | A gate, `Orchestrator/toolvault/availability.py`. Key-gated: `{"provider": "<id>", "feature": "<web_search\|image\|...>"}`, available when that provider's key is present and enabled. Operator-scoped: `{"feature": "wellness"}` (no provider), decided per turn for the injection's `ToolContext` and the stamped turn, fail-closed (no ctx = never), and applied to the `toolvault` meta-tool's search/read/list too. See [Health-data tools](#health-data-tools-category-wellness). |
 
 Within `parameters.properties`, any property may carry an `"x-source"` marker
 for [dynamic fields](#dynamic-fields-x-source). That marker is validated against
@@ -386,6 +387,20 @@ spans the **entire catalog — all groups and all tiers** (tier-1, tier-2, *and*
 tier-3 internal). So an out-of-group or internal tool can still surface for a
 prompt when it's semantically relevant; `groups` only governs what's injected
 unconditionally. (See `injector._select_names`.)
+
+### Health-data tools (category `wellness`)
+
+The `wellness_*` tools read one operator's own health store. `schema_spec`
+holds every tool of category `wellness` to rules W18-W20 of the M7 design: no
+`operator` parameter anywhere (the operator is `ctx.operator`, from the turn),
+groups only `chat` (and the live-voice groups from M7.5), never `mcp`, `phone`
+or `chat_cu`, and the operator-scoped gate `"x-availability": {"feature":
+"wellness"}`. Whether one is offered, found by the meta-tool or run is decided
+per turn by `Orchestrator/wellness/access.py` (the stamped `WellnessTurn` +
+the gate); the `wellness_metrics` / `wellness_categories` x-sources narrow
+their enums to what that turn may read. Their `notes` carry the WELLNESS RULES,
+which the injector appends once, with the operator's instinct prompt, whenever
+one of them is offered.
 
 ---
 

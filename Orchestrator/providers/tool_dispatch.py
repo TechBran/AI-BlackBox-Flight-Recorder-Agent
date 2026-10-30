@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -643,14 +644,53 @@ async def _labelled(name, args, ctx: ToolContext) -> ToolOutcome:
     return ToolOutcome(result, events)
 
 
+def _is_wellness_tool(name: str) -> bool:
+    """A health-data tool (ToolVault category wellness). If the registry
+    cannot say, a wellness_* name still counts: the log stays quiet."""
+    try:
+        from Orchestrator.wellness.access import is_wellness_tool
+        return is_wellness_tool(name)
+    except Exception:  # noqa: BLE001
+        return isinstance(name, str) and name.startswith("wellness_")
+
+
+def _wellness_used_event(tool_result) -> Optional[Dict]:
+    """The UI-only `wellness_used` frame (ref, categories, as_of, provider) for
+    a health-data tool that answered; never part of a prompt or the ledger."""
+    try:
+        from Orchestrator.wellness.access import signal_event
+        return signal_event(tool_result)
+    except Exception:  # noqa: BLE001 - the frame is decoration
+        return None
+
+
 async def _catch_all(name, args, ctx: ToolContext) -> ToolOutcome:
     """Any other tool (ToolVault tools, the per-provider web search tools, CLI
-    agents) through BlackBoxToolExecutor, never an "Unknown tool" reply."""
+    agents) through BlackBoxToolExecutor, never an "Unknown tool" reply.
+
+    A health-data tool (category wellness) is logged by name and time only,
+    its client label carries no value, and a stream gets the UI-only
+    `wellness_used` frame when it answered. Whether it runs at all is the
+    executor's and the gate's call (BlackBoxToolExecutor refuses a turn that
+    is not offered it, with the gate's code)."""
     profile = ctx.profile
+    wellness = _is_wellness_tool(name)
+    started = time.monotonic()
     tool_result = await _run_executor(ctx, name, args)
     result = tool_result.result if hasattr(tool_result, 'result') else str(tool_result)
     if profile.empty_note and not result:
         result = f"Tool '{name}' executed successfully (no output)."
+    if wellness:
+        print(f"\033[33m[TOOLVAULT-EXEC] {profile.tag} {name} (catch-all): "
+              f"{(time.monotonic() - started) * 1000:.0f} ms\033[0m")
+        if not profile.stream:
+            return ToolOutcome(result)
+        ok = bool(getattr(tool_result, "success", False))
+        label = {"type": "tool_result",
+                 "data": f"{name}: {'health data read' if ok else 'health data not available'}"}
+        frame = _wellness_used_event(tool_result)
+        extra = [frame] if frame else []
+        return ToolOutcome(result, [label] + extra if profile.label_first else extra + [label])
     print(f"\033[33m[TOOLVAULT-EXEC] {profile.tag} {name} (catch-all): {_as_text(result)[:120]}\033[0m")
     kind = _media_kind(name)
     data = getattr(tool_result, "data", None)

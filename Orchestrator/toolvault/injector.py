@@ -179,6 +179,7 @@ def _select_names(
     max_semantic_tools: int,
     similarity_threshold: float,
     catalog: Optional[List[Dict]] = None,
+    ctx: Optional[ToolContext] = None,
 ) -> List[Tuple[str, str]]:
     """Select tool names for a prompt, with a reason for each.
 
@@ -196,6 +197,10 @@ def _select_names(
     ``catalog`` is the caller's ``registry.load_canonical()`` snapshot, so
     one injection reads the registry once; omitted, it is loaded here.
 
+    ``ctx`` is the injection's ToolContext: the operator-scoped availability
+    features (the wellness tools) decide on it, and without one they are
+    never selected (fail-closed).
+
     Returns an ordered list of ``(name, reason)`` with no duplicates.
     """
     selected: List[Tuple[str, str]] = [("toolvault", "meta")]
@@ -208,7 +213,7 @@ def _select_names(
     #     provider key is absent or the provider isn't enabled; no-op for the
     #     ungated catalog of today).
     in_group = [e for e in catalog if group in (e.get("groups") or [])]
-    for entry in availability.filter_available(in_group):
+    for entry in availability.filter_available(in_group, ctx):
         if entry.get("tier") == TIER_1:
             name = entry.get("name")
             if name and name not in seen:
@@ -220,7 +225,7 @@ def _select_names(
         # ALL tools (all groups, all tiers), excluding what's already selected.
         searchable = {
             e.get("name"): e.get("description", "")
-            for e in availability.filter_available(catalog)
+            for e in availability.filter_available(catalog, ctx)
             if e.get("name") and e.get("name") not in seen
         }
         if searchable:
@@ -325,12 +330,12 @@ def get_tools_for_prompt(
     Returns the provider-formatted tools array only (no instructions). Selection
     matches :func:`inject_for_prompt`; this is kept for testing/preview parity.
     """
-    ctx = ctx or ToolContext()
     provider_format = PROVIDER_FORMATS.get(provider, "openai_rest")
     if group is None:
         group = PROVIDER_DEFAULT_GROUP.get(provider, "chat")
 
-    names = _select_names(prompt, group, max_semantic_tools, similarity_threshold)
+    names = _select_names(prompt, group, max_semantic_tools, similarity_threshold, ctx=ctx)
+    ctx = ctx or ToolContext()
 
     canonical_list = []
     for name, _reason in names:
@@ -373,9 +378,12 @@ def build_tool_instructions(
     return _render_instructions(tool_names, resolved_by_name)
 
 
-def _render_instructions(tool_names: List[str], resolved_by_name: Dict[str, Dict]) -> str:
+def _render_instructions(tool_names: List[str], resolved_by_name: Dict[str, Dict],
+                         rules_follow: bool = False) -> str:
     """The AVAILABLE TOOLS text for ``tool_names`` from already-resolved schemas
-    (names without one, such as the meta-tool, are skipped)."""
+    (names without one, such as the meta-tool, are skipped). ``rules_follow``:
+    the WELLNESS RULES block is appended once after this text, so the wellness
+    tools' notes, which carry the same rules, are not repeated per tool."""
     sections = []
 
     for name in tool_names:
@@ -386,6 +394,9 @@ def _render_instructions(tool_names: List[str], resolved_by_name: Dict[str, Dict
         desc = resolved.get("description", "")
         example = resolved.get("example", "")
         notes = resolved.get("notes", "")
+        if rules_follow and notes and resolved.get("category") == _WELLNESS_CATEGORY \
+                and notes.strip() == _wellness_rules():
+            notes = ""
 
         lines = [f"  Tool: {name}"]
         if desc:
@@ -422,6 +433,39 @@ def _render_instructions(tool_names: List[str], resolved_by_name: Dict[str, Dict
     if image_hint:
         result += "\n" + image_hint + "\n"
     return result
+
+
+_WELLNESS_CATEGORY = "wellness"
+
+
+def _wellness_rules() -> str:
+    """The WELLNESS RULES text (catalog.WELLNESS_RULES) the wellness tools'
+    notes carry, or "" where the wellness package cannot be imported."""
+    try:
+        from Orchestrator.wellness.catalog import WELLNESS_RULES
+        return WELLNESS_RULES
+    except Exception:
+        return ""
+
+
+def _wellness_instructions(selected_names: List[str], resolved_by_name: Dict[str, Dict],
+                           ctx: Optional[ToolContext]) -> Optional[str]:
+    """What this turn's tool instructions gain for health data
+    (Orchestrator/wellness/access.instructions): the WELLNESS RULES and the
+    operator's instinct prompt when a wellness tool was selected, the
+    "not shared with this AI" line when only the provider stands in the way,
+    "" otherwise. None when it cannot be built: the caller then drops the
+    wellness tools, which never go out without their rules."""
+    if ctx is None:
+        return ""
+    try:
+        from Orchestrator.wellness import access
+        return access.instructions(
+            [resolved_by_name[n] for n in selected_names if n in resolved_by_name], ctx)
+    except Exception as e:
+        print(f"[TOOLVAULT-INJECT] wellness instructions failed ({type(e).__name__}); "
+              f"wellness tools withheld", file=sys.stderr)
+        return None
 
 
 def _summarize_parameters(parameters: Optional[Dict]) -> List[str]:
@@ -481,6 +525,7 @@ def inject_for_prompt(
     Returns:
         Tuple of ``(formatted_tools_array, tool_instructions_text)``.
     """
+    scoped_ctx = ctx
     ctx = ctx or ToolContext()
     provider_format = PROVIDER_FORMATS.get(provider, "openai_rest")
     if group is None:
@@ -488,12 +533,22 @@ def inject_for_prompt(
 
     # One registry snapshot and one resolve per selected schema feed both
     # outputs. (A turn's second injection of the same prompt also reuses the
-    # query vector: embeddings.embed_query.)
+    # query vector: embeddings.embed_query.) Only a caller's own ctx can make
+    # an operator-scoped tool available (the default ctx is "system").
     catalog = registry.load_canonical()
     names = _select_names(prompt, group, max_semantic_tools, similarity_threshold,
-                          catalog=catalog)
+                          catalog=catalog, ctx=scoped_ctx)
     selected_names = [n for n, _ in names]
     resolved_by_name = _resolve_selected(selected_names, catalog, ctx)
+
+    # Health data: the rules (and the operator's instinct prompt) ride with
+    # the wellness tools, or the tools do not go out at all.
+    wellness_text = _wellness_instructions(selected_names, resolved_by_name, scoped_ctx)
+    if wellness_text is None:
+        names = [(n, r) for n, r in names
+                 if (resolved_by_name.get(n) or {}).get("category") != _WELLNESS_CATEGORY]
+        selected_names = [n for n, _ in names]
+        wellness_text = ""
 
     # Build resolved canonical schemas for the API payload.
     canonical_list = []
@@ -506,7 +561,11 @@ def inject_for_prompt(
     formatted_tools = _format_tools(canonical_list, provider_format)
 
     # Human-readable instructions for the system prompt.
-    tool_instructions = _render_instructions(selected_names, resolved_by_name)
+    tool_instructions = _render_instructions(selected_names, resolved_by_name,
+                                             rules_follow=bool(wellness_text))
+    if wellness_text:
+        tool_instructions = (tool_instructions + "\n" if tool_instructions else "") \
+            + wellness_text + "\n"
 
     # Injection summary.
     Y = "\033[33m"

@@ -13,6 +13,7 @@ This file provides:
 import asyncio
 import base64
 import json
+import time
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 from Orchestrator import tool_outcomes
@@ -255,6 +256,13 @@ class BlackBoxToolExecutor:
         to the turn's tool-outcome log when one is open (tool_outcomes), so the
         owner of a whole turn — the /chat worker, and through it the scheduler —
         can tell a turn whose tools failed from one that worked.
+
+        A health-data tool (category ``wellness``) runs only for a turn that is
+        offered it (Orchestrator/wellness/access.refusal_for: the stamped turn,
+        its operator, surface and provider, through the gate), whichever loop or
+        surface hands it over: a model that found one by searching, a voice
+        session, /local/tools/execute. Its log lines carry the tool name and
+        the time it took, never its arguments or its result.
         """
         # The arguments as the model sent them, copied before an executor can
         # pop or add keys: the log keys each call by them (a retry of the same
@@ -290,13 +298,16 @@ class BlackBoxToolExecutor:
             )
 
         timeout_s = _timeout_for(spec, ex)
+        ctx = ToolContext(operator=self.operator, base_url=self.base_url,
+                          origin_device_id=self.origin_device_id, caller=self.caller)
+        wellness = (spec or {}).get("category") == _WELLNESS_CATEGORY
+        if wellness:
+            refused = _wellness_refusal(tool_name, ctx)
+            if refused is not None:
+                return refused
+        started = time.monotonic()
         try:
-            call = ex(
-                tool_input,
-                ToolContext(operator=self.operator, base_url=self.base_url,
-                            origin_device_id=self.origin_device_id,
-                            caller=self.caller),
-            )
+            call = ex(tool_input, ctx)
             if timeout_s is None:
                 return await call
             finished, result = await _run_with_timeout(call, timeout_s)
@@ -311,12 +322,35 @@ class BlackBoxToolExecutor:
                         f"the background: check its effect before running it again.")
             )
         except Exception as e:
+            if wellness:
+                # Name, time and the exception's class only: a health tool's
+                # message or traceback could carry a value.
+                print(f"[TOOLVAULT-EXEC] {tool_name} failed ({type(e).__name__}) after "
+                      f"{(time.monotonic() - started) * 1000:.0f} ms")
+                return ToolResult(success=False,
+                                  result=f"{tool_name} could not read the health store just now.")
             import traceback
             traceback.print_exc()
             return ToolResult(
                 success=False,
                 result=f"Error executing {tool_name}: {str(e)}"
             )
+
+
+_WELLNESS_CATEGORY = "wellness"
+
+
+def _wellness_refusal(tool_name: str, ctx) -> Optional[ToolResult]:
+    """The gate's refusal for a health-data tool this context is not offered,
+    or None. Fails closed: if the wellness package cannot answer (the lean MCP
+    venv, any error) the tool does not run."""
+    try:
+        from Orchestrator.wellness import access
+        return access.refusal_for(tool_name, ctx)
+    except Exception as e:
+        print(f"[TOOLVAULT-EXEC] {tool_name} refused: the health gate is unavailable "
+              f"({type(e).__name__})")
+        return ToolResult(success=False, result=f"{tool_name} is not available here.")
 
 
 # =============================================================================

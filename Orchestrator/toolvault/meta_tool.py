@@ -26,7 +26,7 @@ import json
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
-from . import registry, embeddings, resolvers
+from . import availability, registry, embeddings, resolvers
 from .config import SIMILARITY_THRESHOLD, DEFAULT_SEARCH_LIMIT
 from .context import ToolContext
 
@@ -93,6 +93,9 @@ def execute(action: str, ctx: Optional[ToolContext] = None, **params) -> MetaToo
         ctx: The calling session's context (the toolvault module executor
             passes the dispatcher's). ``read`` resolves x-source markers with
             it, so a session only ever sees its own operator. None = "system".
+            All three actions show only what the operator-scoped availability
+            features (the wellness tools) offer this ctx: a tool the turn may
+            not run is neither found, read nor listed (None: never).
         **params: Action-specific parameters
 
     Returns:
@@ -104,7 +107,7 @@ def execute(action: str, ctx: Optional[ToolContext] = None, **params) -> MetaToo
     print(f"{Y}[TOOLVAULT-TOOL] ▶ Model invoked: toolvault(action={action!r}, {param_str}){R}")
 
     if action == "search":
-        result = _action_search(params.get("query", ""))
+        result = _action_search(params.get("query", ""), ctx)
         if result.data and result.data.get("matches"):
             for m in result.data["matches"][:5]:
                 print(f"{Y}[TOOLVAULT-TOOL]   ├─ {m['name']:30s} score={m['score']:.3f}{R}")
@@ -114,7 +117,7 @@ def execute(action: str, ctx: Optional[ToolContext] = None, **params) -> MetaToo
         print(f"{Y}[TOOLVAULT-TOOL]   └─ Read: {params.get('tool_name', '?')} → {'found' if result.success else 'not found'}{R}")
         return result
     elif action == "list":
-        result = _action_list(params.get("category"))
+        result = _action_list(params.get("category"), ctx)
         if result.data:
             print(f"{Y}[TOOLVAULT-TOOL]   └─ Listed: {result.data.get('total', 0)} tools in {len(result.data.get('categories', []))} categories{R}")
         return result
@@ -131,19 +134,26 @@ def execute(action: str, ctx: Optional[ToolContext] = None, **params) -> MetaToo
 # Actions
 # ---------------------------------------------------------------------------
 
-def _action_search(query: str) -> MetaToolResult:
+def _visible(entries: List[Dict], ctx: Optional[ToolContext]) -> List[Dict]:
+    """The entries this session may discover: the operator-scoped features
+    decide for ``ctx`` (fail-closed); key-gated tools are unchanged."""
+    return availability.filter_scoped(entries, ctx)
+
+
+def _action_search(query: str, ctx: Optional[ToolContext] = None) -> MetaToolResult:
     """Search for tools by natural language query.
 
     Ranks across the FULL canonical catalog (global discovery — this is the
     model's "second prompt" re-search), sourcing names/descriptions from the v2
-    registry and vectors from the embeddings.json store.
+    registry and vectors from the embeddings.json store. A tool an
+    operator-scoped feature does not offer ``ctx`` is not in the pool.
 
     Returns ranked results with name, score, category, and description.
     """
     if not query:
         return MetaToolResult(success=False, result="Missing 'query' parameter for search action.")
 
-    canonical = registry.load_canonical()
+    canonical = _visible(registry.load_canonical(), ctx)
     descriptions = {t["name"]: t.get("description", "") for t in canonical}
     store = embeddings.load_embeddings_store()
 
@@ -191,7 +201,9 @@ def _action_read(tool_name: str, ctx: Optional[ToolContext] = None) -> MetaToolR
         return MetaToolResult(success=False, result="Missing 'tool_name' parameter for read action.")
 
     entry = registry.get_tool(tool_name)
-    if not entry:
+    # A tool this session is not offered reads exactly like one that does not
+    # exist (no hint that it is there for someone else).
+    if not entry or not _visible([entry], ctx):
         return MetaToolResult(
             success=False,
             result=f"Tool '{tool_name}' not found in vault. Use toolvault(action='search', query='...') to find tools.",
@@ -255,12 +267,13 @@ def _action_read(tool_name: str, ctx: Optional[ToolContext] = None) -> MetaToolR
     )
 
 
-def _action_list(category: Optional[str] = None) -> MetaToolResult:
+def _action_list(category: Optional[str] = None, ctx: Optional[ToolContext] = None) -> MetaToolResult:
     """List all tools, optionally filtered by category.
 
-    Returns a categorized summary with tool names and brief descriptions.
+    Returns a categorized summary with tool names and brief descriptions,
+    without the tools an operator-scoped feature does not offer ``ctx``.
     """
-    tools = registry.load_canonical()
+    tools = _visible(registry.load_canonical(), ctx)
 
     if category:
         tools = [t for t in tools if t.get("category") == category]

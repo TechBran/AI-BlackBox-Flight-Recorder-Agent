@@ -10,7 +10,9 @@ to avoid an import cycle with the resolvers module (built in a later task).
 
 It also carries the three guards that used to run only in ``validate.py`` (the
 CI gate): an unknown ``x-availability.feature``, a ``cli_agent`` tool in the
-public ``mcp`` group, and an array without ``items``. The registry validates
+public ``mcp`` group, and an array without ``items``; and the health-data lint
+(``wellness_tool_errors``, rule W18 and the surface rules of spec §4.2). The
+registry validates
 every module through here when it loads, so a schema edited on a running box
 (picked up by the registry's mtime cache — no restart) is excluded at load time
 instead of taking down injection, the voice sessions or the Funnel's catalog
@@ -118,19 +120,22 @@ def validate_module_dict(d: dict, folder_name: str, known_sources: set,
                 f"(0, {MAX_TIMEOUT_S}], got {t!r}"
             )
 
-    # Optional x-availability: presence-gate metadata consumed by
-    # availability.is_available (provider key + enabled-pref). When present it
-    # must be an object with a non-empty string "provider" and, if given, a
-    # "requires_env" list of strings.
-    if "x-availability" in d:
-        errors.extend(_validate_x_availability(d.get("x-availability")))
-
     if known_features is None:
         from . import availability  # stdlib only; no cycle back to this module
         known_features = availability.FEATURES
+
+    # Optional x-availability: presence-gate metadata consumed by
+    # availability.is_available (provider key + enabled-pref). When present it
+    # must be an object with a non-empty string "provider" and, if given, a
+    # "requires_env" list of strings. An operator-scoped feature (one with a
+    # predicate, e.g. wellness) is decided per turn and names no provider.
+    if "x-availability" in d:
+        errors.extend(_validate_x_availability(d.get("x-availability"), known_features))
+
     errors.extend(x_availability_feature_errors(d, known_features))
     errors.extend(cli_agent_mcp_group_errors(d))
     errors.extend(array_items_errors(d))
+    errors.extend(wellness_tool_errors(d))
 
     return errors
 
@@ -198,7 +203,16 @@ def _validate_parameters(params, known_sources: set) -> list[str]:
     return errors
 
 
-def _validate_x_availability(gate) -> list[str]:
+def _scoped_feature(feature, known_features) -> bool:
+    """True when ``feature`` is an operator-scoped availability feature (its
+    FEATURES entry carries a predicate). A bare set of names says nothing."""
+    if not isinstance(known_features, dict) or not isinstance(feature, str):
+        return False
+    spec = known_features.get(feature)
+    return isinstance(spec, dict) and bool(spec.get("predicate"))
+
+
+def _validate_x_availability(gate, known_features=None) -> list[str]:
     """Validate an optional top-level ``x-availability`` presence-gate object."""
     errors: list[str] = []
     if not isinstance(gate, dict):
@@ -206,6 +220,11 @@ def _validate_x_availability(gate) -> list[str]:
             f"'x-availability' (optional) must be an object (dict), got "
             f"{type(gate).__name__}"
         ]
+    if _scoped_feature(gate.get("feature"), known_features):
+        if "provider" in gate:
+            errors.append("'x-availability.provider' has no meaning for the operator-scoped "
+                          f"feature {gate.get('feature')!r}; remove it")
+        return errors
     provider = gate.get("provider")
     if not isinstance(provider, str) or not provider.strip():
         errors.append("'x-availability.provider' must be a non-empty string")
@@ -304,4 +323,66 @@ def array_items_errors(data) -> list:
                 walk(value, f"{path}[{i}]")
 
     walk(params, "parameters")
+    return errors
+
+
+# The groups a wellness tool may list (spec §4.2): chat in v1, the live-voice
+# groups from M7.5. Never mcp (the public Funnel), phone (the telephony and
+# legacy static arrays) or chat_cu (Computer Use agents).
+WELLNESS_GROUPS = frozenset({"chat", "realtime", "gemini_live", "grok_live"})
+WELLNESS_CATEGORY = "wellness"
+WELLNESS_FEATURE = "wellness"
+
+
+def wellness_tool_errors(data) -> list:
+    """Guard the health-data tools (spec §4.2, rules W18-W20), by category so a
+    tool added later is held to them too:
+
+      * no ``operator`` parameter anywhere: the operator always comes from the
+        turn context, so asking about another person is impossible (W18);
+      * groups only from WELLNESS_GROUPS (never mcp, phone or chat_cu);
+      * gated by ``x-availability.feature == "wellness"`` (the per-turn gate);
+      * tier 1 or 2 (tier 3 is the internal/MCP tier);
+      * and the reverse: a tool gated by the wellness feature IS a wellness
+        tool, so the dispatcher's category check covers it.
+
+    Returns a list of error strings (empty when clean). Never raises.
+    """
+    if not isinstance(data, dict):
+        return []
+    gate = data.get("x-availability")
+    gated = isinstance(gate, dict) and gate.get("feature") == WELLNESS_FEATURE
+    name = data.get("name", "<unknown>")
+    if data.get("category") != WELLNESS_CATEGORY:
+        if gated:
+            return [f"tool {name!r} is gated by the wellness feature but its category is "
+                    f"{data.get('category')!r}; health-data tools are category 'wellness'"]
+        return []
+    errors: list = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            props = node.get("properties")
+            if isinstance(props, dict) and "operator" in props:
+                errors.append(f"wellness tool {name!r} has an 'operator' parameter at {path}; "
+                              f"the operator comes from the turn context only (W18)")
+            for key, value in node.items():
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+
+    walk(data.get("parameters"), "parameters")
+    groups = data.get("groups")
+    if isinstance(groups, list):
+        bad = sorted(set(g for g in groups if isinstance(g, str)) - WELLNESS_GROUPS)
+        if bad:
+            errors.append(f"wellness tool {name!r} must not be in group(s) {bad}: health "
+                          f"tools are only in {sorted(WELLNESS_GROUPS)} (never mcp, phone "
+                          f"or chat_cu)")
+    if not gated:
+        errors.append(f"wellness tool {name!r} must carry x-availability "
+                      f"{{\"feature\": \"wellness\"}} (the per-turn gate)")
+    if data.get("tier") not in (1, 2):
+        errors.append(f"wellness tool {name!r} must be tier 1 or 2, got {data.get('tier')!r}")
     return errors

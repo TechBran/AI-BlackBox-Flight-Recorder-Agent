@@ -3,7 +3,20 @@
 Lean-venv-safe: reads .env / config.ini with STDLIB ONLY (never import
 Orchestrator.config -- the MCP server's lean venv lacks fastapi). See the
 feedback-mcp-lean-venv lesson (resolvers._list_operators uses the same approach).
+
+Two kinds of feature:
+
+  * key-gated (web_search, image, music, ...): a tool is available when its
+    provider's key is present and the provider is enabled. Box-wide.
+  * operator-scoped (wellness): a tool is available to ONE turn, decided by
+    the feature's ``predicate`` from the ToolContext of the injection and the
+    turn its entry point stamped. The predicate module is imported lazily and
+    every path FAILS CLOSED: no ctx (static arrays, the MCP catalog, a ctx-less
+    caller), an import error (the lean MCP venv) or any exception means the
+    tool is not there. filter_scoped() applies only these, for the toolvault
+    meta-tool's search / read / list.
 """
+import importlib
 import os
 import sys
 
@@ -106,6 +119,16 @@ FEATURES = {
         "hint_prefix": "MEDIA ANALYSIS GUIDANCE: ",
         "keyless_floor": set(),
     },
+    # Health tracking (M7): operator-scoped, no provider keys (the empty maps
+    # keep every reader of the key-gated fields whole). The predicate (module,
+    # function) answers per entry for the injection's ToolContext and the
+    # stamped WellnessTurn: Orchestrator/wellness/access.py offered().
+    "wellness": {
+        "predicate": ("Orchestrator.wellness.access", "offered"),
+        "provider_env": {},
+        "provider_tool": {},
+        "hint_noun": "health data",
+    },
 }
 
 # Features already warned about by enabled_providers (one line each, not one
@@ -153,10 +176,10 @@ def _read_env() -> dict:
     # provider env vars + enable/default prefs, plus the GEMINI_API_KEY alias.
     keys = {"GEMINI_API_KEY"}
     for spec in FEATURES.values():
-        for v in spec["provider_env"].values():
+        for v in (spec.get("provider_env") or {}).values():
             keys.update(env_names(v))
-        keys.add(spec["enabled_pref"])
-        keys.add(spec["default_pref"])
+        keys.add(spec.get("enabled_pref"))
+        keys.add(spec.get("default_pref"))
     for k in keys:
         if k and os.environ.get(k):
             env[k] = os.environ[k]
@@ -204,6 +227,8 @@ def enabled_providers(feature: str = "web_search") -> set:
             print(f"[toolvault.availability] WARNING: unknown x-availability feature "
                   f"{feature!r}; its tools stay unavailable", file=sys.stderr)
         return set()
+    if spec.get("predicate"):
+        return set()       # operator-scoped: no provider set (see scoped_available)
     env = _read_env()
     raw = (env.get(spec["enabled_pref"]) or "").strip()
     if raw:
@@ -227,10 +252,47 @@ def enabled_web_search_providers() -> set:
     return enabled_providers("web_search")
 
 
-def is_available(entry: dict, enabled: set = None, env: dict = None) -> bool:
+def is_scoped(feature) -> bool:
+    """True for an operator-scoped feature (decided per turn by a predicate)."""
+    return bool((FEATURES.get(feature) or {}).get("predicate"))
+
+
+def scoped_available(entry: dict, ctx=None, memo: dict = None) -> bool:
+    """An operator-scoped entry's verdict for ``ctx``; True for any other entry.
+
+    Fails closed: no ctx, a predicate that cannot be imported or raises, or a
+    falsy answer all mean unavailable. ``memo`` (one dict per filter call)
+    lets the predicate decide once for every entry of one injection."""
+    gate = entry.get("x-availability") or {}
+    feature = gate.get("feature")
+    if not is_scoped(feature):
+        return True
+    if ctx is None:
+        return False
+    try:
+        module_name, func_name = FEATURES[feature]["predicate"]
+        predicate = getattr(importlib.import_module(module_name), func_name)
+        return bool(predicate(entry, ctx, memo if memo is not None else {}))
+    except Exception as e:  # noqa: BLE001 - a gate never raises on the request path
+        print(f"[toolvault.availability] {feature} predicate failed closed "
+              f"({type(e).__name__})", file=sys.stderr)
+        return False
+
+
+def filter_scoped(entries: list, ctx=None) -> list:
+    """Only the operator-scoped features' verdicts (key-gated tools pass
+    through untouched): what the toolvault meta-tool may show this session."""
+    memo: dict = {}
+    return [e for e in entries if scoped_available(e, ctx, memo)]
+
+
+def is_available(entry: dict, enabled: set = None, env: dict = None, ctx=None,
+                 memo: dict = None) -> bool:
     gate = entry.get("x-availability")
     if not gate:
         return True  # ungated tools are always available
+    if is_scoped(gate.get("feature")):
+        return scoped_available(entry, ctx, memo)
     if env is None:
         env = _read_env()
     if enabled is None:
@@ -249,14 +311,19 @@ def filter_available(entries: list, ctx=None) -> list:
     # feature, so we must NOT pass a single enabled set. Resolve env once, then
     # let is_available() resolve the per-feature enabled set for each entry.
     # Per-feature enabled sets are memoized so we only compute each once.
+    # Operator-scoped entries ask their predicate with ``ctx`` (one decision
+    # per call through ``memo``); without a ctx they are never available.
     env = _read_env()
     _enabled_cache: dict = {}
+    memo: dict = {}
 
     def _available(e: dict) -> bool:
         gate = e.get("x-availability")
         if not gate:
             return True
         feature = gate.get("feature", "web_search")
+        if is_scoped(feature):
+            return scoped_available(e, ctx, memo)
         if feature not in _enabled_cache:
             _enabled_cache[feature] = enabled_providers(feature)
         return is_available(e, _enabled_cache[feature], env)

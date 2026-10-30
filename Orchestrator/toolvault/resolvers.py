@@ -69,9 +69,36 @@ def _resolve_operators(ctx: ToolContext) -> dict:
     return {"enum": operators}
 
 
+def _resolve_wellness_metrics(ctx: ToolContext) -> dict:
+    """Resolver for ``x-source: wellness_metrics`` → the metrics of the
+    categories the turn behind ``ctx`` may read (its operator, its stamped
+    turn: Orchestrator/wellness/access.py). Nothing offered, the lean MCP venv
+    or any failure: no override, the schema's own enum of every v1 metric
+    stands (metric names are not health data)."""
+    try:
+        from Orchestrator.wellness import access
+        names = access.metric_names(ctx)
+    except Exception:
+        return {}
+    return {"enum": names} if names else {}
+
+
+def _resolve_wellness_categories(ctx: ToolContext) -> dict:
+    """Resolver for ``x-source: wellness_categories`` (an array property) →
+    its items limited to the categories the turn may read; else no override."""
+    try:
+        from Orchestrator.wellness import access
+        names = access.category_names(ctx)
+    except Exception:
+        return {}
+    return {"items": {"type": "string", "enum": names}} if names else {}
+
+
 # source-name → resolver fn. Each resolver: (ctx) -> dict of property overrides.
 RESOLVERS = {
     "operators": _resolve_operators,
+    "wellness_metrics": _resolve_wellness_metrics,
+    "wellness_categories": _resolve_wellness_categories,
 }
 
 # Exposed so schema_spec / the registry can validate x-source markers at build time.

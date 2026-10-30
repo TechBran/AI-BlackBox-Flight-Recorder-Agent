@@ -68,8 +68,17 @@ class ToolContext:
     endpoint; None (default) = every other surface (chat loops, voice routes,
     scheduler, CU). Executors whose result size must respect a genuine window
     bound (search_snapshots) budget on it. Back-compat default None.
+
+    ``surface`` and ``provider`` (M7) say which chat surface the tools are
+    being offered to and which provider will read them, as the turn's entry
+    point stamped them (Orchestrator/wellness/turn.py). The operator-scoped
+    availability features (the wellness tools) cross-check them against the
+    stamped turn and refuse on any mismatch. None = not known here (the
+    dispatcher's own context, static arrays); back-compat default None.
     """
     operator: str = "system"
     base_url: str = field(default_factory=_local_base_url)
     origin_device_id: Optional[str] = None
     caller: Optional[str] = None
+    surface: Optional[str] = None
+    provider: Optional[str] = None
