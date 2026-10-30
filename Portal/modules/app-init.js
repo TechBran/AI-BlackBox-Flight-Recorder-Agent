@@ -72,6 +72,7 @@ import { initMediaManager } from './media-manager.js';
 import { initCronManager } from './cron-manager.js';
 import { initDeviceManager } from './device-manager.js';
 import { initDevicesSection } from './devices-section.js';
+import { initWellnessSection } from './wellness-section.js';
 import { initTelephonyManager } from './telephony-manager.js';
 import { initTelephonyWizard } from './telephony-wizard.js';
 import { initCellularManager } from './cellular-manager.js';
@@ -605,6 +606,7 @@ async function initApp() {
     initCronManager();
     initDeviceManager();
     initDevicesSection();   // M3 3.7 — System-Menu tailnet device management
+    initWellnessSection();  // M7.2 — System-Menu Health card (status only; setup is on the phone)
     initTelephonyManager();
     initTelephonyWizard();
     initCellularManager();

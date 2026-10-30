@@ -518,6 +518,33 @@
           <p class="devices-hint">Every device on your Tailscale network. Assign an owner to claim a device, mark one primary device per operator, and pick its default AI provider.</p>
         </div>
 
+        <!-- Health Section (M7.2, status only). Setup and every sharing choice
+             happen on the operator's own phone (BlackBox, Settings, Health);
+             modules/wellness-section.js fills this from GET /wellness/status with
+             textContent only, and never shows categories, providers or troubles. -->
+        <div class="menu-group wellness-section" id="wellnessSection">
+          <div class="wellness-section-head">
+            <h4>❤️ Health</h4>
+            <span id="wellnessStateChip" class="wellness-chip" data-tone="muted" role="status" aria-live="polite">Checking…</span>
+          </div>
+          <dl class="wellness-facts">
+            <div id="wellnessSourceRow" class="wellness-fact" hidden>
+              <dt>Source</dt>
+              <dd id="wellnessSource"></dd>
+            </div>
+            <div id="wellnessSyncRow" class="wellness-fact" hidden>
+              <dt>Last sync</dt>
+              <dd id="wellnessLastSync"></dd>
+            </div>
+          </dl>
+          <p id="wellnessNote" class="wellness-note"></p>
+          <ol id="wellnessSteps" class="wellness-steps" hidden></ol>
+          <p id="wellnessFootnote" class="wellness-footnote" hidden></p>
+          <p id="wellnessError" class="wellness-error" role="status" hidden>Can't reach the BlackBox right now. Retrying…</p>
+          <button id="btnWellnessOpenPhone" class="btn wellness-open-phone" type="button" hidden>Open Health settings</button>
+          <p class="wellness-hint">Health permissions are granted on the phone, so setup and every sharing choice happen there. This panel shows status only.</p>
+        </div>
+
         <!-- Android Overlay Section (Only visible on Android app) -->
         <div id="androidOverlaySection" class="menu-group overlay-section" style="display: none;">
           <h4 class="overlay-title">📱 Floating Overlay</h4>
@@ -723,7 +750,7 @@
           </button>
           <div id="advancedSettings" class="advanced-content collapsed">
             <div class="menu-grid">
-              <button id="btnHealth"   class="btn" title="Refresh Health">Health</button>
+              <button id="btnHealth"   class="btn" title="Refresh the service health check">Service Health</button>
               <button id="btnManifest" class="btn" title="Show Manifest">Manifest</button>
               <button id="ctlPair"     class="btn" title="Pair device via QR">Pair Device</button>
               <button id="btnManageSetup" class="btn" title="Open the setup console — keys, operators, integrations, status">⚙️ Setup / Console</button>

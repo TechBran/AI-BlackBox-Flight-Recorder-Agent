@@ -210,6 +210,16 @@
 .device-owner-select:disabled,
 .device-provider-select:disabled { opacity: 0.55; cursor: not-allowed; }
 
+/* An owner-change question (askInline, in place of window.confirm) takes the
+   full width under the owner / provider controls. */
+.device-card-controls .inline-confirm-row {
+    flex: 1 1 100%;
+    margin: 2px 0 0;
+    padding: 8px 10px;
+}
+.device-card-controls .inline-confirm-text { font-size: 12.5px; }
+.device-card-controls .inline-confirm-row .btn { font-size: 13px; padding: 4px 6px; }
+
 /* Narrow screens — stack the owner/provider controls. */
 @media (max-width: 480px) {
     .device-card-controls { flex-direction: column; gap: 8px; }

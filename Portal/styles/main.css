@@ -44,6 +44,7 @@
 @import url('./features/_system_controls.css');
 @import url('./features/_ember-fx.css?v=genui343');
 @import url('./features/_devices-section.css?v=genui299');
+@import url('./features/_wellness.css');
 
 /* === GENERATION === */
 @import url('./generation/_base.css');

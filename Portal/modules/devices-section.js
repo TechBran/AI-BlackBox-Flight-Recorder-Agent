@@ -9,12 +9,30 @@
  *   POST /devices/{id}/operator {operator}   → assign/claim
  *   POST /devices/{id}/primary  {operator}   → set operator's primary
  *   POST /devices/{id}/default-provider {provider, operator?}
+ *   POST /wellness/select {operator, device_id} → "Use for health" (M7.2)
+ *
+ * Health (M7.2, docs/plans/2026-10-25-samsung-health-integration.md §3.1): on
+ * the current operator's own Android rows, "Use for health" starts health
+ * setup with that phone (the box sends it a neutral "finish on this phone"
+ * notification; setup finishes in the app), and the phone that feeds the
+ * operator's health store carries a "Health source" badge. The badge comes
+ * from the additive mesh fields health_source / health_state, which the box
+ * fills only when ?operator= equals the row's owner (rule W17), so they are
+ * read from a mesh request made AS the current operator and believed only on
+ * that operator's own rows.
+ *
+ * Owner changes ask in the page (askInline), never with window.confirm: the
+ * Android WebView has no dialog host, so confirm() returned false there unseen
+ * and unassign / re-home silently did nothing on the phone.
  *
  * This is DISTINCT from device-manager.js (the ADB pair/connect modal on the
  * older GET /devices/ CRUD) — it does not touch that surface.
  */
 
 import { $, escapeHtml, toastSuccess, toastError, postJson } from './core-utils.js';
+import { getOperator } from './state-management.js';
+import { askInline } from '../onboarding/inline-confirm.js';
+import { healthStateLabel, PHONE_PATH } from './wellness-section.js';
 
 // Provider choices mirror the backend enum {gemma,gemini,claude,openai|null}.
 const PROVIDERS = [
@@ -27,14 +45,31 @@ const PROVIDERS = [
 
 const TYPE_ICON = { android: '📱', windows: '🖥️', macos: '💻', linux: '🐧' };
 
+// A health source in one of these states is managed on the phone; re-picking it
+// here would only send the "finish on your phone" nudge again for nothing.
+const HEALTH_MANAGED_STATES = new Set(['active', 'paused', 'stale', 'needs_attention']);
+
+// /wellness/select refusals, in words (the box answers {error, fix?}).
+const SELECT_ERRORS = {
+    owner_mismatch: 'This phone is not assigned to you in Devices',
+    not_owner: 'This phone is not assigned to you in Devices',
+    not_android: 'Health needs an Android phone with the BlackBox app',
+    already_enrolled: `Health is already set up on your phone. Manage it there: ${PHONE_PATH}`,
+    device_in_use: 'This phone cannot be your health source right now',
+    not_paired: 'Open the BlackBox app once on this phone',
+};
+
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------
 let _operators = [];       // live operator roster (from /operators)
+let _reserved = [];        // reserved overseers on that roster (never anyone's health source)
 let _filter = '';          // '' = all operators; else filter mesh to one operator
 let _hideUnassigned = false; // when true, render() hides devices with no owner (default OFF)
 let _lastDevices = [];     // last-fetched, deduped device set (for re-render without refetch)
-let _loading = false;
+let _lastMe = '';          // the operator that set was read as (its health fields are theirs)
+let _inflight = null;      // the refresh() being loaded, if any
+let _again = null;         // one refresh queued behind it (it reads the newest filter/operator)
 let _lastMenuVisible = false;
 
 // -----------------------------------------------------------------------------
@@ -54,17 +89,50 @@ function dedupById(devices) {
     return out;
 }
 
+const isAndroid = (d) => String(d.type || '').toLowerCase() === 'android';
+
+/**
+ * The rows with the additive health fields kept only where they can be true:
+ * on the current operator's own rows, copied from `mine` (a mesh read made as
+ * that operator, the only read the box fills them on). Anything a row claims
+ * for another owner, or from a read made as someone else, is dropped.
+ * @param {object[]} devices - The rows to render
+ * @param {?object[]} mine - The rows of a mesh read made as `me` (null: none)
+ * @param {string} me - The current operator ('' when unresolved)
+ */
+function withHealthFields(devices, mine, me) {
+    const own = new Map();
+    for (const r of mine || []) {
+        if (r && me && r.owner === me) own.set(r.id, r);
+    }
+    return devices.map((d) => {
+        const row = { ...d };
+        delete row.health_source;
+        delete row.health_state;
+        const src = me && d.owner === me ? own.get(d.id) : null;
+        if (src && src.health_source === true) {
+            row.health_source = true;
+            row.health_state = typeof src.health_state === 'string' ? src.health_state : null;
+        }
+        return row;
+    });
+}
+
 // -----------------------------------------------------------------------------
 // API
 // -----------------------------------------------------------------------------
 async function fetchOperators() {
     try {
         const res = await fetch('/operators');
-        if (!res.ok) return [];
+        if (!res.ok) return { operators: [], reserved: [] };
         const data = await res.json();
-        return Array.isArray(data.operators) ? data.operators : [];
+        return {
+            operators: Array.isArray(data.operators) ? data.operators : [],
+            // Additive `reserved` key (the Flight Recorder); [] on older servers.
+            reserved: Array.isArray(data.reserved) ? data.reserved : [],
+        };
     } catch {
-        return [];
+        return { operators: [], reserved: [] };
     }
 }
 
@@ -88,10 +156,54 @@ const setProvider = (id, provider, operator) => {
     return postJson(`/devices/${encodeURIComponent(id)}/default-provider`, body);
 };
 
+/** Why the box refused /wellness/select, in words: its `fix`, a known code, or its detail. */
+function healthSelectError(status, body) {
+    const b = body && typeof body === 'object' ? body : {};
+    // {error, fix} bare, or wrapped by FastAPI's HTTPException as {detail: {...}}.
+    const e = b.detail && typeof b.detail === 'object' ? b.detail : b;
+    if (typeof e.fix === 'string' && e.fix.trim()) return e.fix.trim();
+    if (typeof e.error === 'string' && Object.prototype.hasOwnProperty.call(SELECT_ERRORS, e.error)) {
+        return SELECT_ERRORS[e.error];
+    }
+    if (typeof b.detail === 'string' && b.detail && b.detail !== 'Not Found') return b.detail;
+    if (status === 404) return 'Health is not available on this BlackBox yet';
+    return `Could not start Health setup (HTTP ${status})`;
+}
+
+/** POST /wellness/select: make `id` the operator's health source (setup finishes on the phone). */
+async function selectHealthSource(id, operator) {
+    const res = await fetch('/wellness/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operator, device_id: id }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(healthSelectError(res.status, body));
+    return body;
+}
+
 // -----------------------------------------------------------------------------
 // Rendering
 // -----------------------------------------------------------------------------
-function buildCard(d) {
+// Health (M7.2): only on the current operator's own rows. The box fills the
+// health fields only for those, and "Use for health" acts for that operator
+// alone; the Flight Recorder (reserved) is never anyone's health source.
+function healthRowHtml(d, me) {
+    if (!me || d.owner !== me) return '';
+    const isSource = d.health_source === true;
+    const stateLabel = isSource ? healthStateLabel(d.health_state) : '';
+    const badge = isSource
+        ? `<span class="device-wellness-badge" title="Your health data comes from this phone">Health source${stateLabel ? ` · ${escapeHtml(stateLabel)}` : ''}</span>`
+        : '';
+    const canPick = isAndroid(d) && !_reserved.includes(me)
+        && !(isSource && HEALTH_MANAGED_STATES.has(d.health_state));
+    const pick = canPick
+        ? '<button class="device-wellness-use" type="button" title="Start health setup with this phone. You finish on the phone.">Use for health</button>'
+        : '';
+    return badge || pick ? `<div class="device-wellness-row">${badge}${pick}</div>` : '';
+}
+
+function buildCard(d, me) {
     const owned = !!d.owner;
     const online = !!d.online;
     const icon = TYPE_ICON[(d.type || '').toLowerCase()] || '🖥️';
@@ -145,7 +257,8 @@ function buildCard(d) {
                 <span class="device-ctl-label">Provider</span>
                 <select class="device-provider-select"${owned ? '' : ' disabled title="Assign an owner first"'}>${providerOptions}</select>
             </label>
-        </div>`;
+        </div>
+        ${healthRowHtml(d, me)}`;
 
     // Owner assignment (claim / reassign / unassign). Assigning auto-registers a
     // tailnet node. The sentinel + re-home paths are handled BEFORE the empty-value
@@ -155,15 +268,23 @@ function buildCard(d) {
     // ANY failure we refresh() to re-render true backend state, not reset to a stale
     // owner.
     const ownerSel = card.querySelector('.device-owner-select');
+    // The question is asked in the page (askInline), never with window.confirm:
+    // the Android WebView has no dialog host. A newer pick replaces an open
+    // question, and only the newest may put the owner back on "no", so a
+    // superseded question never undoes the pick that replaced it.
+    let asking = 0;
+    const askOwnerChange = async (text, okLabel) => {
+        const mine = ++asking;
+        const ok = await askInline(ownerSel, text, { okLabel, buttonClass: 'btn' });
+        if (!ok && mine === asking) ownerSel.value = d.owner;
+        return ok;
+    };
     ownerSel.addEventListener('change', async () => {
         const val = ownerSel.value;
 
         // Pure unassign (sentinel).
         if (val === '__unassign__') {
-            if (!confirm(`Unassign ${d.name || d.id} from ${d.owner}?`)) {
-                ownerSel.value = d.owner;
-                return;
-            }
+            if (!await askOwnerChange(`Unassign ${d.name || d.id} from ${d.owner}?`, 'Unassign')) return;
             ownerSel.disabled = true;
             // Provenance must be a LIVE operator: if the owner is a phantom
             // (off-roster), fall back to any live operator so the backend's
@@ -182,10 +303,7 @@ function buildCard(d) {
 
         // Re-home an OWNED device to a DIFFERENT operator: unassign → assign.
         if (owned && val && val !== d.owner) {
-            if (!confirm(`Re-home ${d.name || d.id} from ${d.owner} to ${val}?`)) {
-                ownerSel.value = d.owner;
-                return;
-            }
+            if (!await askOwnerChange(`Re-home ${d.name || d.id} from ${d.owner} to ${val}?`, 'Re-home')) return;
             ownerSel.disabled = true;
             try {
                 await postJson(`/devices/${encodeURIComponent(d.id)}/unassign`, { operator: val });
@@ -248,10 +366,34 @@ function buildCard(d) {
         });
     }
 
+    // Use for health: the box marks this phone awaiting_phone and sends it a
+    // neutral "finish on this phone" notification; setup finishes in the app.
+    const useBtn = card.querySelector('button.device-wellness-use');
+    if (useBtn) {
+        useBtn.addEventListener('click', async () => {
+            // Never act for an operator who is no longer selected (a picker that
+            // changed without the event): redraw for the current one instead.
+            if (getOperator() !== me) {
+                await refresh();
+                return;
+            }
+            useBtn.disabled = true;
+            try {
+                await selectHealthSource(d.id, me);
+                toastSuccess(`Finish on your phone: ${PHONE_PATH}`);
+                window.dispatchEvent(new CustomEvent('bbx:wellness-changed', { detail: { device_id: d.id } }));
+                await refresh();
+            } catch (e) {
+                toastError(e.message || 'Could not start Health setup');
+                useBtn.disabled = false;
+            }
+        });
+    }
+
     return card;
 }
 
-function render(devices) {
+function render(devices, me = _lastMe) {
     const list = $('devicesList');
     if (!list) return;
     // Hide-unassigned is a client-side view filter (default OFF so a fresh box's
@@ -263,7 +405,7 @@ function render(devices) {
         return;
     }
     const frag = document.createDocumentFragment();
-    shown.forEach((d) => frag.appendChild(buildCard(d)));
+    shown.forEach((d) => frag.appendChild(buildCard(d, me)));
     list.innerHTML = '';
     list.appendChild(frag);
 }
@@ -276,28 +418,57 @@ function syncOperatorFilter() {
     sel.value = _filter || '';
 }
 
-async function refresh() {
-    if (_loading) return;
-    _loading = true;
+/**
+ * Reload and redraw the list. A refresh asked for while one is loading runs
+ * once it finishes (one queued run is enough: it reads the newest filter and
+ * operator) instead of being dropped, which used to leave the list on the old
+ * filter, or on the state from before an edit whose own refresh collided with
+ * the menu-open one. Resolves when the list shows the newest answer.
+ * @returns {Promise<void>}
+ */
+function refresh() {
+    if (_inflight) {
+        if (!_again) {
+            _again = _inflight.then(() => {
+                _again = null;
+                return refresh();
+            });
+        }
+        return _again;
+    }
+    _inflight = load().finally(() => { _inflight = null; });
+    return _inflight;
+}
+
+async function load() {
     const list = $('devicesList');
+    const filter = _filter;
+    const me = getOperator();
     try {
         // Always refetch the roster (no lifetime cache) so a newly-added operator
         // appears without reload. This section refreshes only on open / filter-change
         // / manual refresh — it does NOT poll — so always-fetch is cheap.
-        const [ops, devices] = await Promise.all([
+        const [roster, devices] = await Promise.all([
             fetchOperators(),
-            fetchMesh(_filter),
+            fetchMesh(filter),
         ]);
-        _operators = ops;
+        _operators = roster.operators;
+        _reserved = roster.reserved;
         syncOperatorFilter();
-        _lastDevices = dedupById(devices);
-        render(_lastDevices);
+        // The health fields arrive only on a read made as the row's owner: the
+        // operator's own filter already is one; any other view (All operators,
+        // someone else's) needs one more read, and only if the operator owns a
+        // row here at all.
+        let mine = null;
+        if (me && filter === me) mine = devices;
+        else if (me && devices.some((d) => d && d.owner === me)) mine = await fetchMesh(me).catch(() => null);
+        _lastMe = me;
+        _lastDevices = withHealthFields(dedupById(devices), mine, me);
+        render(_lastDevices, me);
     } catch (e) {
         if (list) {
             list.innerHTML = `<p class="devices-empty devices-error">Could not load devices (${escapeHtml(e.message || 'error')}). Is Tailscale running?</p>`;
         }
-    } finally {
-        _loading = false;
     }
 }
 
@@ -341,6 +512,13 @@ export function initDevicesSection() {
         });
         obs.observe(menu, { attributes: true, attributeFilter: ['class'] });
     }
+
+    // "Use for health" and the Health source badge belong to the current
+    // operator: an operator switch while the menu is open redraws for the new
+    // one (a closed menu refreshes on open anyway).
+    window.addEventListener('bbx:operator-changed', () => {
+        if (_lastMenuVisible) refresh();
+    });
 
     console.log('[Devices] System-Menu devices section initialized');
 }

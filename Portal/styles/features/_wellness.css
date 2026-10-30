@@ -1,0 +1,150 @@
+/* _wellness.css
+ * Health (M7.2, status only): the System-Menu Health card
+ * (modules/wellness-section.js) and the Devices section's health controls,
+ * "Use for health" and the owner-only "Health source" badge
+ * (modules/devices-section.js). Mirrors the Devices section's look.
+ */
+
+.wellness-section {
+    border-top: 1px solid var(--neutral-300);
+    padding-top: 12px;
+}
+
+/* The module shows and hides parts with the `hidden` attribute; an author
+   `display` rule below must never un-hide one. */
+.wellness-section [hidden] { display: none !important; }
+
+.wellness-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.wellness-section-head h4 { margin: 0; }
+
+/* ── State chip ──────────────────────────────────────────────────────────── */
+.wellness-chip {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: var(--font-semibold);
+    padding: 3px 10px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border);
+    background: var(--neutral-150);
+    color: var(--muted);
+    white-space: nowrap;
+}
+.wellness-chip[data-tone="ok"] {
+    color: #27d980;
+    border-color: rgba(39, 217, 128, 0.45);
+    background: rgba(39, 217, 128, 0.08);
+}
+.wellness-chip[data-tone="pending"] {
+    color: #64b5f6;
+    border-color: rgba(100, 181, 246, 0.45);
+    background: rgba(100, 181, 246, 0.08);
+}
+.wellness-chip[data-tone="warn"] {
+    color: #ffc400;
+    border-color: rgba(255, 196, 0, 0.45);
+    background: rgba(255, 196, 0, 0.08);
+}
+
+/* ── Source / last sync ──────────────────────────────────────────────────── */
+.wellness-facts {
+    display: grid;
+    gap: 4px;
+    margin: 0 0 8px;
+}
+.wellness-fact {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    font-size: 12.5px;
+}
+.wellness-fact dt {
+    flex: 0 0 72px;
+    margin: 0;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--neutral-700);
+}
+.wellness-fact dd {
+    margin: 0;
+    min-width: 0;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Next step, setup steps, notes ───────────────────────────────────────── */
+.wellness-note {
+    margin: 0 0 6px;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.45;
+}
+.wellness-steps {
+    margin: 0 0 6px;
+    padding-left: 20px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+}
+.wellness-footnote,
+.wellness-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+}
+.wellness-error {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: #ffc400;
+}
+.wellness-open-phone {
+    margin-top: 2px;
+    padding-left: 0;
+    font-size: 13px;
+}
+
+/* ── Devices: health controls on the operator's own rows ─────────────────── */
+.device-wellness-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.device-wellness-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: var(--radius-full);
+    border: 1px solid rgba(255, 110, 150, 0.45);
+    background: rgba(255, 110, 150, 0.08);
+    color: #ff8fab;
+    white-space: nowrap;
+}
+/* The heart is decoration, kept out of the badge's text. */
+.device-wellness-badge::before { content: "\2665"; }
+
+.device-wellness-use {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: border-color .15s ease, color .15s ease;
+}
+.device-wellness-use:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.device-wellness-use:disabled { opacity: 0.55; cursor: progress; }
