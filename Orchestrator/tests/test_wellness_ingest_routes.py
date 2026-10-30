@@ -361,6 +361,41 @@ def test_the_consent_is_read_when_the_batch_is_written(tmp_path, monkeypatch):
     assert res.accepted == 0 and res.dropped > 0
 
 
+def test_an_app_named_only_by_dropped_rows_is_not_kept(tmp_path, monkeypatch):
+    """An origin is saved, and its last-seen time moved, only for a row that
+    is kept: with blood pressure off, a batch from a blood-pressure app
+    leaves no trace of the app (the summary's sources list origins by
+    last-seen)."""
+    from Orchestrator.tests.wellness_support import ENR, fresh_store
+    from Orchestrator.wellness import schema
+    st = fresh_store(tmp_path, monkeypatch)
+    now = FX.now_ms()
+    t = now - 6 * 3_600_000
+    cuff = {"key": "bp", "package": "com.example.cuff", "label": "Example Cuff",
+            "device_type": "UNKNOWN"}
+
+    def push(bid, consent, at):
+        b = {"schema": "bbx.wellness.ingest/1", "batch_id": bid, "enrollment_id": ENR,
+             "epoch": 1, "origins": [FX.PHONE, cuff],
+             "buckets": [{"metric": "steps", "grain": "1h", "origin": "o2", "rows": [[t, 120.0]]}],
+             "readings": [{"metric": "blood_pressure", "hc_id": f"{bid}-bp", "origin": "bp",
+                           "t": t, "v": 121.0, "v2": 81.0}]}
+        return ingest.process_batch(st, schema.IngestBatch.model_validate(b), enrollment_id=ENR,
+                                    epoch=1, now_ms=at, consent=lambda: consent)
+
+    def seen():
+        return {o["package"]: o["last_seen"] for o in st.origins().values()}
+
+    off = {"sleep": "ask", "heart": "ask", "activity": "ask", "blood_pressure": "off"}
+    res = push("c1", off, now)
+    assert res.accepted == 1 and res.dropped == 1
+    assert seen() == {FX.PHONE["package"]: now}
+    res = push("c2", dict(off, blood_pressure="ask"), now)
+    assert res.accepted == 2 and seen()["com.example.cuff"] == now
+    push("c3", off, now + 3_600_000)                # off again: the app's last-seen stays
+    assert seen() == {FX.PHONE["package"]: now + 3_600_000, "com.example.cuff": now}
+
+
 def test_the_drop_is_logged_as_a_count(box, caplog):
     import logging
     with caplog.at_level(logging.INFO, logger="Orchestrator.wellness.ingest"):

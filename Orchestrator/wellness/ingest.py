@@ -16,7 +16,8 @@ the values.
 
 Consent, in depth: the phone should not read a category that is off, and a
 row of one that arrives anyway is dropped here (counted as "category_off",
-logged as a count, never stored). The consent is read when the batch is
+logged as a count, never stored, and the app it names is not recorded for
+it). The consent is read when the batch is
 written, under the store's write lock, so a category turned off while a
 batch was in flight is already off; one turned back on starts with the next
 push (nothing dropped is kept for later). A workout is activity, so with
@@ -258,17 +259,19 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
 
                     def too_old(ts: int) -> bool:
                         return cutoff is not None and ts < cutoff
-                    ids = {}
-                    for o in batch.origins:
-                        ids[o.key] = st.ensure_origin(conn, o.model_dump(), now=now_ms)
+                    # An origin is saved (and its last-seen moved) only when a
+                    # row that passed the consent check names it: an app whose
+                    # every row was dropped leaves no trace in the sources.
+                    declared = {o.key: o.model_dump() for o in batch.origins}
+                    declared.setdefault(HC_MERGED, {"package": HC_MERGED})
+                    ids: Dict[str, int] = {}
 
                     def origin_id(key: str) -> Optional[int]:
-                        if key == HC_MERGED:
-                            if HC_MERGED not in ids:
-                                ids[HC_MERGED] = st.ensure_origin(conn, {"package": HC_MERGED},
-                                                                  now=now_ms)
-                            return ids[HC_MERGED]
-                        return ids.get(key)
+                        if key not in ids:
+                            if key not in declared:
+                                return None
+                            ids[key] = st.ensure_origin(conn, declared[key], now=now_ms)
+                        return ids[key]
 
                     def moved(day: str, before: int, after: int):
                         # The day's start and the day before's end moved.
