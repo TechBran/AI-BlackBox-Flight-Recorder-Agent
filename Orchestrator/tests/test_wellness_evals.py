@@ -779,6 +779,21 @@ def test_a11b_flags_a_bare_reading_on_the_wellness_path(answers):
             "[TOOLVAULT-EXEC] get_current_time: Friday, October 30, 2026 at 06:52 AM",
             "[DEBUG] resting_hr=99 is no result", "[HTTP] completion_tokens=152 total=171"):
         assert evals.leak_hits(line, values, SENTINELS) == [], line
+    # The shapes the first rescan of the live window flagged, none a reading:
+    # an operator that has "wellness" in its name, a turn index, a model's
+    # version inside its name, a Flight Recorder line's counts.
+    noisy = values | {"48", "3.1", "22"}
+    for line in (
+            "[CHECKPOINT] Created SNAP-20261030-9553 for wellness-fixture at turn 48 "
+            "(5496 chars)",
+            "[CHECKPOINT] Creating checkpoint task for wellness-fixture at turn 48",
+            "MODEL: gemini-3.1-pro-preview",
+            "* **wellness-fixture (Automated)**: 22 snapshots from an automated test suite, "
+            "48 of them judge turns."):
+        assert evals.leak_hits(line, noisy, SENTINELS) == [], line
+    assert evals.leak_hits("[DEBUG] wellness payload distance_km=3.1", noisy, SENTINELS) == \
+        ["3.1"]
+    assert evals.leak_hits("[DEBUG] wellness_summary -> resting 48", noisy, SENTINELS) == ["48"]
 
 
 def test_a11b_scan_judges_a_run_by_what_it_added(tmp_path, monkeypatch, answers):

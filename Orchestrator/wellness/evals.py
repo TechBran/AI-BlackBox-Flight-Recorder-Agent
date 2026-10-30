@@ -1289,7 +1289,19 @@ _KEY_VALUE = re.compile(r"(?P<key>[A-Za-z][\w.-]{0,40})['\"]?\s*[:=]\s*['\"]?"
 _KEY_PREFILTER = re.compile(
     r"(?i:(?:hr|bpm|heart|pulse|step|kcal|calor|spo2|oxygen|hrv|rmssd|systolic|diastolic|bp|"
     r"sleep|resting|breath|respir|distance|exercise|value)\w*['\"]?\s*[:=]\s*['\"]?\d)")
-_WELLNESS_LINE = re.compile(r"(?i:wellness)")
+# The wellness path: a wellness tool, a [WELLNESS...] tag, a wellness turn's
+# results. Not an operator or a fixture that merely has "wellness" in its
+# name ("[CHECKPOINT] ... for wellness-fixture at turn 48").
+_WELLNESS_LINE = re.compile(
+    r"(?i:\bwellness_[a-z]\w*|\[wellness|\bwellness (?:turn|turns|result|results|delivery|"
+    r"deliveries|payload|envelope|envelopes|rollup|rollups|summary|series|sessions|history|"
+    r"sources|data|answer|tool|tools|reading|readings|store|values?)\b)")
+# A number after an index word counts something, it is no reading ("turn
+# 48", "attempt 2", "round 3", "#12").
+_INDEX_BEFORE = re.compile(r"(?i:(?:\b(?:turns?|attempts?|tries|try|rounds?|lines?|pages?|"
+                           r"steps?|chunks?|batch(?:es)?|tasks?|jobs?|versions?|v|top|first|"
+                           r"last|next|port|pid|row|rows|item|items|index|idx|no|number)\s*"
+                           r"[:=#]?|#)\s*$)")
 _LINE_NUMBER = re.compile(r"(?<![\w.,:/=-])(?P<n>\d{2,}(?:[.,]\d+)?)(?![\w]|[.,:/-]\d)"
                           r"(?!\s*(?:ms|s|sec|secs|seconds?|chars?|characters|bytes?|kb|mb|"
                           r"gb|tokens?|results?|result\(s\)|items?|rows?|snapshots?|"
@@ -1325,6 +1337,8 @@ def _context_hits(line: str, values: frozenset) -> List[str]:
             tok = m.group("n")
             if m.start("n") in keyed or tok not in values or not _not_rounded(tok):
                 continue
+            if _INDEX_BEFORE.search(line[max(0, m.start() - 12):m.start()]):
+                continue
             hits.append(tok)
     return hits
 
@@ -1343,7 +1357,9 @@ def _scanner(values: frozenset, sentinels: Tuple[str, ...]):
     digit_rx = re.compile(rf"(?<![\d.,])(?:{alt(digit_end)})(?![\d])") if digit_end else None
     word_rx = re.compile(rf"(?<![\d.,])(?:{alt(word_end)})(?![\w])", re.I) if word_end else None
     exact = scan_exact(values)
-    exact_rx = re.compile(rf"(?<![\w.,:/])(?:{alt(exact)})(?![\w]|[.,:/]\d)") if exact else None
+    # Not inside a hyphenated name ("gemini-3.1-pro"): a reading is not a version.
+    exact_rx = re.compile(rf"(?<![\w.,:/-])(?:{alt(exact)})(?![\w]|[.,:/]\d|-\w)") \
+        if exact else None
     pre = [rf"(?i:\b(?:{alt(mask._RECALL_UNITS)})\b)", _KEY_PREFILTER.pattern,
            _WELLNESS_LINE.pattern]
     if exact:
