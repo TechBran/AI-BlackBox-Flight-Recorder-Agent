@@ -246,3 +246,33 @@ def test_post_chat_hands_a_verified_request_to_its_worker_as_a_grant(enrolled_ph
     assert access.redeem_grant(granted[access.GRANT_KEY], OPERATOR) == state["enrollment_id"]
     turn = access.task_turn(unsigned, OPERATOR, "custom", LAN_MODEL)
     assert turn.surface == "portal" and not turn.credential_ok
+
+
+def test_the_gate_never_runs_on_the_event_loop(enrolled_phone, monkeypatch):
+    """The gate reads the switch, the enrollment and the model-server registry,
+    and resolves a model server's host name; the executor's refusal check and
+    the Signal frame's destination run off the server's one event loop, so an
+    uncached name never stalls every other chat (audit rank 45's class)."""
+    import asyncio
+
+    from Orchestrator.wellness import destinations, gate
+    custom_server(base_url="http://localhost:8099/v1")          # a host NAME, resolved
+    on_loop = []
+
+    def watch(fn, name):
+        def watched(*a, **k):
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(name)
+            except RuntimeError:
+                pass
+            return fn(*a, **k)
+        return watched
+
+    for mod, name in ((gate, "check_all"), (gate, "check"), (destinations, "destination")):
+        monkeypatch.setattr(mod, name, watch(getattr(mod, name), name))
+    out = SIM.chat(ClientTransport(enrolled_phone["client"]), enrolled_phone["state"],
+                   prompt=QUESTION, provider="custom", model=LAN_MODEL)
+    assert out["tools"] == ["wellness_summary"] and len(out["wellness_used"]) == 1
+    assert out["wellness_used"][0]["provider"] == "custom:lan-box"
+    assert on_loop == []

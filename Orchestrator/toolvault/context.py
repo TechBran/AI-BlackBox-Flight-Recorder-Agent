@@ -71,10 +71,12 @@ class ToolContext:
 
     ``surface`` and ``provider`` (M7) say which chat surface the tools are
     being offered to and which provider will read them, as the turn's entry
-    point stamped them (Orchestrator/wellness/turn.py). The operator-scoped
-    availability features (the wellness tools) cross-check them against the
-    stamped turn and refuse on any mismatch. None = not known here (the
-    dispatcher's own context, static arrays); back-compat default None.
+    point stamped them (Orchestrator/wellness/turn.py); the chat loops'
+    executors carry their own provider (tool_dispatch.LoopProfile.provider).
+    The operator-scoped availability features (the wellness tools) cross-check
+    them against the stamped turn and refuse on any mismatch, and on a
+    provider of None. None = not known here (static arrays, the voice and
+    on-device surfaces); back-compat default None.
     """
     operator: str = "system"
     base_url: str = field(default_factory=_local_base_url)

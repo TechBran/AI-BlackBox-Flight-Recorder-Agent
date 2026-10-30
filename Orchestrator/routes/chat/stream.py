@@ -148,6 +148,19 @@ def _error_detail_frame(event: dict) -> str:
 # Every client (Portal, Android, cron) POSTs.
 
 
+# The providers _open_provider_stream runs by their own name. Every other
+# string (google, gemini, a mis-cased or an unknown one: "local", "claude",
+# "custom:<alias>") runs Gemini. dispatched_provider() is that rule, and the
+# switch and the turn's WellnessTurn both read it, so the health-data gate
+# decides on the AI that will read the answer, never on the client's spelling.
+_NAMED_STREAM_PROVIDERS = frozenset({"openai", "anthropic", "xai", "custom", "computer-use"})
+
+
+def dispatched_provider(provider) -> str:
+    """The provider a /chat/stream turn for ``provider`` runs on."""
+    return provider if provider in _NAMED_STREAM_PROVIDERS else "google"
+
+
 @dataclass
 class StreamRequest:
     """A POST /chat/stream body resolved into what the turn runs with."""
@@ -229,9 +242,10 @@ def _resolve_stream_request(body: dict, signed=None):
         model = _config.resolve_default_model(provider, model)
     # M7: the turn's health-data context, request-scoped like the origin device
     # (the context build's and the tool loop's threads copy it). It carries the
-    # turn key the delivered rows and the mask join on (turn.current()).
+    # turn key the delivered rows and the mask join on (turn.current()), and
+    # names the provider that will run, not the one the client spelled.
     wellness_turn.stamp(wellness_access.request_turn(
-        operator=operator, provider=provider, model=model, signed=signed,
+        operator=operator, provider=dispatched_provider(provider), model=model, signed=signed,
         origin_device_id=body.get("origin_device_id"),
         declared=body.get(wellness_access.DECLARED_KEY)))
     return StreamRequest(messages=messages, provider=provider, model=model, operator=operator,
@@ -240,8 +254,8 @@ def _resolve_stream_request(body: dict, signed=None):
 
 
 def _open_provider_stream(req: StreamRequest, context_messages: list):
-    """The provider event stream for one /chat/stream turn."""
-    provider, model, operator = req.provider, req.model, req.operator
+    """The provider event stream for one /chat/stream turn (dispatched_provider's rule)."""
+    provider, model, operator = dispatched_provider(req.provider), req.model, req.operator
     if provider == "openai":
         return stream_openai_with_reasoning(context_messages, model, operator=operator)
     if provider == "anthropic":

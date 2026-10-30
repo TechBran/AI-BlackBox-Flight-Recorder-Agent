@@ -397,10 +397,13 @@ groups only `chat` (and the live-voice groups from M7.5), never `mcp`, `phone`
 or `chat_cu`, and the operator-scoped gate `"x-availability": {"feature":
 "wellness"}`. Whether one is offered, found by the meta-tool or run is decided
 per turn by `Orchestrator/wellness/access.py` (the stamped `WellnessTurn` +
-the gate); the `wellness_metrics` / `wellness_categories` x-sources narrow
-their enums to what that turn may read. Their `notes` carry the WELLNESS RULES,
-which the injector appends once, with the operator's instinct prompt, whenever
-one of them is offered.
+the gate), and only for the provider the turn was stamped for: the
+`ToolContext` must name the provider whose model reads the answer (the
+injection's, or the chat loop's own `LoopProfile.provider`), and one that
+names none gets nothing. The `wellness_metrics` / `wellness_categories`
+x-sources narrow their enums to what that turn may read. Their `notes` carry
+the WELLNESS RULES, which the injector appends once, with the operator's
+instinct prompt, whenever one of them is offered.
 
 ---
 

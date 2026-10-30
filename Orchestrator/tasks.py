@@ -2226,6 +2226,10 @@ def stamp_origin_device(inp) -> Optional[str]:
     return (origin or "").strip() or None
 
 
+# The providers process_chat_task dispatches; any other string fails the task.
+_WORKER_PROVIDERS = ("anthropic", "google", "openai", "xai", "custom")
+
+
 def process_chat_task(task: Task):
     """Process a chat request asynchronously"""
     _tool_log = None  # opened below (W15); read by the failure path
@@ -2314,10 +2318,12 @@ def process_chat_task(task: Task):
         # M7: this turn's WellnessTurn, for the provider that runs it (re-pointed
         # at the resolved model below). An SMS or peer turn is "sms" (never), a
         # cron or MCP turn what it declares, a turn POST /chat verified the
-        # enrolled phone's (wellness_access.task_turn). The worker holds the
-        # turn key in-process for the mask (turn.current().turn_key).
+        # enrolled phone's (wellness_access.task_turn). A provider this worker
+        # cannot run ("local", "claude", ...; it fails below) is stamped as no
+        # provider, which the gate refuses. The worker holds the turn key
+        # in-process for the mask (turn.current().turn_key).
         wellness_turn.stamp(wellness_access.task_turn(
-            inp_dict, active_operator, provider,
+            inp_dict, active_operator, provider if provider in _WORKER_PROVIDERS else None,
             None if provider_switched else (inp.model or None)))
 
         update_task(task.task_id, progress=20)

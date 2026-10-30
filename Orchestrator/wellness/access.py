@@ -6,15 +6,21 @@ wellness entry of an injection, the toolvault meta-tool's search / read / list
 ask the same thing, and so does BlackBoxToolExecutor before it runs a
 wellness tool (the catch-all of every chat loop goes through it). All of them
 reduce to offer(ctx): the ToolContext must name the operator of the turn its
-entry point stamped (turn.py), from the same surface and for the same
-provider, and the gate (gate.check_all) must pass for at least one category.
-No ctx, no stamped turn, a caller of /local/tools/execute (the on-device
-bridge, the MCP gateway) or any mismatch is nothing at all: default-deny.
+entry point stamped (turn.py), from the same surface, and the provider whose
+model will read the answer (the injection's provider, the chat loop's own:
+tool_dispatch.LoopProfile.provider), which must be the stamped one; the gate
+(gate.check_all) must then pass for at least one category. No ctx, no stamped
+turn, no provider, a caller of /local/tools/execute (the on-device bridge,
+the MCP gateway) or any mismatch is nothing at all: default-deny. The entry
+points stamp the provider that will run, never the client's spelling of it
+(routes/chat/stream.dispatched_provider).
 
-Executing. run() re-runs gate.check for each category the call needs (the
-authoritative check), answers through api.* with a Delivery for the current
-turn (so the delivered row carries its turn_key) and the token budget of the
-destination class, and returns ToolResult(result=render(env), data=env).
+Executing. run() re-runs the gate for each category the call needs (the
+authoritative check: gate.check_all, which is gate.check for every category
+with the switch, the enrollment and the destination read once, off the event
+loop on the ToolVault pool), answers through api.* with a Delivery for the
+current turn (so the delivered row carries its turn_key) and the token budget
+of the destination class, and returns ToolResult(result=render(env), data=env).
 Refusals, no data, not enough history and a paused store with nothing in it
 come back ok:false with the user-facing fix.
 
@@ -115,26 +121,39 @@ def best_code(results: Dict[str, gate.GateResult]) -> str:
     return next((c for c in codes if c != "category_off"), codes[0] if codes else "not_allowed")
 
 
-def offer(ctx=None, *, resolver=None) -> Offer:
-    """The categories the turn behind ``ctx`` may read, through the full gate."""
+def matched_turn(ctx) -> Tuple[Optional[turn_mod.WellnessTurn], Optional[str]]:
+    """(the stamped turn ``ctx`` speaks for, None) or (None, the refusal code):
+    the same operator, the same surface when ctx names one, and always the
+    same provider (a ctx that cannot say who reads the answer gets nothing)."""
     if ctx is None or not getattr(ctx, "operator", None):
-        return Offer(code="not_allowed")
+        return None, "not_allowed"
     if getattr(ctx, "caller", None) in DENIED_CALLERS:
-        return Offer(code="surface_not_allowed")
+        return None, "surface_not_allowed"
     t = turn_mod.current()
     if t is None or ctx.operator != t.operator:
-        return Offer(code="not_allowed")
+        return None, "not_allowed"
     surface = getattr(ctx, "surface", None)
     if surface is not None and surface != t.surface:
-        return Offer(code="not_allowed")
+        return None, "not_allowed"
     provider = getattr(ctx, "provider", None)
-    if provider is not None and not _same_provider(provider, t.provider):
-        return Offer(code="not_allowed")
-    results = gate.check_all(operator=ctx.operator, turn=t, resolver=resolver)
+    if provider is None or not _same_provider(provider, t.provider):
+        return None, "not_allowed"
+    return t, None
+
+
+def _offer_from(results: Dict[str, gate.GateResult]) -> Offer:
     allowed = tuple(c for c in catalog.CATEGORIES if results[c].ok)
     if allowed:
         return Offer(allowed, paused=any(results[c].paused for c in allowed))
     return Offer(code=best_code(results))
+
+
+def offer(ctx=None, *, resolver=None) -> Offer:
+    """The categories the turn behind ``ctx`` may read, through the full gate."""
+    t, code = matched_turn(ctx)
+    if t is None:
+        return Offer(code=code)
+    return _offer_from(gate.check_all(operator=ctx.operator, turn=t, resolver=resolver))
 
 
 def offered(entry: dict, ctx, memo: Optional[dict] = None) -> bool:
@@ -450,17 +469,20 @@ def run(tool: str, ctx, wanted: Optional[Sequence[str]], call: Call, *,
     refused for being off are reported too (otherwise only refusals a person
     can act on, a local-only category on a cloud AI, are)."""
     try:
-        if not getattr(ctx, "operator", None):
-            return _result(False, error_envelope(tool, "not_allowed", gate.FIXES["not_allowed"]))
-        decision = offer(ctx)
+        t, code = matched_turn(ctx)
+        if t is None:
+            return _result(False, error_envelope(tool, code, gate.FIXES.get(code)))
+        # The gate once for every category (gate.check per category, with the
+        # switch, the enrollment and the destination read once).
+        every = gate.check_all(operator=ctx.operator, turn=t)
+        decision = _offer_from(every)
         if not decision.ok:
             code = decision.code or "not_allowed"
             return _result(False, error_envelope(tool, code, gate.FIXES.get(code)))
-        t = turn_mod.current()
         cats = list(catalog.CATEGORIES) if wanted is None else list(wanted)
         if not cats:
             return _result(False, error_envelope(tool, "category_off", gate.FIXES["category_off"]))
-        results = {c: gate.check(c, operator=ctx.operator, turn=t) for c in cats}
+        results = {c: every[c] for c in cats}
         allowed = [c for c in cats if results[c].ok]
         if not allowed:
             code = best_code(results)

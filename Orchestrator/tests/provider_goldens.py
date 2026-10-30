@@ -508,7 +508,8 @@ def _executor_class(cap: _Capture):
     from Orchestrator.toolvault.context import ToolResult
 
     class _GoldenExecutor:
-        def __init__(self, operator="system", base_url=None, origin_device_id=None, caller=None):
+        def __init__(self, operator="system", base_url=None, origin_device_id=None, caller=None,
+                     provider=None):
             self.operator = operator
             self.origin_device_id = origin_device_id
 

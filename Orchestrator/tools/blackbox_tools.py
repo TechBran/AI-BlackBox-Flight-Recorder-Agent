@@ -220,7 +220,8 @@ class BlackBoxToolExecutor:
 
     def __init__(self, operator: str = "system", base_url: Optional[str] = None,
                  origin_device_id: Optional[str] = None,
-                 caller: Optional[str] = None):
+                 caller: Optional[str] = None,
+                 provider: Optional[str] = None):
         from Orchestrator.utils.loopback import orchestrator_url  # stdlib-only: the MCP venv has no fastapi
         self.operator = operator
         # Default: this box's own API (ORCHESTRATOR_PORT, never a literal port).
@@ -235,6 +236,11 @@ class BlackBoxToolExecutor:
         # "mcp-gateway" = remote MCP); None everywhere else. Window-bound
         # executors budget their result size on it.
         self.caller = caller
+        # M7: the provider whose model reads the results (ToolContext.provider):
+        # the chat loops pass their own (tool_dispatch.LoopProfile.provider).
+        # A health-data tool runs only when it is the provider the turn was
+        # stamped for; None (every other surface) runs none.
+        self.provider = provider
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> ToolResult:
         """Execute a tool and return the result.
@@ -299,10 +305,14 @@ class BlackBoxToolExecutor:
 
         timeout_s = _timeout_for(spec, ex)
         ctx = ToolContext(operator=self.operator, base_url=self.base_url,
-                          origin_device_id=self.origin_device_id, caller=self.caller)
+                          origin_device_id=self.origin_device_id, caller=self.caller,
+                          provider=self.provider)
         wellness = (spec or {}).get("category") == _WELLNESS_CATEGORY
         if wellness:
-            refused = _wellness_refusal(tool_name, ctx)
+            # Off the event loop, with the turn's contextvars: the gate reads the
+            # switch, the enrollment and the model-server registry, and may
+            # resolve a model server's host name.
+            refused = await asyncio.to_thread(_wellness_refusal, tool_name, ctx)
             if refused is not None:
                 return refused
         started = time.monotonic()

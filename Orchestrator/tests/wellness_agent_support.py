@@ -74,9 +74,20 @@ def stamped(turn: turn_mod.WellnessTurn = None, **kw):
         turn_mod.clear(token)
 
 
-def run_tool(name: str, params: dict, *, operator: str = OPERATOR, caller=None):
+_STAMPED = object()
+
+
+def run_tool(name: str, params: dict, *, operator: str = OPERATOR, caller=None,
+             provider=_STAMPED):
+    """One tool call through BlackBoxToolExecutor, as the chat loop of
+    ``provider`` would hand it over (default: the stamped turn's provider,
+    the loop the turn was stamped for; None: a surface that names none)."""
     from Orchestrator.tools.blackbox_tools import BlackBoxToolExecutor
-    return asyncio.run(BlackBoxToolExecutor(operator=operator, caller=caller).execute(name, params))
+    if provider is _STAMPED:
+        t = turn_mod.current()
+        provider = t.provider if t is not None else None
+    return asyncio.run(BlackBoxToolExecutor(operator=operator, caller=caller,
+                                            provider=provider).execute(name, params))
 
 
 def tool_names(tools) -> set:

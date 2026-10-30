@@ -274,22 +274,25 @@ def _nullcontext():
     return contextlib.nullcontext()
 
 
-@pytest.mark.parametrize("turn_kw, code", [
-    ({}, "surface_not_allowed"),
-    ({"provider": "openai", "signed": SIGNED}, "provider_not_allowed"),
-    ({"declared": "sms"}, "surface_not_allowed"),
-    (None, "not_allowed"),
+@pytest.mark.parametrize("turn_kw, code, loops", [
+    ({}, "surface_not_allowed", ("stream_anthropic", "call_anthropic", "cu_anthropic")),
+    ({"provider": "openai", "signed": SIGNED}, "provider_not_allowed",
+     ("stream_openai", "call_openai")),
+    ({"declared": "sms"}, "surface_not_allowed", ("stream_anthropic", "call_anthropic")),
+    (None, "not_allowed", ("stream_anthropic", "call_openai", "stream_custom")),
 ])
-def test_the_catch_all_refuses_a_denied_tool_with_the_gates_code(sites, turn_kw, code):
+def test_the_catch_all_refuses_a_denied_tool_with_the_gates_code(sites, turn_kw, code, loops):
     """A model that found a wellness tool by searching (or made the name up)
-    gets the gate's code from the dispatcher, and the store is never read."""
+    gets the gate's code from the dispatcher, in the loops of the provider the
+    turn was stamped for, and the store is never read. (Any other loop gets
+    not_allowed: test_wellness_provider_routing.py.)"""
     from Orchestrator.providers import tool_dispatch as td
     from Orchestrator.routes.chat.providers import _tool_context
     st = sites["store"]
     before = st.disclosures_count()
     ctx_manager = stamped(_req(**turn_kw)) if turn_kw is not None else _nullcontext()
     with ctx_manager:
-        for loop in ("stream_anthropic", "call_openai", "stream_custom"):
+        for loop in loops:
             outcome = asyncio.run(td.dispatch_tool("wellness_summary", {"period": "today"},
                                                    _tool_context(OPERATOR, loop)))
             assert code in outcome.result and access.gate.FIXES[code] in outcome.result

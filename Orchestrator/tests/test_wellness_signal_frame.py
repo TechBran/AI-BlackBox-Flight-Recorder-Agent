@@ -11,8 +11,23 @@ import json
 import pytest
 
 from Orchestrator.tests.wellness_agent_support import (  # noqa: F401 - agent_box is a fixture
-    FX, LAN_ALIAS, LAN_MODEL, agent_box, custom_server, sentinel_hits, stamped)
+    FX, LAN_ALIAS, LAN_MODEL, agent_box, custom_server, edit_record, sentinel_hits, stamped)
 from Orchestrator.tests.wellness_support import OPERATOR
+
+# Each stream loop with a turn stamped for its own provider (a health tool
+# runs only in the loop the turn was stamped for): (provider, model, the
+# frame's provider id, its label).
+STREAMS = {"stream_anthropic": ("anthropic", None, "anthropic", "Anthropic"),
+           "stream_gemini": ("google", None, "google", "Google"),
+           "stream_openai": ("openai", None, "openai", "OpenAI"),
+           "stream_xai": ("xai", None, "xai", "xAI"),
+           "stream_custom": ("custom", LAN_MODEL, f"custom:{LAN_ALIAS}", LAN_ALIAS)}
+
+
+def _allow_every_provider():
+    custom_server()
+    edit_record(providers_allowed=["anthropic", "google", "openai", "xai"],
+                google_paid_key_confirmed=True)
 
 
 def _dispatch(loop: str, name="wellness_summary", args=None):
@@ -26,10 +41,11 @@ def _frames(outcome):
     return [e for e in outcome.events if e.get("type") == "wellness_used"]
 
 
-@pytest.mark.parametrize("loop", ["stream_anthropic", "stream_gemini", "stream_openai",
-                                  "stream_xai", "stream_custom"])
+@pytest.mark.parametrize("loop", sorted(STREAMS))
 def test_a_stream_gets_the_frame(agent_box, loop):
-    with stamped(provider="anthropic") as t:
+    provider, model, dest_id, dest_label = STREAMS[loop]
+    _allow_every_provider()
+    with stamped(provider=provider, model=model or "test-model") as t:
         outcome = _dispatch(loop)
     rows = agent_box["store"].deliveries_for_turn(t.turn_key)
     [frame] = _frames(outcome)
@@ -37,7 +53,7 @@ def test_a_stream_gets_the_frame(agent_box, loop):
     assert set(data) == {"ref", "categories", "as_of", "provider", "provider_label"}
     assert data["ref"] == rows[0]["ref"] and data["categories"] == ["sleep", "heart", "activity"]
     assert data["as_of"].startswith(FX.day_of(0))
-    assert (data["provider"], data["provider_label"]) == ("anthropic", "Anthropic")
+    assert (data["provider"], data["provider_label"]) == (dest_id, dest_label)
     assert not sentinel_hits(json.dumps(frame))
     # The frame is not what the model reads back.
     assert "wellness_used" not in outcome.result
@@ -55,8 +71,10 @@ def test_a_local_server_is_named_in_the_frame(agent_box):
 
 
 def test_label_order_follows_the_loop_profile(agent_box):
-    with stamped():
+    _allow_every_provider()
+    with stamped(provider="openai"):
         first = _dispatch("stream_openai").events       # label_first
+    with stamped():
         last = _dispatch("stream_anthropic").events
     assert [e["type"] for e in first] == ["tool_result", "wellness_used"]
     assert [e["type"] for e in last] == ["wellness_used", "tool_result"]

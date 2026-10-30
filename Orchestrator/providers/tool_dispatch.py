@@ -146,36 +146,44 @@ class LoopProfile:
     empty_note: bool = True                   # catch-all: empty result -> "(no output)" note
     label_first: bool = False                 # catch-all: label before the cli/media events
     record_media: bool = False                # non-stream: report the media task it created
+    # The provider whose model reads this loop's tool results. The executor's
+    # ToolContext carries it, so a health-data tool (M7) runs, and the
+    # toolvault meta-tool shows one, only in the loop the turn was stamped for.
+    provider: Optional[str] = None
 
 
 PROFILES: Dict[str, LoopProfile] = {
-    "call_openai": LoopProfile(tag="[OPENAI]", stream=False),
-    "call_xai": LoopProfile(tag="[XAI]", stream=False, record_media=True),
-    "call_custom": LoopProfile(tag="[CUSTOM-CALL]", stream=False, record_media=True),
+    "call_openai": LoopProfile(tag="[OPENAI]", stream=False, provider="openai"),
+    "call_xai": LoopProfile(tag="[XAI]", stream=False, record_media=True, provider="xai"),
+    "call_custom": LoopProfile(tag="[CUSTOM-CALL]", stream=False, record_media=True,
+                               provider="custom"),
     "call_anthropic": LoopProfile(
         tag="[ANTHROPIC]", stream=False, native=True, labelled=_EXECUTOR_LABELLED,
-        native_text="anthropic_call", record_media=True),
+        native_text="anthropic_call", record_media=True, provider="anthropic"),
     "call_gemini": LoopProfile(
         tag="[GEMINI]", stream=False, native=True, labelled=_EXECUTOR_LABELLED,
-        native_text="gemini_call", record_media=True),
+        native_text="gemini_call", record_media=True, provider="google"),
     "stream_openai": LoopProfile(
         tag="[OPENAI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
-        full_call_labels=True, empty_note=False, label_first=True),
+        full_call_labels=True, empty_note=False, label_first=True, provider="openai"),
     "stream_xai": LoopProfile(
         tag="[XAI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS,
-        empty_note=False, label_first=True),
+        empty_note=False, label_first=True, provider="xai"),
     "stream_custom": LoopProfile(
         tag="[CUSTOM-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS,
-        empty_note=False, label_first=True),
+        empty_note=False, label_first=True, provider="custom"),
     "stream_anthropic": LoopProfile(
-        tag="[ANTHROPIC-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
+        tag="[ANTHROPIC-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
+        provider="anthropic"),
     "stream_gemini": LoopProfile(
-        tag="[GEMINI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED),
+        tag="[GEMINI-STREAM]", stream=True, native=True, labelled=_EXECUTOR_LABELLED,
+        provider="google"),
     # The Anthropic Computer Use loop. It always handed the call tools the
     # model's own arguments (send_sms keeps from_number), so they reach the
     # catch-all, as on the xAI and custom streams.
     "cu_anthropic": LoopProfile(
-        tag="[CU-BG]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS),
+        tag="[CU-BG]", stream=True, native=True, labelled=_EXECUTOR_LABELLED - _CALL_TOOLS,
+        provider="anthropic"),
 }
 
 
@@ -253,7 +261,8 @@ async def _blocking(ctx: ToolContext, fn: Callable, *args, **kwargs):
 
 async def _run_executor(ctx: ToolContext, name: str, args):
     from Orchestrator.tools import BlackBoxToolExecutor
-    executor = BlackBoxToolExecutor(operator=ctx.operator, origin_device_id=ctx.origin_device_id)
+    executor = BlackBoxToolExecutor(operator=ctx.operator, origin_device_id=ctx.origin_device_id,
+                                    provider=ctx.profile.provider)
     return await executor.execute(name, args)
 
 
@@ -688,7 +697,9 @@ async def _catch_all(name, args, ctx: ToolContext) -> ToolOutcome:
         ok = bool(getattr(tool_result, "success", False))
         label = {"type": "tool_result",
                  "data": f"{name}: {'health data read' if ok else 'health data not available'}"}
-        frame = _wellness_used_event(tool_result)
+        # Off the event loop with the turn's contextvars: naming the destination
+        # can read the model-server registry and resolve its host name.
+        frame = await asyncio.to_thread(_wellness_used_event, tool_result) if ok else None
         extra = [frame] if frame else []
         return ToolOutcome(result, [label] + extra if profile.label_first else extra + [label])
     print(f"\033[33m[TOOLVAULT-EXEC] {profile.tag} {name} (catch-all): {_as_text(result)[:120]}\033[0m")
