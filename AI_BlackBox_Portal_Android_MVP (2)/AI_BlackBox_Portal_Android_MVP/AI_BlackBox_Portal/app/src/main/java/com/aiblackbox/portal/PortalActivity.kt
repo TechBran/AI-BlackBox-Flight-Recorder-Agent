@@ -49,7 +49,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.aiblackbox.portal.data.api.HttpClients
+import com.aiblackbox.portal.data.store.BlackBoxStore
 import com.aiblackbox.portal.data.store.OperatorResolver
+import com.aiblackbox.portal.data.wellness.WellnessChatSigning
 import com.aiblackbox.portal.overlay.DeviceCapabilities
 import com.aiblackbox.portal.overlay.FoldingFeatureMonitor
 import com.aiblackbox.portal.overlay.OverlayService
@@ -59,8 +61,11 @@ import com.aiblackbox.portal.ui.webview.FileChooserLauncher
 import com.aiblackbox.portal.ui.webview.RendererCrashBudget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.Request
@@ -945,6 +950,46 @@ class PortalActivity : AppCompatActivity() {
         fun log(message: String) {
             if (!bridgeAllowed("log")) return
             Log.d(TAG, "JS LOG: $message")
+        }
+
+        // ============ HEALTH (M7, spec §6.3) ============
+
+        /**
+         * The Portal's "Manage on your phone" (Settings, Health): the native Health screen,
+         * where setup and every widening happen. Back returns to the Portal.
+         * JS: AndroidBridge.wellnessOpenSettings()
+         */
+        @Suppress("unused")
+        @JavascriptInterface
+        fun wellnessOpenSettings() {
+            if (!bridgeAllowed("wellnessOpenSettings")) return
+            runOnUiThread {
+                runCatching { startActivity(Intent(this@PortalActivity, WellnessSettingsActivity::class.java)) }
+            }
+        }
+
+        /**
+         * The X-BlackBox-Origin value for a request the in-app Portal is about to send, so it
+         * is a credentialed surface on the enrolled phone without the browser approval flow.
+         * The Portal hashes the exact UTF-8 body bytes it sends; the key never enters
+         * JavaScript (the value carries only enr, ts, nonce and sig). Null for a path off the
+         * allow-list (POST /chat/stream and /chat; GET /wellness/ref/<ref>, /wellness/status,
+         * /wellness/disclosures), when this phone is no live health source, or when the
+         * request is for another operator: WellnessChatRules.bridgeHeader decides. Never logs.
+         * JS: AndroidBridge.wellnessSign(method, pathWithQuery, bodySha256Hex)
+         */
+        @Suppress("unused")
+        @JavascriptInterface
+        fun wellnessSign(method: String?, pathWithQuery: String?, bodySha256Hex: String?): String? {
+            if (!bridgeAllowed("wellnessSign")) return null
+            if (method == null || pathWithQuery == null || bodySha256Hex == null) return null
+            // The operator this app is set to (the bridge never sees the body; the box grants
+            // the credential only when the body's operator is the enrolled one).
+            val appOperator = runCatching {
+                runBlocking { withTimeoutOrNull(1_000L) { BlackBoxStore(applicationContext).operator.first() } }
+            }.getOrNull()
+            return runCatching { WellnessChatSigning.bridgeHeader(appOperator, method, pathWithQuery, bodySha256Hex) }
+                .getOrNull()
         }
 
         // ============ OVERLAY CONTROL ============

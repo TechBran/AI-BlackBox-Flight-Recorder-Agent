@@ -1,5 +1,6 @@
 package com.aiblackbox.portal.data.api
 
+import com.aiblackbox.portal.data.wellness.WellnessChatSigning
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 
@@ -25,6 +26,10 @@ import okhttp3.OkHttpClient
  * other screens queue every further call to the box, the CU STOP among them. An SSE stream
  * holds its slot for the whole turn (SSEClient reads it inside onResponse), and an open
  * WebSocket holds one of [MAX_REQUESTS] (not of the per-host limit) while it is open.
+ *
+ * (M7) [base] carries the Health chat-signing interceptor ([WellnessChatSigning]), so every
+ * derived client signs the allow-listed chat and health-read requests of the enrolled phone
+ * (spec §6.1 "Chat") and leaves every other request exactly as it was.
  */
 object HttpClients {
     /** Concurrent async calls to one host (the box) across the whole app. */
@@ -38,6 +43,9 @@ object HttpClients {
             maxRequests = MAX_REQUESTS
             maxRequestsPerHost = MAX_REQUESTS_PER_HOST
         }
-        OkHttpClient.Builder().dispatcher(dispatcher).build()
+        OkHttpClient.Builder()
+            .dispatcher(dispatcher)
+            .addInterceptor(WellnessChatSigning.interceptor)
+            .build()
     }
 }

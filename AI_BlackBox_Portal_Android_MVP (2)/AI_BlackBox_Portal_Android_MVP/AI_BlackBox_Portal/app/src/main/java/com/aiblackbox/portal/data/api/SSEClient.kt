@@ -116,7 +116,9 @@ class SSEClient(private val api: BlackBoxApi) {
 
     fun stream(path: String, body: String): Flow<SSEEvent> = callbackFlow {
         Log.d(TAG, "Starting SSE stream POST to $path")
-        Log.d(TAG, "Request body: ${body.take(500)}")
+        // Lengths only (M7): the body is the person's prompt and the stream their reply, which
+        // can quote their health numbers; logcat keeps neither.
+        Log.d(TAG, "Request body: ${body.length} chars")
         val call = api.streamPost(path, body)
         call.enqueue(sseCallback(this::trySend, this::close))
         awaitClose {
@@ -150,7 +152,7 @@ class SSEClient(private val api: BlackBoxApi) {
                     return
                 }
                 val parser = SseFrameParser { event ->
-                    Log.d(TAG, "SSE event: type=${event.event}, data=${event.data.take(120)}")
+                    Log.d(TAG, "SSE event: type=${event.event}, data=${event.data.length} chars")
                     send(event)
                 }
                 BufferedReader(InputStreamReader(body.byteStream())).forEachLine(parser::line)

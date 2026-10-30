@@ -1,0 +1,51 @@
+package com.aiblackbox.portal.data.wellness
+
+import android.content.Context
+
+/**
+ * The process's one chat-signing interceptor (on [com.aiblackbox.portal.data.api.HttpClients.base],
+ * so every client the app derives from it carries it) and the WebView bridge's signer, both
+ * reading this phone's binding and the collector's state through [WellnessGraph].
+ *
+ * Until [install] runs (PortalApplication.onCreate) there is nothing to sign with, and every
+ * request goes out as it always has: the JVM tests that never install it see no change.
+ */
+object WellnessChatSigning {
+
+    @Volatile private var facts: (() -> WellnessSigningInterceptor.Facts?)? = null
+    @Volatile private var skewS: () -> Long = { 0L }
+
+    /** On [com.aiblackbox.portal.data.api.HttpClients.base]: a no-op for every path but the allow-list. */
+    val interceptor: WellnessSigningInterceptor = WellnessSigningInterceptor(
+        facts = { facts?.invoke() },
+        nowSec = { nowSec() },
+    )
+
+    /** Wire this process's binding and state in. Idempotent. */
+    fun install(context: Context) {
+        val app = context.applicationContext
+        facts = { WellnessSigningInterceptor.Facts(WellnessGraph.binding(app).current(), WellnessGraph.state(app).load()) }
+        // The box's clock as the collector last learned it (IngestClient.clockSkewS): a phone whose
+        // clock drifted past the box's 120 s window would otherwise sign every chat turn in vain.
+        skewS = { WellnessGraph.client(app)?.clockSkewS ?: 0L }
+    }
+
+    /** Tests: wire facts without a phone's files (null = not installed, as before [install]). */
+    @androidx.annotation.VisibleForTesting
+    internal fun installForTest(source: (() -> WellnessSigningInterceptor.Facts?)?) {
+        facts = source
+        skewS = { 0L }
+    }
+
+    private fun nowSec(): Long = System.currentTimeMillis() / 1000 + runCatching { skewS() }.getOrDefault(0L)
+
+    /**
+     * `AndroidBridge.wellnessSign` ([WellnessChatRules.bridgeHeader] over this phone's facts):
+     * the header value, or null. [appOperator] is the operator this app is set to.
+     */
+    fun bridgeHeader(appOperator: String?, method: String, pathWithQuery: String, bodySha256Hex: String): String? {
+        val f = runCatching { facts?.invoke() }.getOrNull() ?: return null
+        return WellnessChatRules.bridgeHeader(f.binding, f.state, appOperator, method, pathWithQuery, bodySha256Hex,
+            nowSec(), OriginSigner.newNonce())
+    }
+}

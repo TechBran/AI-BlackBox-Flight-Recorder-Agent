@@ -263,6 +263,15 @@
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.AIBlackBox.NoBar"/>
 
+        <!-- M7 health: Settings, Health on its own, for the WebView Portal's "Manage on your
+             phone" (AndroidBridge.wellnessOpenSettings). Not exported. -->
+        <activity
+            android:name=".WellnessSettingsActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.AIBlackBox.NoBar"/>
+
         <!-- M7 health: the privacy-policy RATIONALE screen Health Connect requires (Android 16
              revokes health permissions from an app without one). Android 13 and lower reach it
              with ACTION_SHOW_PERMISSIONS_RATIONALE; Android 14+ through the alias below. -->

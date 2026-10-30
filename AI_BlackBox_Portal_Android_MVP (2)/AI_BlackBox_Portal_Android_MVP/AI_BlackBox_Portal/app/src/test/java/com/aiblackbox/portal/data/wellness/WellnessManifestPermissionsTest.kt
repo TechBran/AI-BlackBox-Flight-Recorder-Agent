@@ -103,4 +103,12 @@ class WellnessManifestPermissionsTest {
         val perms = elements(doc, "uses-permission").map { it.androidAttr("name") }
         assertTrue("android.permission.FOREGROUND_SERVICE_DATA_SYNC" in perms)
     }
+
+    @Test
+    fun `the Health screen the WebView Portal opens is not reachable from other apps`() {
+        val doc = manifest()
+        val screen = elements(doc, "activity").single { it.androidAttr("name") == ".WellnessSettingsActivity" }
+        assertEquals("false", screen.androidAttr("exported"))
+        assertEquals(0, screen.getElementsByTagName("intent-filter").length)
+    }
 }

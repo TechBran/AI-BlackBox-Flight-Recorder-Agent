@@ -47,11 +47,33 @@ class OriginSigner(
         return "v1;enr=$enrollmentId;ts=$ts;nonce=$nonceHex;sig=$sig"
     }
 
+    /**
+     * The header value for a request whose body this phone never holds, only its digest: the
+     * WebView Portal (AndroidBridge.wellnessSign) hashes the exact UTF-8 bytes it sends and
+     * hands over [bodySha256Hex] (64 lowercase hex), so the body never crosses the bridge and
+     * K never enters JavaScript.
+     */
+    fun headerForDigest(
+        method: String,
+        pathWithQuery: String,
+        bodySha256Hex: String,
+        nowSec: Long,
+        nonceHex: String = newNonce(random),
+    ): String {
+        require(isWellFormedDigest(bodySha256Hex)) { "a body digest is 64 lowercase hex characters" }
+        val sig = hmacHex(key, canonicalForDigest(enrollmentId, nowSec, nonceHex, method, pathWithQuery, bodySha256Hex))
+        return "v1;enr=$enrollmentId;ts=$nowSec;nonce=$nonceHex;sig=$sig"
+    }
+
     companion object {
         const val HEADER = "X-BlackBox-Origin"
         const val KEY_BYTES = 32
         private val EMPTY = ByteArray(0)
         private val NONCE_RE = Regex("[0-9a-f]{32}")
+        private val DIGEST_RE = Regex("[0-9a-f]{64}")
+
+        /** A SHA-256 as the canonical string carries it: 64 lowercase hex characters. */
+        fun isWellFormedDigest(value: String): Boolean = DIGEST_RE.matches(value)
 
         /** 16 random bytes as 32 lowercase hex characters. */
         fun newNonce(random: SecureRandom = SecureRandom()): String {
@@ -67,7 +89,11 @@ class OriginSigner(
             pathWithQuery.substringBefore('#').substringBefore('?')
 
         fun canonical(enr: String, ts: Long, nonce: String, method: String, path: String, body: ByteArray): String =
-            "v1|$enr|$ts|$nonce|${method.uppercase()}|${signedPath(path)}|${sha256Hex(body)}"
+            canonicalForDigest(enr, ts, nonce, method, path, sha256Hex(body))
+
+        /** [canonical] with the body's SHA-256 (hex) already computed. */
+        fun canonicalForDigest(enr: String, ts: Long, nonce: String, method: String, path: String, bodySha256Hex: String): String =
+            "v1|$enr|$ts|$nonce|${method.uppercase()}|${signedPath(path)}|$bodySha256Hex"
 
         fun signature(
             key: ByteArray,
@@ -77,10 +103,12 @@ class OriginSigner(
             method: String,
             path: String,
             body: ByteArray,
-        ): String {
+        ): String = hmacHex(key, canonical(enr, ts, nonce, method, path, body))
+
+        private fun hmacHex(key: ByteArray, canonical: String): String {
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(key, "HmacSHA256"))
-            return hex(mac.doFinal(canonical(enr, ts, nonce, method, path, body).toByteArray(Charsets.UTF_8)))
+            return hex(mac.doFinal(canonical.toByteArray(Charsets.UTF_8)))
         }
 
         fun sha256Hex(bytes: ByteArray): String = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
