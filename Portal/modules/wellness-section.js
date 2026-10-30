@@ -15,20 +15,25 @@
  * drawn, whatever else it carries. The card only ever asks about the operator
  * this Portal is on (getOperator()), never another one (rule W17).
  *
- * Inside the BlackBox Android app (spec §6.3) the WebView's
- * AndroidBridge.wellnessSign(method, pathWithQuery, bodySha256Hex) returns
- * the X-BlackBox-Origin value for one request, signed on the phone with its
- * device key (the key never enters JavaScript), or null. The status read is
- * then signed, and the settings view the box returns to the enrolled phone is
- * shown read-only (pickSignedStatus): what BlackBox may use, where it may go,
- * the trouble cards with their fix, the instinct prompt and the
- * disk-encryption line, and, when opened, "Who saw my health data" from a
- * signed GET /wellness/disclosures. Changing any of it stays on the phone
- * (narrowing from the Portal is M7.3). An unsigned read (no bridge, an older
- * app without wellnessSign, or a null from it) shows the four fields only, and
- * so does a signed read the box refuses (it is read again, once, unsigned).
- * originProof / withOriginProof are the one signing path the chat uses too:
- * a fresh proof per request, over the sha256 of the exact UTF-8 body bytes.
+ * Inside the BlackBox Android app (spec §6.3) the WebView's message channel
+ * window.BlackBoxWellness (WebViewCompat.addWebMessageListener, the paired
+ * box's main frame only) returns the X-BlackBox-Origin value for one request,
+ * signed on the phone with its device key (the key never enters JavaScript),
+ * or null: originProof posts {id, method, path, sha256} and waits for the
+ * {id, value} message with that id. The status read is then signed, and the
+ * settings view the box returns to the enrolled phone is shown read-only
+ * (pickSignedStatus): what BlackBox may use, where it may go, the trouble
+ * cards with their fix, the instinct prompt and the disk-encryption line,
+ * and, when opened, "Who saw my health data" from a signed GET
+ * /wellness/disclosures. Changing any of it stays on the phone (narrowing
+ * from the Portal is M7.3). An unsigned read (no channel, an app that does
+ * not answer within SIGN_TIMEOUT_MS, or a null from it) shows the four
+ * fields only, and so does a signed read the box refuses (it is read again,
+ * once, unsigned). originProof / withOriginProof are the one signing path the
+ * chat and the Timeline use too: a fresh proof per request, over the sha256 of
+ * the exact UTF-8 body bytes. A signed GET names the operator in its query
+ * (withOperatorQuery): the app signs a GET only for the operator this Portal
+ * is on, and only when the request says so.
  *
  * When the operator has not set Health up, the card explains what it needs:
  * an Android phone of their own with the BlackBox app and Health Connect
@@ -79,11 +84,12 @@ const SURFACE_LABELS = {
     cron: 'scheduled', voice: 'voice', on_device: 'on-device AI',
 };
 const FDE_METHODS = { luks: 'LUKS', 'dm-crypt': 'dm-crypt' };
-// What GET /wellness/status answers a proof it cannot verify (enroll.verify_signed_request):
-// 401 bad_signature (an enrollment this box does not know, a stale key, a phone
-// clock off by more than 2 min), 409 owner_changed, 410 revoked / source_moved.
-// The box refuses a bad proof rather than downgrading it, and the phone only
-// learns of it on its next push, so the card reads again unsigned meanwhile.
+// What a signed GET (/wellness/status, /fossil/snapshot/{id}) answers a proof
+// it cannot verify (enroll.verify_signed_request): 401 bad_signature (an
+// enrollment this box does not know, a stale key, a phone clock off by more
+// than 2 min), 409 owner_changed, 410 revoked / source_moved. The box refuses
+// a bad proof rather than downgrading it, and the phone only learns of it on
+// its next push, so the reader asks again unsigned meanwhile.
 const SIGNED_REFUSALS = new Set([401, 409, 410]);
 const TEXT_MAX = 300;
 const INSTINCT_MAX = 2000;      // the box's own cap on the instinct prompt
@@ -286,49 +292,251 @@ export function disclosureLine(row) {
 // Signing (the in-app WebView only)
 // -----------------------------------------------------------------------------
 
-/** The app's request signer (spec §6.3), or null outside the BlackBox Android app. */
+/** The WebView channel the app answers sign requests on (WellnessChatRules.BRIDGE_CHANNEL). */
+export const SIGN_CHANNEL = 'BlackBoxWellness';
+
+/**
+ * How long the app has to answer one sign request. It answers every
+ * well-formed request exactly once and a malformed one never, so a request
+ * that gets no answer in time goes out unsigned.
+ */
+export const SIGN_TIMEOUT_MS = 2000;
+
+// The app reads at most this much of one request (WellnessChatRules
+// MAX_BRIDGE_MESSAGE); a longer one would only time out.
+const SIGN_MESSAGE_MAX = 2048;
+
+/** The surface a signed chat body from the in-app Portal names (Orchestrator/wellness/turn.SURFACE_PORTAL_WEBVIEW). */
+export const PORTAL_WEBVIEW_SURFACE = 'portal_webview';
+
+/**
+ * The app's request signer (spec §6.3): window.BlackBoxWellness, the message
+ * channel the app puts in the paired box's main frame only, or null outside
+ * the BlackBox Android app (a desktop browser, an iframe, an app older than
+ * the channel).
+ */
 export function wellnessSigner() {
-    const bridge = typeof window !== 'undefined' ? window.AndroidBridge : undefined;
-    return bridge && typeof bridge.wellnessSign === 'function' ? bridge : null;
+    const channel = typeof window !== 'undefined' ? window[SIGN_CHANNEL] : undefined;
+    return channel && typeof channel.postMessage === 'function' ? channel : null;
+}
+
+/**
+ * True for a status a signed read gets when the box would not take its proof
+ * (401, 409, 410): the reader asks again, once, unsigned.
+ * @param {*} status - The HTTP status
+ */
+export function isRefusedProof(status) {
+    return SIGNED_REFUSALS.has(status);
+}
+
+/**
+ * `path` naming `operator` once in its query, as the app requires of a GET it
+ * signs (WellnessChatRules.bridgeOperator: exactly that operator, once). A
+ * path that already names an operator, or no operator, is left as it is.
+ * @param {string} path - e.g. "/wellness/disclosures"
+ * @param {string} [operator=getOperator()]
+ * @returns {string} e.g. "/wellness/disclosures?operator=x"
+ */
+export function withOperatorQuery(path, operator = getOperator()) {
+    const p = String(path);
+    if (!operator) return p;
+    const q = p.indexOf('?');
+    if (q >= 0 && new URLSearchParams(p.slice(q + 1)).has('operator')) return p;
+    const sep = q < 0 ? '?' : (p.endsWith('?') || p.endsWith('&') ? '' : '&');
+    return `${p}${sep}operator=${encodeURIComponent(operator)}`;
+}
+
+/**
+ * The UTF-8 bytes fetch sends for a string body (a lone surrogate becomes
+ * U+FFFD, as TextEncoder and fetch encode it).
+ * @param {string} text
+ * @param {?Function} [Encoder] - Injectable; the page's TextEncoder by default
+ * @returns {Uint8Array}
+ */
+export function utf8Bytes(text, Encoder = globalThis.TextEncoder) {
+    const s = String(text ?? '');
+    if (typeof Encoder === 'function') return new Encoder().encode(s);
+    const out = [];
+    for (let i = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff) {
+            c = 0x10000 + ((c - 0xd800) << 10) + (s.charCodeAt(++i) - 0xdc00);
+        } else if (c >= 0xd800 && c <= 0xdfff) {
+            c = 0xfffd;
+        }
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+    return Uint8Array.from(out);
+}
+
+// FIPS 180-4 SHA-256 round constants.
+const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+
+const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+
+/**
+ * Lowercase hex SHA-256, computed by the page itself (FIPS 180-4). The
+ * in-app Portal on a LAN or Tailscale IP is plain http, not a secure context,
+ * so crypto.subtle does not exist there; sha256Hex falls back to this.
+ * @param {string|Uint8Array} input - Text (hashed as its UTF-8 bytes) or bytes
+ * @returns {string}
+ */
+export function sha256HexOf(input) {
+    const bytes = ArrayBuffer.isView(input) ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength) : utf8Bytes(input);
+    const len = bytes.length;
+    const total = Math.ceil((len + 9) / 64) * 64;      // the message, 0x80, zeros, the 64-bit bit length
+    const block = new Uint8Array(total);
+    block.set(bytes);
+    block[len] = 0x80;
+    const view = new DataView(block.buffer);
+    view.setUint32(total - 8, Math.floor(len / 0x20000000));
+    view.setUint32(total - 4, (len * 8) >>> 0);
+    const h = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    const w = new Uint32Array(64);
+    for (let off = 0; off < total; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4);
+        for (let i = 16; i < 64; i++) {
+            const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+            const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+        }
+        let [a, b, c, d, e, f, g, k] = h;
+        for (let i = 0; i < 64; i++) {
+            const t1 = (k + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) >>> 0;
+            const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+            k = g; g = f; f = e; e = (d + t1) >>> 0;
+            d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+        }
+        h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+        h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + k) >>> 0;
+    }
+    const out = new Uint8Array(32);
+    const outView = new DataView(out.buffer);
+    h.forEach((word, i) => outView.setUint32(i * 4, word));
+    return hexOf(out);
 }
 
 /**
  * Lowercase hex SHA-256 of `text`'s UTF-8 bytes (what fetch sends for a string body).
+ * SubtleCrypto when the page has it (a secure context), else the page's own
+ * (sha256HexOf): the same digest either way.
  * @param {string} text - The exact body ('' for none)
  * @param {?SubtleCrypto} [subtle] - Injectable; the page's crypto.subtle by default
- * @returns {Promise<?string>} null when SubtleCrypto is unavailable (not a secure context) or fails
+ * @returns {Promise<string>}
  */
 export async function sha256Hex(text, subtle = globalThis.crypto && globalThis.crypto.subtle) {
-    if (!subtle || typeof subtle.digest !== 'function' || typeof TextEncoder !== 'function') return null;
-    try {
-        const digest = await subtle.digest('SHA-256', new TextEncoder().encode(String(text ?? '')));
-        return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
-    } catch {
-        return null;
+    const bytes = utf8Bytes(text);
+    if (subtle && typeof subtle.digest === 'function') {
+        try {
+            return hexOf(new Uint8Array(await subtle.digest('SHA-256', bytes)));
+        } catch {
+            // a SubtleCrypto that will not digest: the page's own does
+        }
     }
+    return sha256HexOf(bytes);
+}
+
+// Sign requests waiting for the app's answer: id -> settle(value).
+const _waiting = new Map();
+// Channels the reply listener is on (one listener per channel, for every request).
+const _listening = new WeakSet();
+let _signSeq = 0;
+
+/** A fresh request id ([A-Za-z0-9_.:-]{1,64}, what the app echoes). */
+function newSignId() {
+    const random = new Uint8Array(6);
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+        globalThis.crypto.getRandomValues(random);       // available outside a secure context too
+    } else {
+        for (let i = 0; i < random.length; i++) random[i] = Math.floor(Math.random() * 256);
+    }
+    _signSeq += 1;
+    return `w${_signSeq.toString(36)}.${hexOf(random)}`;
+}
+
+/** One `message` event from the app: {id, value} as JSON; anything else is ignored. */
+function onSignReply(event) {
+    let reply = event ? event.data : null;
+    if (typeof reply === 'string') {
+        try {
+            reply = JSON.parse(reply);
+        } catch {
+            return;
+        }
+    }
+    if (!reply || typeof reply !== 'object' || typeof reply.id !== 'string') return;
+    const settle = _waiting.get(reply.id);
+    if (settle) settle(reply.value);
+}
+
+function listenForReplies(channel) {
+    if (_listening.has(channel)) return true;
+    try {
+        if (typeof channel.addEventListener === 'function') {
+            channel.addEventListener('message', onSignReply);
+        } else {
+            const previous = channel.onmessage;
+            channel.onmessage = function onmessage(event) {
+                onSignReply(event);
+                if (typeof previous === 'function') previous.call(this, event);
+            };
+        }
+    } catch {
+        return false;
+    }
+    _listening.add(channel);
+    return true;
 }
 
 /**
  * The X-BlackBox-Origin value for ONE request, signed by the app, or null
- * (no bridge, no SubtleCrypto, the bridge refused or failed). Asked fresh
- * for every request: a proof carries a one-use nonce and is never cached.
+ * (no channel, no answer within the timeout, the app refused, a value that
+ * is no header). Asked fresh for every request: a proof carries a one-use
+ * nonce and is never cached. The app gets the method, the path with its
+ * query and the body's digest, never the body.
  * @param {string} method - HTTP method
  * @param {string} pathWithQuery - e.g. "/wellness/status?operator=x" (the box signs the path)
  * @param {string} [body=''] - The exact body string the request sends
+ * @param {{timeoutMs?: number}} [opts] - timeoutMs: injectable for tests (SIGN_TIMEOUT_MS)
  * @returns {Promise<?string>}
  */
-export async function originProof(method, pathWithQuery, body = '') {
-    const signer = wellnessSigner();
-    if (!signer || typeof body !== 'string') return null;
+export async function originProof(method, pathWithQuery, body = '', { timeoutMs = SIGN_TIMEOUT_MS } = {}) {
+    const channel = wellnessSigner();
+    if (!channel || typeof body !== 'string') return null;
     const digest = await sha256Hex(body);
-    if (!digest) return null;
-    let value = null;
-    try {
-        value = signer.wellnessSign(String(method).toUpperCase(), String(pathWithQuery), digest);
-    } catch {
-        console.warn('[Health] the app could not sign this request; sending it unsigned');
-        return null;
-    }
+    const id = newSignId();
+    const message = JSON.stringify({ id, method: String(method).toUpperCase(), path: String(pathWithQuery), sha256: digest });
+    if (message.length > SIGN_MESSAGE_MAX || !listenForReplies(channel)) return null;
+    const value = await new Promise((resolve) => {
+        let timer = null;
+        const settle = (v) => {
+            if (timer !== null) clearTimeout(timer);
+            _waiting.delete(id);
+            resolve(v);
+        };
+        _waiting.set(id, settle);
+        timer = setTimeout(() => settle(null), timeoutMs);
+        try {
+            channel.postMessage(message);
+        } catch {
+            console.warn('[Health] the app could not sign this request; sending it unsigned');
+            settle(null);
+        }
+    });
     return typeof value === 'string' && PROOF_VALUE.test(value) ? value : null;
 }
 
@@ -339,11 +547,71 @@ export async function originProof(method, pathWithQuery, body = '') {
  * @param {string} method
  * @param {string} pathWithQuery
  * @param {string} [body='']
+ * @param {{timeoutMs?: number}} [opts]
  * @returns {Promise<?Object>}
  */
-export async function withOriginProof(headers, method, pathWithQuery, body = '') {
-    const proof = await originProof(method, pathWithQuery, body);
+export async function withOriginProof(headers, method, pathWithQuery, body = '', opts = {}) {
+    const proof = await originProof(method, pathWithQuery, body, opts);
     return proof ? { ...(headers || {}), [ORIGIN_HEADER]: proof } : headers;
+}
+
+/**
+ * A JSON chat POST (/chat/stream, /chat) as the in-app Portal sends it. When
+ * the app signs it, the body gains "wellness_surface": "portal_webview" (the
+ * box then labels the credentialed turn as the Portal inside the app; a
+ * declaration without a valid proof is ignored) and the proof is over that
+ * exact body. Unsigned (no channel, no answer, a null, a body that is not a
+ * JSON object), the body and headers are exactly the ones given.
+ * @param {string} path - "/chat/stream" or "/chat"
+ * @param {string} body - The JSON body as it would go out unsigned
+ * @param {Object} headers - Its headers
+ * @param {{timeoutMs?: number}} [opts]
+ * @returns {Promise<{headers: Object, body: string, signed: boolean}>}
+ */
+export async function signedChatRequest(path, body, headers, opts = {}) {
+    const unsigned = { headers, body, signed: false };
+    if (!wellnessSigner() || typeof body !== 'string') return unsigned;
+    let labelled;
+    try {
+        const obj = JSON.parse(body);
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return unsigned;
+        labelled = JSON.stringify({ ...obj, wellness_surface: PORTAL_WEBVIEW_SURFACE });
+    } catch {
+        return unsigned;
+    }
+    const proof = await originProof('POST', path, labelled, opts);
+    return proof ? { headers: { ...(headers || {}), [ORIGIN_HEADER]: proof }, body: labelled, signed: true } : unsigned;
+}
+
+// -----------------------------------------------------------------------------
+// Speech (rules W26, W31, W32)
+// -----------------------------------------------------------------------------
+
+/**
+ * What every surface says instead of reading a health reply aloud: the
+ * on-box voice writes the audio under Portal/uploads, every other voice is a
+ * service the health settings never allowed.
+ */
+export const WELLNESS_SPEECH_OFF = "Health replies aren't read aloud: the voice service would get your health data.";
+
+/**
+ * True for the box's refusal of a text that recalls a health result of the
+ * request's operator (POST /tts, /tts/batch, /tts/queue: 403
+ * {"error": "wellness_text"}). Reads a copy of the body, and only of a 403,
+ * so any other answer is left for its caller to read.
+ * @param {?Response} response
+ * @returns {Promise<boolean>}
+ */
+export async function isWellnessTextRefusal(response) {
+    if (!response || response.status !== 403) return false;
+    try {
+        const copy = typeof response.clone === 'function' ? response.clone() : response;
+        const body = await copy.json();
+        const code = body && typeof body === 'object' ? body.error ?? (body.detail && body.detail.error) : null;
+        return code === 'wellness_text';
+    } catch {
+        return false;
+    }
 }
 
 // The phone label of the last status read, for its operator: the chat's
@@ -534,10 +802,12 @@ async function loadDisclosures(details) {
     list.replaceChildren(node('li', 'wellness-muted', 'Loading…'));
     let rows = null;
     let message = 'Not available.';
+    // The app signs a GET only when it names this Portal's operator.
+    const path = withOperatorQuery('/wellness/disclosures', operator);
     try {
-        const proof = await originProof('GET', '/wellness/disclosures');
+        const proof = operator ? await originProof('GET', path) : null;
         if (proof) {
-            const data = await fetchJson('/wellness/disclosures', { cache: 'no-store', headers: { [ORIGIN_HEADER]: proof } });
+            const data = await fetchJson(path, { cache: 'no-store', headers: { [ORIGIN_HEADER]: proof } });
             rows = Array.isArray(data && data.disclosures) ? data.disclosures : [];
         }
     } catch (err) {

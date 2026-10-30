@@ -1,15 +1,18 @@
 // System Menu > Health inside the BlackBox Android app (M7 health design,
 // docs/plans/2026-10-25-samsung-health-integration.md §6.2-§6.3).
 //
-// In the app's WebView, AndroidBridge.wellnessSign(method, pathWithQuery,
-// bodySha256Hex) returns the X-BlackBox-Origin value for one request (the
-// device key never enters JavaScript), or null. The Health card then signs
+// In the app's WebView, the message channel window.BlackBoxWellness answers
+// a sign request ({id, method, path, sha256}) with the X-BlackBox-Origin
+// value for one request (the device key never enters JavaScript), or null
+// (helpers/wellness-channel.mjs; the channel itself is
+// wellness-webview-channel.test.mjs). The Health card then signs
 // GET /wellness/status, so the box answers with the settings view, and shows
 // what it carries: "What BlackBox may use" (categories), "Where it may go"
 // (providers), the trouble cards with their fix, the instinct prompt and the
 // disk-encryption line, read-only (narrowing from the Portal is M7.3), plus
-// the disclosure log from a signed GET /wellness/disclosures. Every string
-// stays text. A null from the bridge, or no bridge at all (a desktop
+// the disclosure log from a signed GET /wellness/disclosures?operator=X (the
+// app signs a GET only when it names the Portal's operator). Every string
+// stays text. A null from the app, or no channel at all (a desktop
 // browser), is an unsigned request and the four-field card of
 // wellness-section.test.mjs, whatever the reply carries. A signed read the
 // box refuses (401, 409, 410: it refuses a proof it cannot verify rather than
@@ -22,6 +25,7 @@ import { createHash, createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { installDom, PORTAL, REPO_ROOT, scriptVectors } from "./helpers/portal-dom.mjs";
+import { fakeChannel, installChannel } from "./helpers/wellness-channel.mjs";
 
 installDom();
 
@@ -118,7 +122,7 @@ const DISCLOSURES = [
       tool: "wellness_series", categories: ["activity"] },
 ];
 
-// The scripted box and the app's bridge. `refuseSigned` ({code, body}) is the
+// The scripted box and the app's channel. `refuseSigned` ({code, body}) is the
 // box's answer to a status read that carries a proof (wellness_routes.wellness_status
 // returns the refusal; an unsigned read gets box.status).
 const box = { status: SIGNED, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200, refuseSigned: null };
@@ -136,22 +140,8 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
 };
 const statusCalls = () => calls.filter((c) => c.url.startsWith("/wellness/status"));
 
-/** A stand-in for the app's AndroidBridge: records each signing call, returns a fresh proof. */
-function fakeBridge({ sign } = {}) {
-    const signed = [];
-    let n = 0;
-    const bridge = {
-        signed,
-        wellnessOpenSettings() {},
-        wellnessSign(method, path, bodySha256Hex) {
-            signed.push({ method, path, hex: bodySha256Hex });
-            if (sign) return sign(method, path, bodySha256Hex);
-            n += 1;
-            return `v1;enr=en_0000abcd;ts=${1800000000 + n};nonce=${String(n).padStart(32, "0")};sig=${"a".repeat(64)}`;
-        },
-    };
-    return bridge;
-}
+/** A stand-in for the app's channel: records each sign request, answers a fresh proof. */
+const fakeBridge = (opts) => fakeChannel(opts);
 
 const menu = () => $("menuModal");
 /** Open the System Menu and wait for the status read it starts (and its rendering). */
@@ -173,12 +163,13 @@ async function setup(t, { status = SIGNED, bridge = fakeBridge(), operator = ME 
     Object.assign(box, { status, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200, refuseSigned: null });
     await closeMenu();
     state.setOperator(operator);
-    if (bridge) window.AndroidBridge = bridge; else delete window.AndroidBridge;
+    installChannel(bridge);
     const timers = manualTimers();
     const ctl = wellness.initWellnessSection({ timers, now: () => NOW });
     t.after(async () => {
         ctl.destroy();
         await closeMenu();
+        installChannel(null);
         delete window.AndroidBridge;
     });
     return { timers, ctl, bridge };
@@ -278,7 +269,7 @@ test("nothing allowed but the network: says so", async (t) => {
     assert.deepEqual(where, ["AI on your network"]);
 });
 
-test("a null from the bridge is an unsigned read: the four-field card only, whatever the reply carries", async (t) => {
+test("a null from the app is an unsigned read: the four-field card only, whatever the reply carries", async (t) => {
     const { bridge } = await setup(t, { bridge: fakeBridge({ sign: () => null }) });
     await openMenu();
     assert.equal(bridge.signed.length, 1);
@@ -295,7 +286,7 @@ for (const [name, sign] of Object.entries({
     "an empty string": () => "",
     undefined: () => undefined,
 })) {
-    test(`a bridge that answers ${name} is unsigned, and the card still renders`, async (t) => {
+    test(`an app that answers ${name} is unsigned, and the card still renders`, async (t) => {
         await setup(t, { bridge: fakeBridge({ sign }) });
         await openMenu();
         assert.equal(statusCalls()[0].headers[HEADER], undefined);
@@ -304,7 +295,7 @@ for (const [name, sign] of Object.entries({
     });
 }
 
-test("a desktop browser (no bridge) sends no header and gets the four-field card", async (t) => {
+test("a desktop browser (no channel) sends no header and gets the four-field card", async (t) => {
     await setup(t, { bridge: null });
     await openMenu();
     assert.deepEqual(statusCalls()[0].headers, {});
@@ -312,10 +303,21 @@ test("a desktop browser (no bridge) sends no header and gets the four-field card
     assert.doesNotMatch(shownText($("wellnessSection")), /What BlackBox may use/);
 });
 
-test("the bridge without wellnessSign (an older app) is a desktop too", async (t) => {
-    await setup(t, { bridge: { wellnessOpenSettings() {} } });
+test("an app without the channel (AndroidBridge only, or the old wellnessSign) is a desktop too", async (t) => {
+    window.AndroidBridge = { wellnessOpenSettings() {}, wellnessSign: () => "v1;enr=en_0000abcd;ts=1;nonce=n;sig=s" };
+    await setup(t, { bridge: null });
     await openMenu();
     assert.deepEqual(statusCalls()[0].headers, {});
+    assert.ok(!signedBlock() || signedBlock().hidden);
+});
+
+test("an app that never answers: the read waits for the channel, then goes unsigned", async (t) => {
+    const { bridge } = await setup(t, { bridge: fakeBridge({ mode: "never" }) });
+    menu().classList.remove("hide");
+    await waitFor(() => statusCalls().length === 1, "the unsigned read after the sign timeout", wellness.SIGN_TIMEOUT_MS + 3000);
+    assert.equal(bridge.posted.length, 1, "it asked once");
+    assert.deepEqual(statusCalls()[0].headers, {});
+    assert.equal($("wellnessStateChip").textContent, "Active");
     assert.ok(!signedBlock() || signedBlock().hidden);
 });
 
@@ -325,7 +327,7 @@ test("a signed request answered with the four fields (another operator's phone) 
     assert.ok(!signedBlock() || signedBlock().hidden);
 });
 
-test("every poll asks the bridge again: a fresh proof per request, never cached", async (t) => {
+test("every poll asks the app again: a fresh proof per request, never cached", async (t) => {
     const { timers, bridge } = await setup(t);
     await openMenu();
     await timers.advance(wellness.WELLNESS_POLL_MS);
@@ -348,7 +350,7 @@ test("an operator switch drops the signed view at once", async (t) => {
     assert.doesNotMatch(signedBlock().textContent, /Anthropic|synced recently/, "the previous operator's settings are gone");
 });
 
-test("Who saw my health data: a signed GET /wellness/disclosures when opened, rows as text", async (t) => {
+test("Who saw my health data: a signed GET /wellness/disclosures?operator= when opened, rows as text", async (t) => {
     const { bridge } = await setup(t, { });
     box.disclosures = [...DISCLOSURES, { time: XSS, surface: XSS, provider: XSS, model: XSS, tool: XSS, categories: [XSS] }];
     await openMenu();
@@ -358,10 +360,11 @@ test("Who saw my health data: a signed GET /wellness/disclosures when opened, ro
     details.open = true;
     details.dispatchEvent(new Event("toggle"));
     await waitFor(() => details.dataset.state === "loaded", "the disclosure log");
-    const disc = calls.filter((c) => c.url === "/wellness/disclosures");
+    const disc = calls.filter((c) => c.url.startsWith("/wellness/disclosures"));
     assert.equal(disc.length, 1);
+    assert.equal(disc[0].url, `/wellness/disclosures?operator=${ME}`, "the app signs a GET that names the Portal's operator");
     assert.ok(disc[0].headers[HEADER]);
-    assert.deepEqual(bridge.signed.at(-1), { method: "GET", path: "/wellness/disclosures", hex: EMPTY_SHA256 });
+    assert.deepEqual(bridge.signed.at(-1), { method: "GET", path: `/wellness/disclosures?operator=${ME}`, hex: EMPTY_SHA256 });
     const rows = [...details.querySelectorAll("li")].map((li) => li.textContent);
     assert.equal(rows.length, 3);
     assert.match(rows[0], /BlackBox app/);
@@ -391,13 +394,14 @@ test("lastSourceLabel: the phone label of the last status read, for that operato
     assert.equal(wellness.lastSourceLabel(PEER), null);
 });
 
-test("sha256Hex: the digest of the exact UTF-8 bytes; null without SubtleCrypto", async () => {
+test("sha256Hex: the digest of the exact UTF-8 bytes, with or without SubtleCrypto", async () => {
     const hex = (s) => createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
     assert.equal(await wellness.sha256Hex(""), EMPTY_SHA256);
     assert.equal(await wellness.sha256Hex("ünïcödé ✓ {\"a\":1}"), hex("ünïcödé ✓ {\"a\":1}"));
     assert.equal(await wellness.sha256Hex("x", undefined), hex("x"), "the default is the page's SubtleCrypto");
-    assert.equal(await wellness.sha256Hex("x", null), null);
-    assert.equal(await wellness.sha256Hex("x", { digest: () => Promise.reject(new Error("nope")) }), null);
+    // Plain http in the WebView has no SubtleCrypto: the page's own digest.
+    assert.equal(await wellness.sha256Hex("x", null), hex("x"));
+    assert.equal(await wellness.sha256Hex("x", { digest: () => Promise.reject(new Error("nope")) }), hex("x"));
 });
 
 test("the Portal's body hash, signed the way the phone signs, reproduces the box's golden vectors", async (t) => {
@@ -408,34 +412,35 @@ test("the Portal's body hash, signed the way the phone signs, reproduces the box
     const vectors = JSON.parse(readFileSync(resolve(REPO_ROOT, "Orchestrator", "tests", "fixtures", "wellness",
         "origin_proof_vectors.json"), "utf8")).filter((v) => v.content_encoding === null);
     assert.ok(vectors.length >= 4);
-    t.after(() => { delete window.AndroidBridge; });
+    t.after(() => installChannel(null));
     for (const v of vectors) {
         const key = Buffer.from(v.k_b64url, "base64url");
-        window.AndroidBridge = {
-            wellnessSign(method, path, hex) {
+        installChannel(fakeChannel({
+            sign(method, path, hex) {
                 const canonical = `v1|${v.enr}|${v.ts}|${v.nonce}|${method}|${path.split("?")[0]}|${hex}`;
                 const sig = createHmac("sha256", key).update(canonical, "utf8").digest("hex");
                 return `v1;enr=${v.enr};ts=${v.ts};nonce=${v.nonce};sig=${sig}`;
             },
-        };
-        const proof = await wellness.originProof(v.method.toLowerCase(), v.path, v.body_utf8);
-        assert.equal(proof, `v1;enr=${v.enr};ts=${v.ts};nonce=${v.nonce};sig=${v.expected_sig}`, `${v.method} ${v.path}`);
+        }));
+        const target = v.request_target ?? v.path;
+        const proof = await wellness.originProof(v.method.toLowerCase(), target, v.body_utf8);
+        assert.equal(proof, `v1;enr=${v.enr};ts=${v.ts};nonce=${v.nonce};sig=${v.expected_sig}`, `${v.method} ${target}`);
     }
 });
 
-test("originProof: the bridge's value, or null for anything that is not a header value", async (t) => {
-    delete window.AndroidBridge;
-    assert.equal(await wellness.originProof("GET", "/wellness/status?operator=x"), null, "no bridge");
+test("originProof: the app's value, or null for anything that is not a header value", async (t) => {
+    installChannel(null);
+    assert.equal(await wellness.originProof("GET", "/wellness/status?operator=x"), null, "no channel");
     const bridge = fakeBridge();
-    window.AndroidBridge = bridge;
-    t.after(() => { delete window.AndroidBridge; });
+    installChannel(bridge);
+    t.after(() => installChannel(null));
     const value = await wellness.originProof("post", "/chat/stream", "{\"a\":\"ü\"}");
     assert.match(value, /^v1;enr=/);
     assert.deepEqual(bridge.signed, [{ method: "POST", path: "/chat/stream",
         hex: createHash("sha256").update(Buffer.from("{\"a\":\"ü\"}", "utf8")).digest("hex") }]);
     assert.deepEqual(await wellness.withOriginProof({ "Content-Type": "application/json" }, "POST", "/chat", "{}"),
         { "Content-Type": "application/json", [HEADER]: `v1;enr=en_0000abcd;ts=1800000002;nonce=${"2".padStart(32, "0")};sig=${"a".repeat(64)}` });
-    window.AndroidBridge = fakeBridge({ sign: () => null });
+    installChannel(fakeBridge({ sign: () => null }));
     const base = { "Content-Type": "application/json" };
     assert.equal(await wellness.withOriginProof(base, "POST", "/chat", "{}"), base, "unsigned: the same headers object");
 });

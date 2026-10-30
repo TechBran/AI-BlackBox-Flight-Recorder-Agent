@@ -15,6 +15,7 @@ import { claimMic, releaseMic } from './mic-arbiter.js';
 import { hasMic, hasNativeDownload, isNativeAndroid, nativeDownloadFile } from './native-bridge.js';
 import { createBubbleAudioPlayer } from './bubble-audio-player.js';
 import { MIC_CONSTRAINTS } from './mic-capture.js';
+import { WELLNESS_SPEECH_OFF, isWellnessTextRefusal } from './wellness-section.js';
 
 /** Dictation's mic-arbiter owner id. */
 const DICTATION_MIC_OWNER = 'dictation';
@@ -297,6 +298,16 @@ function _queueSleep(ms, signal) {
 }
 
 /** Fire-and-forget server-side cancel for a queue task. */
+// M7 (rules W26, W31, W32): the box refuses to voice a text that recalls the
+// operator's health results (POST /tts, /tts/batch, /tts/queue: 403
+// {"error": "wellness_text"}). That answer is final: the speaker says why,
+// and nothing retries it, falls back to another path or voice, or logs it.
+function wellnessSpeechRefused() {
+    const err = new Error(WELLNESS_SPEECH_OFF);
+    err.wellnessText = true;
+    return err;
+}
+
 function cancelTtsQueueTask(taskId) {
     try {
         fetch(`/tts/task/${encodeURIComponent(taskId)}/cancel`,
@@ -331,6 +342,7 @@ async function submitTtsQueueJob(text, voiceConfig, signal = null) {
         console.warn("[TTS QUEUE] POST /tts/queue 404 (older backend) — falling back to /tts/batch");
         return { fallback: true };
     }
+    if (await isWellnessTextRefusal(r)) throw wellnessSpeechRefused();
     if (!r.ok) {
         let detail = "";
         try { detail = (await r.json()).detail || ""; } catch (e) { /* non-JSON */ }
@@ -940,6 +952,10 @@ export async function generateTTSAudioWithVoice(text, voiceConfig) {
             const blob = await r.blob();
             return URL.createObjectURL(blob);
         }
+        if (await isWellnessTextRefusal(r)) {
+            toast(WELLNESS_SPEECH_OFF);
+            return null;
+        }
         console.error(`${provider || "default"} TTS failed:`, r.status, await r.text());
         return null;
     } finally {
@@ -1101,6 +1117,11 @@ export async function speak(text, btn) {
             })
         });
 
+        if (await isWellnessTextRefusal(r)) {
+            // No other voice either: the browser's may be a cloud service too.
+            toast(WELLNESS_SPEECH_OFF);
+            return;
+        }
         if (!r.ok) {
             // Fallback to browser speech synthesis
             const u = new SpeechSynthesisUtterance(text);
@@ -1310,6 +1331,7 @@ export async function speakToBubble(text, bubbleElement, btn) {
             })
         });
 
+        if (await isWellnessTextRefusal(r)) throw wellnessSpeechRefused();
         if (!r.ok) {
             const errorText = await r.text();
             console.error('[TTS] Batch TTS failed:', errorText);
@@ -1334,6 +1356,10 @@ export async function speakToBubble(text, bubbleElement, btn) {
     } catch (e) {
         if (e.name === 'AbortError') {
             console.log('[TTS] Request cancelled');
+            return;
+        }
+        if (e.wellnessText) {
+            toast(WELLNESS_SPEECH_OFF);
             return;
         }
         console.error("[TTS] Speak to bubble error:", e);
@@ -1555,6 +1581,7 @@ export async function speakThinkingContent(btn) {
             })
         });
 
+        if (await isWellnessTextRefusal(r)) throw wellnessSpeechRefused();
         if (!r.ok) throw new Error("TTS generation failed");
 
         const blob = await r.blob();
@@ -1571,6 +1598,12 @@ export async function speakThinkingContent(btn) {
         if (e.name === 'AbortError') {
             console.log('[SpeakThinking] Request cancelled');
             btn.classList.remove('thinking-btn-loading');
+            return;
+        }
+        if (e.wellnessText) {
+            toast(WELLNESS_SPEECH_OFF);
+            btn.classList.remove('thinking-btn-loading');
+            btn.classList.remove('thinking-btn-playing');
             return;
         }
         console.error("Speak thinking error:", e);

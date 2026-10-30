@@ -11,9 +11,14 @@
 //  * The Portal sends /chat/stream the current user turn only (context comes
 //    from the snapshots), so no earlier health bubble, ref or frame ever goes
 //    back to a provider.
-//  * Inside the BlackBox Android app, AndroidBridge.wellnessSign signs
-//    POST /chat/stream and POST /chat over the sha256 of the exact UTF-8
-//    body; null means unsigned; a desktop browser sends what it always did.
+//  * Inside the BlackBox Android app, the message channel window.BlackBoxWellness
+//    signs POST /chat/stream and POST /chat over the sha256 of the exact UTF-8
+//    body, and a signed body names "wellness_surface": "portal_webview"; a
+//    null (or no answer) means unsigned, and an unsigned body is byte-identical
+//    to the old one; a desktop browser sends what it always did.
+//  * With streaming off, POST /chat's result_data carries the turn's
+//    wellness_used / wellness_refs / wellness_ref: the footer, the history
+//    fields and Show numbers are a streamed turn's; without them nothing changes.
 //  * A wellness reply's "response ready" notification and the stream's debug
 //    log carry no reply text (the app posts notifications natively and its
 //    WebView console goes to logcat), nor does the snapshot-id linker's log.
@@ -30,6 +35,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { installDom, loadPurify, loadMarked, scriptVectors, REPO_ROOT } from "./helpers/portal-dom.mjs";
+import { fakeChannel, installChannel } from "./helpers/wellness-channel.mjs";
 
 installDom();
 loadPurify();
@@ -94,18 +100,16 @@ function stubFetch(routes) {
     return calls;
 }
 
-function fakeBridge({ sign } = {}) {
-    const signed = [];
+/** The app's signer channel (helpers/wellness-channel.mjs): a fresh proof per request. */
+function fakeBridge({ sign, mode } = {}) {
     let n = 0;
-    return {
-        signed,
-        wellnessSign(method, path, hex) {
-            signed.push({ method, path, hex });
-            if (sign) return sign(method, path, hex);
+    return fakeChannel({
+        mode,
+        sign: sign || (() => {
             n += 1;
             return `v1;enr=en_0000abcd;ts=${1800000000 + n};nonce=${String(n).padStart(32, "0")};sig=${"c".repeat(64)}`;
-        },
-    };
+        }),
+    });
 }
 
 function reset(t) {
@@ -114,11 +118,18 @@ function reset(t) {
     setHistoryData([]);
     delete window.AndroidBridge;
     delete globalThis.AndroidBridge;
+    installChannel(null);
     t.after(() => {
         delete window.AndroidBridge;
         delete globalThis.AndroidBridge;
+        installChannel(null);
     });
 }
+
+/** The /chat/stream body the Portal sent before M7 wave 3b, for `text`. */
+const legacyStreamBody = (text) => JSON.stringify({
+    messages: [{ role: "user", content: text }], provider: "anthropic", model: "", operator: "wellness-fixture",
+});
 
 async function sendText(text, ms = 40) {
     prompt.value = text;
@@ -269,8 +280,8 @@ test("a masked reply in local history offers Show numbers only inside the app", 
     const masked = [{ role: "assistant", content: "Your sleeping heart rate was [·] bpm.", wellness_ref: REF, wellness_used: USED }];
     setHistoryData(masked);
     renderHistory();
-    assert.equal(document.querySelector("#history .wellness-show-numbers"), null, "no bridge, no button");
-    window.AndroidBridge = fakeBridge();
+    assert.equal(document.querySelector("#history .wellness-show-numbers"), null, "no channel, no button");
+    installChannel(fakeBridge());
     setHistoryData(masked);
     renderHistory();
     assert.ok(document.querySelector("#history .wellness-show-numbers"));
@@ -278,7 +289,7 @@ test("a masked reply in local history offers Show numbers only inside the app", 
 
 test("a save that comes back masked (an artifact turn) keeps the ref and offers Show numbers in the app", async (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     const masked = "Your sleeping heart rate was [·] bpm. [download]";
     stubFetch([["/chat/stream", () => sseResponse(wellnessSse())],
         ["/chat/save", () => json({ minted: true, snap_id: "SNAP-20261029-0001", modified_response: masked })]]);
@@ -293,13 +304,15 @@ test("a save that comes back masked (an artifact turn) keeps the ref and offers 
 
 // ── Signing inside the app ─────────────────────────────────────────────────
 
-test("inside the app /chat/stream carries X-BlackBox-Origin over the exact UTF-8 body", async (t) => {
+test("inside the app /chat/stream carries X-BlackBox-Origin over the exact UTF-8 body, which names the surface", async (t) => {
     reset(t);
     const bridge = fakeBridge();
-    window.AndroidBridge = bridge;
+    installChannel(bridge);
     const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
     await sendText("wie habe ich geschlafen? ünïcödé ✓");
     const stream = streamCall(calls);
+    assert.equal(stream.opts.body, JSON.stringify({ ...JSON.parse(legacyStreamBody("wie habe ich geschlafen? ünïcödé ✓")),
+        wellness_surface: "portal_webview" }), "the old body plus the surface, nothing else");
     assert.equal(bridge.signed.length, 1);
     assert.deepEqual(bridge.signed[0], { method: "POST", path: "/chat/stream", hex: sha256(stream.opts.body) });
     assert.equal(stream.opts.headers[HEADER], `v1;enr=en_0000abcd;ts=1800000001;nonce=${"1".padStart(32, "0")};sig=${"c".repeat(64)}`);
@@ -311,7 +324,7 @@ test("inside the app /chat/stream carries X-BlackBox-Origin over the exact UTF-8
 test("a fresh proof for every turn", async (t) => {
     reset(t);
     const bridge = fakeBridge();
-    window.AndroidBridge = bridge;
+    installChannel(bridge);
     const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
     await sendText("one");
     await sendText("two");
@@ -322,30 +335,47 @@ test("a fresh proof for every turn", async (t) => {
 });
 
 for (const [name, sign] of Object.entries({ "null": () => null, "a throw": () => { throw new Error("no key"); } })) {
-    test(`a bridge answering ${name} sends the turn unsigned, and it still runs`, async (t) => {
+    test(`an app answering ${name} sends the turn unsigned, byte-identical, and it still runs`, async (t) => {
         reset(t);
-        window.AndroidBridge = fakeBridge({ sign });
+        const warn = console.warn;
+        console.warn = () => {};
+        t.after(() => { console.warn = warn; });
+        installChannel(fakeBridge({ sign }));
         const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
         await sendText("how did I sleep?");
         assert.deepEqual(streamCall(calls).opts.headers, { "Content-Type": "application/json" });
+        assert.equal(streamCall(calls).opts.body, legacyStreamBody("how did I sleep?"), "no surface without a proof");
         assert.ok(saveCall(calls), "the turn completed");
     });
 }
 
-test("a desktop browser (no bridge) sends exactly the old request", async (t) => {
+test("an app that never answers: the turn waits for the channel, then goes unsigned and byte-identical", async (t) => {
     reset(t);
+    const bridge = fakeBridge({ mode: "never" });
+    installChannel(bridge);
+    const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
+    const started = Date.now();
+    await sendText("how did I sleep?");
+    assert.ok(Date.now() - started >= 1900, "it waited for the app's answer (2 s)");
+    assert.equal(bridge.posted.length, 1);
+    assert.deepEqual(streamCall(calls).opts.headers, { "Content-Type": "application/json" });
+    assert.equal(streamCall(calls).opts.body, legacyStreamBody("how did I sleep?"));
+    assert.ok(saveCall(calls), "the turn completed");
+});
+
+test("a desktop browser (no channel) sends exactly the old request", async (t) => {
+    reset(t);
+    window.AndroidBridge = { showNotification() {} };   // an app older than the channel is a desktop too
     const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
     await sendText("how did I sleep?");
     assert.deepEqual(streamCall(calls).opts.headers, { "Content-Type": "application/json" });
-    assert.equal(streamCall(calls).opts.body, JSON.stringify({
-        messages: [{ role: "user", content: "how did I sleep?" }], provider: "anthropic", model: "", operator: "wellness-fixture",
-    }));
+    assert.equal(streamCall(calls).opts.body, legacyStreamBody("how did I sleep?"));
 });
 
-test("the standard /chat fallback is signed over its JSON body too", async (t) => {
+test("the standard /chat fallback is signed over its JSON body too, naming the surface", async (t) => {
     reset(t);
     const bridge = fakeBridge();
-    window.AndroidBridge = bridge;
+    installChannel(bridge);
     const calls = stubFetch([
         ["/chat/stream", () => json({ detail: "busy" }, 503)],
         ["/tasks/status", () => json({ status: "completed", result_data: { reply: "Fallback reply." } })],
@@ -357,8 +387,103 @@ test("the standard /chat fallback is signed over its JSON body too", async (t) =
     assert.ok(post, "fell back to /chat");
     assert.equal(bridge.signed.length, 2, "the refused stream and the fallback each asked once");
     assert.deepEqual(bridge.signed[1], { method: "POST", path: "/chat", hex: sha256(post.opts.body) });
+    assert.equal(JSON.parse(post.opts.body).wellness_surface, "portal_webview");
     assert.match(post.opts.headers[HEADER], /^v1;enr=en_0000abcd;ts=1800000002;/);
     assert.ok(document.getElementById("history").textContent.includes("Fallback reply."));
+});
+
+// ── POST /chat (streaming off): the turn's health use rides in result_data ──
+
+function nonStream(t) {
+    chat.setStreamingMode(false);
+    t.after(() => chat.setStreamingMode(true));
+}
+const chatRoutes = (resultData) => [
+    ["/tasks/status", () => json({ status: "completed", result_data: resultData })],
+    ["/chat", () => json({ task_id: "t-1" })],
+    ["/health", () => json({})],
+];
+const MASKED = "Your sleeping heart rate was [·] bpm.";
+
+test("/chat with result_data.wellness_*: the footer, the history fields and Show numbers of a streamed turn", async (t) => {
+    reset(t);
+    nonStream(t);
+    const second = "w-20261029-a1b2";
+    const posted = [];
+    window.AndroidBridge = globalThis.AndroidBridge = { showNotification(title, body) { posted.push({ title, body }); } };
+    installChannel(fakeBridge());
+    const spoken = [];
+    const saved = { enabled: window.autoTTSEnabled, trigger: window.triggerAutoTTS };
+    window.autoTTSEnabled = true;
+    window.triggerAutoTTS = (text) => spoken.push(text);
+    t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
+    const calls = stubFetch(chatRoutes({ reply: MASKED, wellness_used: { ...USED, ref: second }, wellness_refs: [REF, second], wellness_ref: REF }));
+    await sendText("how did I sleep?");
+    assert.equal(calls.filter((c) => c.url === "/chat/stream").length, 0, "streaming is off");
+    const entry = lastAssistant();
+    assert.deepEqual(Object.keys(entry).sort(), ["content", "role", "wellness_ref", "wellness_used"]);
+    assert.equal(entry.content, MASKED);
+    assert.equal(entry.wellness_ref, REF, "the first ref is the message's, as on a streamed turn");
+    assert.deepEqual(entry.wellness_used, { ref: REF, refs: [REF, second], categories: ["sleep", "heart"],
+        as_of: USED.as_of, provider: "anthropic", provider_label: "Anthropic", source_label: null });
+    const bubble = [...document.querySelectorAll("#history .bubble.assistant")].at(-1);
+    const footer = bubble.querySelector(".wellness-footer");
+    assert.ok(footer, "the footer");
+    assert.match(footer.textContent, /^Used your health data · your phone · as of .+ · Anthropic/);
+    assert.ok(footer.querySelector(".wellness-show-numbers"), "inside the app a masked reply offers Show numbers");
+    assert.equal(bubble.dataset.wellness, "1");
+    assert.deepEqual(spoken, [], "never read aloud");
+    assert.deepEqual(posted.filter((p) => p.title === "New Message").map((p) => p.body), ["Your reply is ready."]);
+    // From local history, as a streamed turn is restored.
+    renderHistory();
+    await settle();
+    assert.ok([...document.querySelectorAll("#history .bubble.assistant")].at(-1).querySelector(".wellness-footer"));
+});
+
+test("/chat with refs and no frame: a ref for Show numbers, no footer text", async (t) => {
+    reset(t);
+    nonStream(t);
+    installChannel(fakeBridge());
+    stubFetch(chatRoutes({ reply: MASKED, wellness_refs: [REF], wellness_ref: REF }));
+    await sendText("how did I sleep?");
+    const entry = lastAssistant();
+    assert.deepEqual(Object.keys(entry).sort(), ["content", "role", "wellness_ref"]);
+    const bubble = [...document.querySelectorAll("#history .bubble.assistant")].at(-1);
+    assert.ok(bubble.querySelector(".wellness-show-numbers"));
+    assert.equal(bubble.querySelector(".wellness-footer-text"), null);
+});
+
+test("/chat without the keys: the entry, the bubble and auto-TTS are what they were", async (t) => {
+    reset(t);
+    nonStream(t);
+    const spoken = [];
+    const saved = { enabled: window.autoTTSEnabled, trigger: window.triggerAutoTTS };
+    window.autoTTSEnabled = true;
+    window.triggerAutoTTS = (text) => spoken.push(text);
+    t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
+    const posted = [];
+    window.AndroidBridge = globalThis.AndroidBridge = { showNotification(title, body) { posted.push({ title, body }); } };
+    const calls = stubFetch(chatRoutes({ reply: "Plain reply." }));
+    await sendText("hi");
+    assert.deepEqual(Object.keys(lastAssistant()).sort(), ["content", "role"]);
+    const bubble = [...document.querySelectorAll("#history .bubble.assistant")].at(-1);
+    assert.equal(bubble.querySelector(".wellness-footer"), null);
+    assert.equal(bubble.dataset.wellness, undefined);
+    assert.deepEqual(spoken.map((s) => s.trim()), ["Plain reply."]);
+    assert.deepEqual(posted.filter((p) => p.title === "New Message").map((p) => p.body), ["Plain reply."]);
+    const post = calls.find((c) => c.url === "/chat");
+    assert.equal(post.opts.body, JSON.stringify({ operator: "wellness-fixture", provider: "anthropic", model: "",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }), "an unsigned /chat body is byte-identical");
+    assert.deepEqual(post.opts.headers, { "Content-Type": "application/json" });
+});
+
+test("/chat result_data with junk wellness keys tags nothing", async (t) => {
+    reset(t);
+    nonStream(t);
+    stubFetch(chatRoutes({ reply: "Plain reply.", wellness_used: { ref: XSS }, wellness_refs: [XSS, 7], wellness_ref: "" }));
+    await sendText("hi");
+    assert.deepEqual(Object.keys(lastAssistant()).sort(), ["content", "role"]);
+    assert.equal(document.querySelector("#history .wellness-footer"), null);
 });
 
 // ── Notifications and logs carry no reply text on a wellness turn ──────────
@@ -366,8 +491,8 @@ test("the standard /chat fallback is signed over its JSON body too", async (t) =
 test("a wellness reply's 'response ready' notification has no reply text; an ordinary one keeps its preview", async (t) => {
     reset(t);
     const posted = [];
-    const bridge = { ...fakeBridge(), showNotification(title, body) { posted.push({ title, body }); } };
-    window.AndroidBridge = globalThis.AndroidBridge = bridge;
+    installChannel(fakeBridge());
+    window.AndroidBridge = globalThis.AndroidBridge = { showNotification(title, body) { posted.push({ title, body }); } };
     stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
     await sendText("how did I sleep?");
     const ready = posted.filter((p) => p.title.includes("AI Response Ready"));
@@ -453,7 +578,7 @@ test("auto-TTS never gets a health reply; an ordinary reply still goes to it", a
     window.autoTTSEnabled = true;
     window.triggerAutoTTS = (text) => spoken.push(text);
     t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
-    window.AndroidBridge = fakeBridge();                // the credentialed WebView, where health replies arrive
+    installChannel(fakeBridge());                       // the credentialed WebView, where health replies arrive
     stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
     await sendText("how did I sleep?");
     assert.deepEqual(spoken, [], "the health reply is not handed to auto-TTS");
@@ -529,7 +654,7 @@ test("a /chat reply the box masked live is never read aloud; an ordinary /chat r
     window.autoTTSEnabled = true;
     window.triggerAutoTTS = (text) => spoken.push(text);
     t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     const fallback = (reply) => [
         ["/chat/stream", () => json({ detail: "busy" }, 503)],
         ["/tasks/status", () => json({ status: "completed", result_data: { reply } })],

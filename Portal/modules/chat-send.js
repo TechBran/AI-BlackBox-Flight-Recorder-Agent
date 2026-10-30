@@ -12,8 +12,8 @@ import { parseSseStream } from './sse.js';
 import { getHistoryData, setHistoryData, saveHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml, decorateWellnessBubble, mergeWellnessUsed } from './chat-bubbles.js';
-import { wellnessSigner, withOriginProof, lastSourceLabel } from './wellness-section.js';
+import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml, decorateWellnessBubble, mergeWellnessUsed, wellnessFromReply } from './chat-bubbles.js';
+import { signedChatRequest, lastSourceLabel } from './wellness-section.js';
 import { updateHintsVisibility } from './help-hints.js';
 import { speakToBubble, setLastAssistantText, speakThinkingContent } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
@@ -1645,11 +1645,10 @@ export async function sendStreamingChat(messages, provider, model, operator) {
 
     // Inside the BlackBox Android app the request is signed by the phone over
     // the exact body bytes (spec §6.3), so the box knows the enrolled phone
-    // asked; a fresh proof per turn. Anywhere else (or a null from the app)
-    // the request is exactly what it always was.
-    const streamHeaders = wellnessSigner()
-        ? await withOriginProof({ "Content-Type": "application/json" }, 'POST', '/chat/stream', body)
-        : { "Content-Type": "application/json" };
+    // asked; a fresh proof per turn, and the signed body names the surface
+    // (the Portal in the app, not the native chat). Anywhere else (or a null
+    // or no answer from the app) the request is exactly what it always was.
+    const streamRequest = await signedChatRequest('/chat/stream', body, { "Content-Type": "application/json" });
 
     try {
         armStallWatchdog(); // covers a server that never answers or never sends a first chunk
@@ -1657,8 +1656,8 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         try {
             response = await fetch("/chat/stream", {
                 method: "POST",
-                headers: streamHeaders,
-                body: body,
+                headers: streamRequest.headers,
+                body: streamRequest.body,
                 signal: controller.signal
             });
         } catch (err) {
@@ -2474,10 +2473,11 @@ export async function send() {
         } else {
             headers['Content-Type'] = 'application/json';
             requestBody = JSON.stringify(payload);
-            // Inside the app: signed over the exact body, as /chat/stream is. A
-            // multipart body (attachments) cannot be hashed before the browser
-            // builds it, so that turn goes unsigned.
-            if (wellnessSigner()) headers = await withOriginProof(headers, 'POST', '/chat', requestBody);
+            // Inside the app: signed over the exact body, as /chat/stream is
+            // (and naming the same surface). A multipart body (attachments)
+            // cannot be hashed before the browser builds it, so that turn goes
+            // unsigned.
+            ({ headers, body: requestBody } = await signedChatRequest('/chat', requestBody, headers));
         }
 
         const r = await fetch("/chat", {
@@ -2563,6 +2563,14 @@ export async function send() {
 
         let replyText = normalizeReplyFromAny(reply);
 
+        // A turn a wellness tool fed names its refs in result_data (the box
+        // masked the reply live): the footer and Show numbers, as a streamed
+        // turn gets them from its wellness_used frames. Absent, nothing changes.
+        const wellness = wellnessFromReply(reply);
+        if (wellness && wellness.wellness_used && !wellness.wellness_used.source_label) {
+            wellness.wellness_used.source_label = lastSourceLabel() || null;
+        }
+
         localStorage.setItem("bb_last_response", JSON.stringify({
             response: replyText,
             timestamp: Date.now()
@@ -2587,8 +2595,9 @@ export async function send() {
             console.log('[GEMINI3] Rendered ' + reply.inline_media.length + ' inline media items');
         }
 
-        updateThinkingBubble(thinking, replyText);
-        const previewText = replyText.replace(/<[^>]+>/g, '').substring(0, 100);
+        updateThinkingBubble(thinking, replyText, { wellness });
+        // A health reply's notification says only that it is ready (rule W33).
+        const previewText = wellness ? 'Your reply is ready.' : replyText.replace(/<[^>]+>/g, '').substring(0, 100);
         notifyNewMessage(previewText);
 
         if (!replyText.includes('<img') && !replyText.includes('<video') && !replyText.includes('<audio')) {

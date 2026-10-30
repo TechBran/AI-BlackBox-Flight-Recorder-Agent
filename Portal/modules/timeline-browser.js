@@ -7,6 +7,9 @@
  */
 
 import { $, toast, toastError, escapeHtml, fetchJson } from './core-utils.js';
+import { getOperator } from './state-management.js';
+import { ORIGIN_HEADER, wellnessSigner, originProof, withOperatorQuery, isRefusedProof } from './wellness-section.js';
+import { snapshotNumbersFooter, closeWellnessNumbersIn } from './chat-bubbles.js';
 
 // Re-export applySyntaxHighlighting from markdown-renderer for convenience
 // (many modules import it from timeline-browser due to historical coupling)
@@ -150,6 +153,9 @@ let timelineSearchQuery = '';
 /** Detail requests in flight: only the newest one may fill the popup. */
 let detailRequestSeq = 0;
 
+/** The operator whose signed read the popup shows (null: an unsigned read, or closed). */
+let popupSignedFor = null;
+
 let filterTimer = null;
 
 /** A list row from /api/snapshots/recent or /fossil/hybrid -> a timeline item. */
@@ -178,11 +184,36 @@ async function fetchTimelinePage(operator, before) {
 
 /**
  * Fetch one snapshot's full text. null when the box has no such snapshot.
+ *
+ * Inside the BlackBox Android app the read is signed by the phone (M7: the
+ * path names the Portal's operator, as the app requires of a GET it signs).
+ * The box then gives the owner's enrolled phone a health turn as minted,
+ * masked, with its WELLNESS gauge (so the popup can offer Show numbers);
+ * every other reader gets it hidden, as an unsigned read does. A proof the
+ * box refuses (401, 409, 410) is read again once, unsigned, exactly as a
+ * desktop browser reads, so the popup never shows less than it did.
  * @param {string} snapId - Full or short (SNAP-<n>) snapshot id
- * @returns {Promise<Object|null>} Timeline item with `content`
+ * @returns {Promise<Object|null>} Timeline item with `content` and
+ *   `signedFor` (the operator a signed read was for, else null)
  */
 async function fetchSnapshotDetail(snapId) {
-    const response = await fetch(`/fossil/snapshot/${encodeURIComponent(snapId)}`);
+    const path = `/fossil/snapshot/${encodeURIComponent(snapId)}`;
+    const operator = getOperator();
+    let response = null;
+    let signedFor = null;
+    if (operator && wellnessSigner()) {
+        const signedPath = withOperatorQuery(path, operator);
+        const proof = await originProof('GET', signedPath);
+        if (proof) {
+            response = await fetch(signedPath, { cache: 'no-store', headers: { [ORIGIN_HEADER]: proof } });
+            signedFor = operator;
+            if (isRefusedProof(response.status)) {
+                response = null;
+                signedFor = null;
+            }
+        }
+    }
+    if (!response) response = await fetch(path);
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
@@ -194,6 +225,7 @@ async function fetchSnapshotDetail(snapId) {
         type: meta.type || 'normal',
         preview: '',
         content: data.content || '',
+        signedFor,
     };
 }
 
@@ -383,8 +415,8 @@ function renderTimelineDetail(popupBody, snapshot) {
     const date = new Date(snapshot.timestamp);
     const dateStr = date.toLocaleString();
 
-    // Escape HTML in content
-    const escapedContent = escapeHtml(snapshot.content);
+    // Whatever the popup showed before (its Show numbers panel included) goes.
+    closeWellnessNumbersIn(popupBody);
 
     popupBody.innerHTML = `
         <div class="detail-meta">
@@ -402,9 +434,19 @@ function renderTimelineDetail(popupBody, snapshot) {
             </div>
         </div>
         <div class="detail-content-box">
-            <pre>${escapedContent}</pre>
+            <pre>${escapeHtml(snapshot.content)}</pre>
         </div>
     `;
+
+    // Inside the app, the owner's masked health turn offers its numbers (the
+    // refs its WELLNESS gauge names), under the metadata: the chat's private
+    // panel, never saved, closed when the popup closes.
+    const numbers = snapshotNumbersFooter(snapshot.content);
+    if (numbers) {
+        const meta = popupBody.querySelector('.detail-meta');
+        if (meta) meta.after(numbers);
+        else popupBody.prepend(numbers);
+    }
 
     // Make snapshot IDs in the popup content clickable
     setTimeout(() => makeSnapshotsClickable(popupBody, { skipPreTags: false }), 0);
@@ -436,7 +478,9 @@ export async function showTimelineDetail(snapshot) {
     popup.classList.remove('hide');
 
     const request = ++detailRequestSeq;
+    let shown = snapshot;
     if (snapshot.content === null || snapshot.content === undefined) {
+        closeWellnessNumbersIn(popupBody);
         popupBody.innerHTML = '<div class="timeline-loading">Loading snapshot...</div>';
         let detail = null;
         try {
@@ -450,11 +494,29 @@ export async function showTimelineDetail(snapshot) {
             toastError('Snapshot ' + snapshot.snapId + ' could not be loaded');
             return;
         }
-        snapshot.content = detail.content;
+        // A signed read (the owner's masked turn) is shown, never kept on the
+        // list item: the next open, perhaps for another operator, reads again.
+        if (detail.signedFor) shown = { ...snapshot, content: detail.content, signedFor: detail.signedFor };
+        else snapshot.content = detail.content;
     }
 
-    renderTimelineDetail(popupBody, snapshot);
+    popupSignedFor = shown.signedFor || null;
+    renderTimelineDetail(popupBody, shown);
     console.log('[TIMELINE] Popup displayed');
+}
+
+/**
+ * Close the snapshot popup, and its Show numbers panel with it.
+ * @param {{clear?: boolean}} [opts] - clear: empty it too (an operator switch
+ *   while it shows the previous operator's signed read)
+ */
+function closeSnapshotPopup({ clear = false } = {}) {
+    const popup = $("snapshotPopup");
+    const popupBody = $("snapshotPopupBody");
+    closeWellnessNumbersIn(popupBody);
+    if (popup) popup.classList.add('hide');
+    if (clear && popupBody) popupBody.replaceChildren();
+    popupSignedFor = null;
 }
 
 // =============================================================================
@@ -563,19 +625,21 @@ export function setupTimelineBrowser() {
     const snapshotPopup = $("snapshotPopup");
 
     if (btnCloseSnapshotPopup) {
-        btnCloseSnapshotPopup.addEventListener('click', () => {
-            if (snapshotPopup) snapshotPopup.classList.add('hide');
-        });
+        btnCloseSnapshotPopup.addEventListener('click', () => closeSnapshotPopup());
     }
 
     // Close popup when clicking outside
     if (snapshotPopup) {
         snapshotPopup.addEventListener('click', (e) => {
-            if (e.target === snapshotPopup) {
-                snapshotPopup.classList.add('hide');
-            }
+            if (e.target === snapshotPopup) closeSnapshotPopup();
         });
     }
+
+    // A signed read is its operator's own view: another operator never
+    // inherits it, open or hidden in the page.
+    window.addEventListener('bbx:operator-changed', () => {
+        if (popupSignedFor && popupSignedFor !== getOperator()) closeSnapshotPopup({ clear: true });
+    });
 
     // Back to list button
     if (btnBackToList) {

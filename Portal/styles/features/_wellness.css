@@ -256,3 +256,15 @@
    speak buttons stay, dimmed, and only say why. */
 [data-wellness="1"] .speak-btn,
 [data-wellness="1"] [data-bubble-action="thinking-speak"] { opacity: 0.4; }
+
+/* ── Timeline popup: Show numbers on a turn reloaded from the ledger ─────── */
+/* Under the snapshot's metadata, above its (masked) text; the panel opens
+   between the two and closes with the popup (timeline-browser.js). */
+.wellness-snapshot-footer { margin: 10px 0 0; }
+.snapshot-popup-body .wellness-numbers { margin: 6px 0 10px; }
+/* The popup body is a pre-wrapped monospace log; the footer and panel are prose. */
+.snapshot-popup-body .wellness-footer,
+.snapshot-popup-body .wellness-numbers {
+    white-space: normal;
+    font-family: ui-sans-serif, system-ui, Segoe UI, Arial, Helvetica, sans-serif;
+}

@@ -16,7 +16,8 @@ import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { updateHintsVisibility } from './help-hints.js';
 import { scrollToBottomIfNeeded } from './ui-setup.js';
 import {
-    ORIGIN_HEADER, wellnessSigner, originProof, parseWellnessTime, providerLabel,
+    ORIGIN_HEADER, wellnessSigner, originProof, parseWellnessTime, providerLabel, withOperatorQuery,
+    WELLNESS_SPEECH_OFF,
 } from './wellness-section.js';
 
 // =============================================================================
@@ -417,8 +418,12 @@ export function removeLastAssistantBubble() {
  * Update a thinking bubble with final content
  * @param {HTMLElement} thinkingBubble - The thinking bubble to update
  * @param {string} newContent - New content to display
+ * @param {{wellness?: ?{wellness_ref: string, wellness_used: ?Object}}} [opts] -
+ *   wellness: the turn's health use (wellnessFromReply of a POST /chat
+ *   result): its history entry keeps the ref and the frame, the bubble gets
+ *   its footer (and Show numbers inside the app), and it is never read aloud
  */
-export function updateThinkingBubble(thinkingBubble, newContent) {
+export function updateThinkingBubble(thinkingBubble, newContent, { wellness = null } = {}) {
     if (!thinkingBubble) return;
 
     thinkingBubble.classList.remove("thinking");
@@ -493,10 +498,19 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
 
     addTimestampToBubble(thinkingBubble);
 
+    // A health turn's entry keeps its ref (the history scrub, Show numbers)
+    // and its frame (the footer), as a streamed turn's does.
+    const tagEntry = (entry) => {
+        if (!wellness) return;
+        entry.wellness_ref = wellness.wellness_ref;
+        if (wellness.wellness_used) entry.wellness_used = wellness.wellness_used;
+    };
+
     if (thinkingIndex > -1 && historyData[thinkingIndex]) {
         historyData[thinkingIndex].content = newContentString;
         delete historyData[thinkingIndex].pending;
         delete historyData[thinkingIndex].pendingTimestamp;
+        tagEntry(historyData[thinkingIndex]);
         if (textContentForActions) {
             setLastAssistantText(textContentForActions);
         }
@@ -510,6 +524,7 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
                 historyData[i].content = newContentString;
                 delete historyData[i].pending;
                 delete historyData[i].pendingTimestamp;
+                tagEntry(historyData[i]);
                 if (textContentForActions) {
                     setLastAssistantText(textContentForActions);
                 }
@@ -520,13 +535,16 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
         }
     }
 
-    // A reply the box masked live (POST /chat masks a health turn's reply
-    // and sends no wellness_used frame) is a health reply: never read aloud.
+    // A POST /chat turn a wellness tool fed (its result_data names the refs)
+    // gets the footer a streamed one gets; a reply the box masked live ("[·]")
+    // is a health reply even without them. Neither is ever read aloud.
     const maskedHealth = newContentString.includes(WELLNESS_MASK);
+    if (wellness) decorateWellnessBubble(thinkingBubble, { content: newContentString, ...wellness });
     if (maskedHealth) markWellnessReply(thinkingBubble);
+    const healthReply = maskedHealth || !!wellness;
 
     // Trigger Auto-TTS if enabled
-    if (window.triggerAutoTTS && textContentForActions && !maskedHealth) {
+    if (window.triggerAutoTTS && textContentForActions && !healthReply) {
         window.triggerAutoTTS(textContentForActions, thinkingBubble);
     }
 }
@@ -537,14 +555,17 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
 //
 // A reply a wellness_* tool fed carries the stream's UI-only wellness_used
 // frame ({ref, categories, as_of, provider, provider_label}; chat-send.js
-// keeps it on the history entry with wellness_ref = its first ref). Its
+// keeps it on the history entry with wellness_ref = its first ref). A POST
+// /chat turn carries the same in its result_data (wellnessFromReply). Its
 // bubble gets a footer naming the source, "as of" and who the data was
 // shared with, never a value. A MASKED reply (the ledger's copy, "[·]" where
 // a health value was) with a ref offers "Show numbers" inside the BlackBox
-// Android app only: the app's bridge signs GET /wellness/ref/{ref} (the
+// Android app only: the app signs GET /wellness/ref/{ref}?operator=X (the
 // delivered envelope) and the display strings show in a private in-page
-// panel that is never saved and closes on navigation. Everything here is
-// built with createElement / textContent.
+// panel that is never saved and closes on navigation. A snapshot reloaded
+// from the ledger (the Timeline popup) offers it too, from the refs its
+// WELLNESS gauge names (wellnessGaugeRefs, snapshotNumbersFooter).
+// Everything here is built with createElement / textContent.
 //
 // Such a reply is never read aloud from the Portal: its text (values
 // included) would go to the voice service, a destination the health consent
@@ -687,6 +708,67 @@ export function wellnessRefsOf(entry) {
         .slice(0, WELLNESS_REFS_MAX);
 }
 
+// The box's WELLNESS gauge line (Orchestrator/wellness/redact.py _GAUGE_RE)
+// and a ref in it (api.new_ref: "w-<day>-" and 4, or after collisions 8, hex).
+const GAUGE_LINE = /^WELLNESS: ([^\n]+?) · values not recorded[ \t]*$/m;
+const GAUGE_REF = /^w-\d{8}-(?:[0-9a-f]{4}|[0-9a-f]{8})$/;
+
+/** A snapshot's header GAUGES block ("GAUGES" up to the blank line), or ''. */
+function gaugesBlock(text) {
+    const log = text.indexOf('\nRaw Session Log\n');
+    const head = log < 0 ? text : text.slice(0, log + 1);
+    let start;
+    if (head.startsWith('GAUGES\n')) {
+        start = 'GAUGES\n'.length;
+    } else {
+        const i = head.indexOf('\nGAUGES\n');
+        if (i < 0) return '';
+        start = i + '\nGAUGES\n'.length;
+    }
+    const end = head.indexOf('\n\n', start);
+    return end < 0 ? head.slice(start) : head.slice(start, end + 1);
+}
+
+/**
+ * The refs a minted snapshot's WELLNESS gauge names ("WELLNESS: sleep,heart ·
+ * night of 2026-10-28 · ref w-20261029-7f3a, w-20261029-a1b2 · values not
+ * recorded"), in its order, at most 8. Read from the header's GAUGES block
+ * only, as the box reads it (redact.parse_tag): the session log below it is
+ * anyone's text. A hidden turn's gauge ("WELLNESS: [wellness conversation ·
+ * not shared]") and an untagged snapshot name none.
+ * @param {*} text - The snapshot text (GET /fossil/snapshot/{id} content)
+ * @returns {string[]}
+ */
+export function wellnessGaugeRefs(text) {
+    if (typeof text !== 'string' || !text.includes('WELLNESS: ')) return [];
+    const m = GAUGE_LINE.exec(gaugesBlock(text.replace(/\r\n/g, '\n')));
+    if (!m) return [];
+    let refs = [];
+    for (const part of m[1].split(' · ').slice(1)) {
+        if (part.startsWith('ref ')) refs = part.slice(4).split(',').map((r) => r.trim());
+    }
+    return [...new Set(refs.filter((r) => GAUGE_REF.test(r)))].slice(0, WELLNESS_REFS_MAX);
+}
+
+/**
+ * The health use of a POST /chat turn, from its result_data: wellness_used
+ * (the turn's newest delivery, the frame the stream's wellness_used carries),
+ * wellness_refs (every ref of the turn, oldest first) and wellness_ref (the
+ * first). As for a streamed turn, the FIRST ref is the message's and every
+ * ref is kept for Show numbers. null when the turn used none (the box then
+ * sends none of the keys).
+ * @param {*} data - The task's result_data
+ * @returns {?{wellness_ref: string, wellness_used: ?Object}}
+ */
+export function wellnessFromReply(data) {
+    if (!data || typeof data !== 'object') return null;
+    const frame = normalizeWellnessUsed(data.wellness_used);
+    const refs = [...new Set([data.wellness_ref, ...listOf(data.wellness_refs), ...(frame ? frame.refs : [])]
+        .filter(isWellnessRef))].slice(0, WELLNESS_REFS_MAX);
+    if (!refs.length) return null;
+    return { wellness_ref: refs[0], wellness_used: frame ? { ...frame, ref: refs[0], refs } : null };
+}
+
 function metricLine(m) {
     if (!m || typeof m !== 'object') return '';
     const parts = [`${wellnessText(m.label) || humanize(m.metric)}: ${wellnessText(m.display) || 'not recorded'}`];
@@ -798,12 +880,14 @@ export function refPanel(delivery, opts = {}) {
 }
 
 /**
- * One delivered envelope for the current operator, signed by the app:
+ * One delivered envelope for `operator` (the Portal's), signed by the app:
  * {state: 'ok', delivery} | {state: 'unavailable'} (no proof, 401/403/404, the
  * box's kill switch, a reply for another ref) | {state: 'error'} (network, 5xx).
+ * The path names the operator: the app signs a GET only when it does.
  */
-async function loadWellnessRef(ref) {
-    const path = `/wellness/ref/${encodeURIComponent(ref)}`;
+async function loadWellnessRef(ref, operator) {
+    if (!operator) return { state: 'unavailable' };
+    const path = withOperatorQuery(`/wellness/ref/${encodeURIComponent(ref)}`, operator);
     const proof = await originProof('GET', path);
     if (!proof) return { state: 'unavailable' };
     let res;
@@ -830,6 +914,14 @@ let _numbersClosersBound = false;
 /** Close every open Show numbers panel (navigation, an operator switch, the page hidden). */
 export function closeWellnessNumbers() {
     for (const close of [..._openNumbers]) close();
+}
+
+/** Close the Show numbers panels under `root` (a popup closing, or drawn again). */
+export function closeWellnessNumbersIn(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    for (const footer of root.querySelectorAll('.wellness-footer')) {
+        if (footer._closeNumbers) footer._closeNumbers();
+    }
 }
 
 function bindNumbersClosers() {
@@ -897,7 +989,7 @@ async function toggleNumbers(footer, refs, button) {
 
     const operator = getOperator();
     const results = [];
-    for (const ref of refs) results.push(await loadWellnessRef(ref));
+    for (const ref of refs) results.push(await loadWellnessRef(ref, operator));
     if (!_openNumbers.has(close)) return;      // closed while it loaded
     if (operator !== getOperator()) {
         close();
@@ -906,8 +998,42 @@ async function toggleNumbers(footer, refs, button) {
     renderNumbers(panel, results);
 }
 
-/** What a speak button of a health reply says instead of speaking. */
-export const WELLNESS_SPEECH_OFF = "Health replies aren't read aloud: the voice service would get your health data.";
+/**
+ * The "Show numbers" button of a footer: opens (and closes) the panel of
+ * `refs` under it.
+ */
+function numbersButton(footer, refs) {
+    const button = wellnessNode('button', 'wellness-show-numbers', 'Show numbers');
+    button.type = 'button';
+    button.setAttribute('aria-expanded', 'false');
+    button.addEventListener('click', () => {
+        toggleNumbers(footer, refs, button).catch((err) => console.warn('[Health] Show numbers failed', err && err.name));
+    });
+    return button;
+}
+
+/**
+ * Show numbers for a snapshot opened from the ledger (the Timeline popup, a
+ * SNAP-id link). A signed GET /fossil/snapshot/{id} gives the owner's
+ * enrolled phone the turn as minted, masked, with its WELLNESS gauge; the
+ * refs come from that gauge. A footer with the button, or null: outside the
+ * app, for a turn that is not masked, or one whose gauge names no ref (a
+ * hidden turn's never does). The panel is the chat's: never saved, closed on
+ * navigation, and by the caller when the popup closes (closeWellnessNumbersIn).
+ * @param {*} text - The snapshot text
+ * @returns {?HTMLElement}
+ */
+export function snapshotNumbersFooter(text) {
+    const refs = wellnessGaugeRefs(text);
+    if (!refs.length || !isMaskedHealthTurn(text, refs[0]) || !wellnessSigner()) return null;
+    const footer = wellnessNode('div', 'wellness-footer wellness-snapshot-footer');
+    footer.append(wellnessNode('span', 'wellness-footer-text', 'Used your health data · values not kept in the ledger'),
+        numbersButton(footer, refs));
+    return footer;
+}
+
+/** What a speak button of a health reply says instead of speaking (wellness-section.js). */
+export { WELLNESS_SPEECH_OFF };
 
 // A health reply's bubble (and its streaming reasoning panel) carries this.
 const WELLNESS_MARK = 'wellness';
@@ -977,15 +1103,7 @@ export function decorateWellnessBubble(bubble, entry, opts = {}) {
         const sourceLabel = opts.sourceLabel !== undefined ? opts.sourceLabel : null;
         footer.append(wellnessNode('span', 'wellness-footer-text', formatWellnessFooter(used, { sourceLabel })));
     }
-    if (offerNumbers) {
-        const button = wellnessNode('button', 'wellness-show-numbers', 'Show numbers');
-        button.type = 'button';
-        button.setAttribute('aria-expanded', 'false');
-        button.addEventListener('click', () => {
-            toggleNumbers(footer, refs, button).catch((err) => console.warn('[Health] Show numbers failed', err && err.name));
-        });
-        footer.append(button);
-    }
+    if (offerNumbers) footer.append(numbersButton(footer, refs));
     const anchor = [...bubble.children].find((c) => c.classList.contains('streaming-response-panel'))
         || [...bubble.children].find((c) => c.classList.contains('bubble-text'));
     if (anchor) anchor.after(footer);

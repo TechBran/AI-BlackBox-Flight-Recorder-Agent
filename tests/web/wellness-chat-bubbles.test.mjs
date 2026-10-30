@@ -6,10 +6,13 @@
 //
 //  * The footer names the source, "as of" and who the data was shared with,
 //    never a value, and stays text whatever the strings carry.
-//  * Show numbers exists only inside the BlackBox Android app (its bridge
-//    signs GET /wellness/ref/{ref}); the numbers show in a private in-page
-//    panel that is never saved and closes on navigation; 403/404 are
-//    "Not available".
+//  * Show numbers exists only inside the BlackBox Android app (its message
+//    channel, window.BlackBoxWellness, signs GET /wellness/ref/{ref}?operator=X);
+//    the numbers show in a private in-page panel that is never saved and
+//    closes on navigation; 403/404 are "Not available".
+//  * A POST /chat turn (streaming off) carries its health use in result_data
+//    (wellnessFromReply), and a snapshot reloaded from the ledger names its
+//    refs in its WELLNESS gauge (wellnessGaugeRefs, snapshotNumbersFooter).
 //  * A health reply is never read aloud: its bubble (and its streaming
 //    reasoning panel) is marked, and its speak buttons only say why.
 //
@@ -23,6 +26,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { installDom, loadPurify, loadMarked, scriptVectors, PORTAL, REPO_ROOT } from "./helpers/portal-dom.mjs";
 import { stripComments, innerHtmlAssignments, isSafeRhs, rawHtmlApiUses } from "./helpers/sink-scan.mjs";
+import { fakeChannel, installChannel } from "./helpers/wellness-channel.mjs";
 
 installDom();
 loadPurify();
@@ -34,7 +38,8 @@ const state = await import("../../Portal/modules/state-management.js");
 const {
     formatWellnessFooter, formatAsOf, normalizeWellnessUsed, mergeWellnessUsed, isMaskedHealthTurn,
     wellnessRefsOf, refPanel, decorateWellnessBubble, closeWellnessNumbers, appendBubble, WELLNESS_MASK,
-    WELLNESS_SPEECH_OFF, isWellnessReply,
+    WELLNESS_SPEECH_OFF, isWellnessReply, wellnessGaugeRefs, wellnessFromReply, snapshotNumbersFooter,
+    closeWellnessNumbersIn,
 } = bubbles;
 const { ORIGIN_HEADER, providerLabel } = await import("../../Portal/modules/wellness-section.js");
 
@@ -86,16 +91,10 @@ const SUMMARY = {
     },
 };
 
-function fakeBridge({ sign } = {}) {
-    const signed = [];
-    return {
-        signed,
-        wellnessSign(method, path, hex) {
-            signed.push({ method, path, hex });
-            return sign ? sign(method, path, hex) : `v1;enr=en_0000abcd;ts=1800000000;nonce=${"0".repeat(32)};sig=${"b".repeat(64)}`;
-        },
-    };
-}
+const PROOF = `v1;enr=en_0000abcd;ts=1800000000;nonce=${"0".repeat(32)};sig=${"b".repeat(64)}`;
+/** The app's signer channel (helpers/wellness-channel.mjs), answering PROOF unless told otherwise. */
+const fakeBridge = ({ sign } = {}) => fakeChannel({ sign: sign || (() => PROOF) });
+const REF_PATH = `/wellness/ref/${REF}?operator=wellness-fixture`;
 
 const reply = (body, status = 200) => Promise.resolve({
     ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body),
@@ -120,9 +119,11 @@ function maskedBubble(entry = {}) {
 function reset(t) {
     document.getElementById("history").innerHTML = "";
     delete window.AndroidBridge;
+    installChannel(null);
     t.after(() => {
         closeWellnessNumbers();
         delete window.AndroidBridge;
+        installChannel(null);
         document.getElementById("history").innerHTML = "";
     });
 }
@@ -267,19 +268,20 @@ test("isMaskedHealthTurn: the ledger mask and a ref", () => {
     assert.deepEqual(wellnessRefsOf({ content: "x" }), []);
 });
 
-test("without the app's bridge (a desktop browser) there is no Show numbers", (t) => {
+test("without the app's channel (a desktop browser) there is no Show numbers", (t) => {
     reset(t);
     const { bubble } = maskedBubble();
     assert.ok(bubble.querySelector(".wellness-footer"), "the footer still shows");
     assert.equal(bubble.querySelector(".wellness-show-numbers"), null);
-    window.AndroidBridge = { wellnessOpenSettings() {} };   // an older app: no signer
+    // An older app: AndroidBridge only (its wellnessSign is no signer any more).
+    window.AndroidBridge = { wellnessOpenSettings() {}, wellnessSign: () => PROOF };
     const again = maskedBubble().bubble;
     assert.equal(again.querySelector(".wellness-show-numbers"), null);
 });
 
 test("inside the app a masked reply offers Show numbers; an unmasked one does not", (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     assert.ok(maskedBubble().bubble.querySelector("button.wellness-show-numbers"));
     assert.equal(maskedBubble({ content: "was 47 bpm" }).bubble.querySelector(".wellness-show-numbers"), null);
     const noRef = maskedBubble({ wellness_ref: undefined, wellness_used: undefined }).bubble;
@@ -290,20 +292,22 @@ test("inside the app a masked reply offers Show numbers; an unmasked one does no
     assert.equal(refOnly.querySelector(".wellness-footer-text"), null);
 });
 
-test("Show numbers: a signed GET /wellness/ref/{ref}, then a private panel of display strings", async (t) => {
+test("Show numbers: a signed GET /wellness/ref/{ref}?operator=, then a private panel of display strings", async (t) => {
     reset(t);
     const bridge = fakeBridge();
-    window.AndroidBridge = bridge;
-    const calls = stubFetch((url) => url === `/wellness/ref/${REF}` ? reply(SUMMARY) : reply({}, 404));
+    installChannel(bridge);
+    const calls = stubFetch((url) => url === REF_PATH ? reply(SUMMARY) : reply({}, 404));
     const before = JSON.stringify({ ...localStorage });
     const { bubble, entry } = maskedBubble();
     const copyText = bubble._bbxCopyText;
     const button = bubble.querySelector(".wellness-show-numbers");
     button.click();
     await loaded(bubble);
-    assert.deepEqual(bridge.signed, [{ method: "GET", path: `/wellness/ref/${REF}`, hex: EMPTY_SHA256 }]);
+    // The app signs a GET only when it names the Portal's operator (WellnessChatRules.bridgeOperator).
+    assert.deepEqual(bridge.signed, [{ method: "GET", path: REF_PATH, hex: EMPTY_SHA256 }]);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].opts.headers["X-BlackBox-Origin"], `v1;enr=en_0000abcd;ts=1800000000;nonce=${"0".repeat(32)};sig=${"b".repeat(64)}`);
+    assert.equal(calls[0].url, REF_PATH, "the request is the one that was signed");
+    assert.equal(calls[0].opts.headers["X-BlackBox-Origin"], PROOF);
     const panel = bubble.querySelector(".wellness-numbers");
     assert.ok(panel, "the panel opens");
     const text = panel.textContent;
@@ -326,7 +330,7 @@ test("Show numbers: a signed GET /wellness/ref/{ref}, then a private panel of di
 
 test("Show numbers keeps the envelope's strings as text", async (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     const hostile = structuredClone(SUMMARY);
     hostile.payload.period.label = XSS;
     hostile.payload.metrics[0].display = XSS;
@@ -345,7 +349,7 @@ test("Show numbers keeps the envelope's strings as text", async (t) => {
 for (const status of [403, 404, 401, 503]) {
     test(`Show numbers: ${status} says Not available`, async (t) => {
         reset(t);
-        window.AndroidBridge = fakeBridge();
+        installChannel(fakeBridge());
         stubFetch(() => reply({ error: "SENTINEL-CODE" }, status));
         const { bubble } = maskedBubble();
         bubble.querySelector(".wellness-show-numbers").click();
@@ -358,7 +362,7 @@ for (const status of [403, 404, 401, 503]) {
 
 test("Show numbers: a refused signature (null) never sends the request", async (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge({ sign: () => null });
+    installChannel(fakeBridge({ sign: () => null }));
     const calls = stubFetch(() => reply(SUMMARY));
     const { bubble } = maskedBubble();
     bubble.querySelector(".wellness-show-numbers").click();
@@ -369,7 +373,7 @@ test("Show numbers: a refused signature (null) never sends the request", async (
 
 test("Show numbers: a network failure says so, and a reply for another ref is not shown", async (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     stubFetch(() => Promise.reject(new TypeError("Failed to fetch")));
     const { bubble } = maskedBubble();
     bubble.querySelector(".wellness-show-numbers").click();
@@ -395,7 +399,7 @@ for (const [name, fire] of Object.entries({
 })) {
     test(`the numbers panel closes on ${name}`, async (t) => {
         reset(t);
-        window.AndroidBridge = fakeBridge();
+        installChannel(fakeBridge());
         stubFetch(() => reply(SUMMARY));
         const { bubble } = maskedBubble();
         bubble.querySelector(".wellness-show-numbers").click();
@@ -409,7 +413,7 @@ for (const [name, fire] of Object.entries({
 
 test("a reply that lands after an operator switch is dropped", async (t) => {
     reset(t);
-    window.AndroidBridge = fakeBridge();
+    installChannel(fakeBridge());
     let release;
     stubFetch(() => new Promise((r) => { release = () => r({ ok: true, status: 200, json: () => Promise.resolve(SUMMARY) }); }));
     const { bubble } = maskedBubble();
@@ -480,6 +484,100 @@ test("the Portal's health constants match the box's", () => {
     const labels = Object.fromEntries([...block[1].matchAll(/"([^"]+)": "([^"]+)"/g)].map((m) => [m[1], m[2]]));
     assert.deepEqual(Object.keys(labels).sort(), ["anthropic", "google", "local", "openai", "xai"]);
     for (const [id, label] of Object.entries(labels)) assert.equal(providerLabel(id), label, id);
+});
+
+// ── A POST /chat turn's health use (result_data) ───────────────────────────
+
+test("wellnessFromReply: the first ref is the message's, every ref kept, the frame for the footer", () => {
+    const second = "w-20261029-a1b2";
+    // tasks.process_chat_task: wellness_used = the newest delivery's frame,
+    // wellness_refs = every ref of the turn (oldest first), wellness_ref = the first.
+    const got = wellnessFromReply({ reply: "x", wellness_used: { ...USED, ref: second, categories: ["activity"] },
+        wellness_refs: [REF, second], wellness_ref: REF });
+    assert.equal(got.wellness_ref, REF);
+    assert.deepEqual(got.wellness_used, { ref: REF, refs: [REF, second], categories: ["activity"],
+        as_of: USED.as_of, provider: "anthropic", provider_label: "Anthropic", source_label: null });
+    const one = wellnessFromReply({ wellness_used: USED, wellness_refs: [REF], wellness_ref: REF });
+    assert.deepEqual([one.wellness_ref, one.wellness_used.refs], [REF, [REF]]);
+    const refOnly = wellnessFromReply({ wellness_refs: [REF], wellness_ref: REF });
+    assert.deepEqual(refOnly, { wellness_ref: REF, wellness_used: null }, "refs without a frame: Show numbers, no footer");
+    for (const none of [null, "x", {}, { reply: "Hello." }, { wellness_ref: XSS, wellness_refs: [XSS, 7], wellness_used: { ref: XSS } }]) {
+        assert.equal(wellnessFromReply(none), null, JSON.stringify(none));
+    }
+    const many = wellnessFromReply({ wellness_refs: Array.from({ length: 12 }, (_, i) => `w-20261029-${String(i).padStart(4, "0")}`) });
+    assert.equal(many.wellness_ref, "w-20261029-0000");
+});
+
+// ── A snapshot reloaded from the ledger ────────────────────────────────────
+
+/** A minted snapshot's text (Orchestrator/monitoring.render_snapshot_body_v71), its log as given. */
+function snapshotText({ gauge = "sleep,heart · night of 2026-10-28 · ref w-20261029-7f3a · values not recorded", log } = {}) {
+    return "=== START SNAPSHOT — UTC 2026-10-29T11:20:00Z — SNAP-20261029-0042 (7.1.0) ===\n"
+        + "CROSS-FILE BEACON\n\nGAUGES\nCONTINUITY: auto\nDRIFT: green\nMODEL: m-1\n"
+        + (gauge === null ? "" : `WELLNESS: ${gauge}\n`)
+        + "OPERATOR: wellness-fixture\nMODE: Normal\n\nSNAPSHOT BODY\n\nRaw Session Log\n"
+        + (log || "- [1] 2026-10-29T11:19:00Z operator=wellness-fixture user: how did I sleep?\n"
+            + "- [2] 2026-10-29T11:19:30Z operator=wellness-fixture assistant: Your sleeping heart rate was [·] bpm.")
+        + "\nRelease Notes\n- Hybrid context window in effect; gauges record drift and token usage.\n\n"
+        + "=== END SNAPSHOT — SNAP-20261029-0042 — UTC 2026-10-29T11:20:00Z ===\n";
+}
+
+test("wellnessGaugeRefs: the refs of the header's WELLNESS gauge, as the box reads it", () => {
+    assert.deepEqual(wellnessGaugeRefs(snapshotText()), [REF]);
+    assert.deepEqual(wellnessGaugeRefs(snapshotText({ gauge: "activity,sleep · last night; today · ref w-20261029-7f3a, w-20261029-a1b2c3d4 · values not recorded" })),
+        [REF, "w-20261029-a1b2c3d4"]);
+    assert.deepEqual(wellnessGaugeRefs(snapshotText().replace(/\n/g, "\r\n")), [REF], "CRLF");
+    // A hidden turn (redact.hide), an untagged one, a gauge with no ref.
+    assert.deepEqual(wellnessGaugeRefs(snapshotText({ gauge: "[wellness conversation · not shared]" })), []);
+    assert.deepEqual(wellnessGaugeRefs(snapshotText({ gauge: null })), []);
+    assert.deepEqual(wellnessGaugeRefs(snapshotText({ gauge: "sleep · health data · ref none · values not recorded" })), []);
+    assert.deepEqual(wellnessGaugeRefs(snapshotText({ gauge: `sleep · x · ref ${XSS}, w-1, w-20261029-ZZZZ, ../w · values not recorded` })), []);
+    for (const junk of [null, 7, "", "WELLNESS: ", { text: "x" }]) assert.deepEqual(wellnessGaugeRefs(junk), []);
+});
+
+test("wellnessGaugeRefs: a gauge line typed into the session log is anyone's text, not a gauge", () => {
+    const planted = snapshotText({ gauge: null,
+        log: "- [1] 2026-10-29T11:19:00Z operator=wellness-fixture user: WELLNESS: sleep · x · ref w-20261029-dead · values not recorded\n"
+            + "- [2] 2026-10-29T11:19:30Z operator=wellness-fixture assistant: [·]" });
+    assert.deepEqual(wellnessGaugeRefs(planted), []);
+});
+
+test("snapshotNumbersFooter: inside the app, a masked snapshot whose gauge names refs; nothing otherwise", (t) => {
+    reset(t);
+    assert.equal(snapshotNumbersFooter(snapshotText()), null, "a desktop browser");
+    installChannel(fakeBridge());
+    const footer = snapshotNumbersFooter(snapshotText());
+    assert.ok(footer, "the owner's masked snapshot");
+    assert.ok(footer.querySelector("button.wellness-show-numbers"));
+    assert.ok(!/\d{2} bpm|47/.test(footer.textContent), "no value");
+    const hidden = snapshotText({ gauge: "[wellness conversation · not shared]",
+        log: "- [1] 2026-10-29T11:19:00Z operator=wellness-fixture user: [wellness conversation · not shared]" });
+    assert.equal(snapshotNumbersFooter(hidden), null, "a hidden turn");
+    const unmasked = snapshotText({ log: "- [1] 2026-10-29T11:19:00Z operator=wellness-fixture user: how did I sleep?" });
+    assert.equal(snapshotNumbersFooter(unmasked), null, "no masked value, nothing to show");
+});
+
+test("snapshotNumbersFooter: Show numbers loads every gauge ref, signed, and closes with its root", async (t) => {
+    reset(t);
+    const second = "w-20261029-a1b2";
+    const bridge = fakeBridge();
+    installChannel(bridge);
+    const calls = stubFetch((url) => (url.startsWith("/wellness/ref/") ? reply({ ...SUMMARY, ref: decodeURIComponent(url.split("/")[3].split("?")[0]) })
+        : reply({}, 404)));
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    t.after(() => root.remove());
+    const footer = snapshotNumbersFooter(snapshotText({ gauge: `sleep · last night · ref ${REF}, ${second} · values not recorded` }));
+    root.append(footer);
+    footer.querySelector(".wellness-show-numbers").click();
+    await loaded(root);
+    assert.deepEqual(calls.map((c) => c.url), [REF_PATH, `/wellness/ref/${second}?operator=wellness-fixture`]);
+    assert.ok(calls.every((c) => c.opts.headers["X-BlackBox-Origin"] === PROOF));
+    assert.match(root.querySelector(".wellness-numbers").textContent, /Sleeping heart rate: 47 bpm/);
+    closeWellnessNumbersIn(root);
+    assert.equal(root.querySelector(".wellness-numbers"), null);
+    assert.equal(footer.querySelector(".wellness-show-numbers").textContent, "Show numbers");
+    closeWellnessNumbersIn(null);                       // nothing to close: no throw
 });
 
 test("chat-bubbles.js still never hands server text to the HTML parser", () => {
