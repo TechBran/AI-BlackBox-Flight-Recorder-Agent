@@ -132,6 +132,21 @@ def _number_forms(x: float) -> Set[str]:
     return {v for v in out if v and not _SCI.search(v)}
 
 
+def _km_forms(metres: float) -> Set[str]:
+    """A distance stored in metres as a reply writes it: "3.4", "3.41" (km),
+    with the decimal comma, plus the catalog's own display of it. A usual
+    range's low and high are plain metres in the payload, so without this
+    "(3.4 to 7.3 km)" had only the unit rule to catch it."""
+    if not isinstance(metres, (int, float)) or isinstance(metres, bool) \
+            or not math.isfinite(metres) or abs(metres) < 100:
+        return set()
+    km = float(metres) / 1000.0
+    forms = {f"{km:.1f}", f"{km:.2f}", f"{km:.2f}".rstrip("0").rstrip(".")}
+    forms |= {f.replace(".", ",") for f in forms}
+    forms.add(catalog.display("distance", metres))
+    return {f for f in forms if f and not re.fullmatch(r"\d", f)}
+
+
 def _grouped(n: int) -> Set[str]:
     """n with its thousands grouped by a comma, a space or a point."""
     g = f"{n:,}"
@@ -249,6 +264,8 @@ def value_set(payloads: Iterable) -> frozenset:
             values.update(_number_forms(node))
             if unit == "min":
                 values.update(_duration_forms(node))
+            elif unit == "m":
+                values.update(_km_forms(node))
             return
         if isinstance(node, str):
             if key in _DISPLAY_KEYS or (isinstance(key, str) and key.endswith("_display")):
@@ -303,9 +320,12 @@ novecientos mil millón millon medio media
 """.split())
 _JOINERS = frozenset({"and", "point", "a", "y", "coma"})
 
-# Words are any letters (an accented "cardíaca" is one token, not three).
+# Words are any letters (an accented "cardíaca" is one token, not three). A
+# value already masked ("[·]") is ONE number token: in "3.4 to [·] km" the
+# unit stays within reach of the first number of the range, and the two
+# ends stay one phrase apart, as they were before the value pass ran.
 _TOKEN_RE = re.compile(
-    r"(?P<num>\d+(?:[.,:/]\d+)*(?:k(?![^\W\d_]))?)"
+    r"(?P<num>" + re.escape(MASK) + r"|\d+(?:[.,:/]\d+)*(?:k(?![^\W\d_]))?)"
     r"|(?P<word>(?i:spo2|spo₂|vo2max|vo2)|(?:[^\W\d_]|[°₂])+(?:['’-][^\W\d_]+)*)"
     r"|(?P<pct>%)"
     r"|(?P<other>[^\s\w])")

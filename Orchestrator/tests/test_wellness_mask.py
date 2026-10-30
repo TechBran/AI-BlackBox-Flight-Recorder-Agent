@@ -839,3 +839,35 @@ def test_process_chat_task_binds_no_module_level_name_locally():
              if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
     wellness_locals = {n for n in local if "wellness" in n}
     assert wellness_locals and not (wellness_locals & module_names), wellness_locals
+
+
+def test_a_range_whose_high_end_was_masked_first_still_loses_its_low_end():
+    """Live on dev (SNAP-20261030-9503): "(3.4 to 7.3 km)" minted as
+    "(3.4 to [·] km)". The value pass masked the high end, and the glyph it
+    left behind was three tokens to the unit rule, which pushed "km" out of
+    the low end's reach. The glyph is one number token now."""
+    assert mask.mask_text("above your usual range (3.4 to 7.3 km).", frozenset({"7.3"})) \
+        == "above your usual range ([·] to [·] km)."
+    assert mask.mask_text("range ([·] to 7.3 km)") == "range ([·] to [·] km)"
+    # "and" joins number phrases, so the glyph and the next number mask as
+    # one span (over-masking, the safe direction).
+    assert mask.mask_text("between [·] and 3.4 km, about [·] more") \
+        == "between [·] km, about [·] more"
+    # A glyph is not a unit: it never pulls an unrelated count into reach
+    # (no sleep or workout context word here, "runs" would be one, so "minutes" is plain time).
+    plain = "[·] bpm. The build takes 30 minutes in 3 of 7 attempts."
+    assert mask.mask_text(plain) == plain
+
+
+def test_metre_values_are_in_v_as_kilometres():
+    """A usual range in the payload is plain metres; a reply writes it in km."""
+    v = mask.value_set([{"metric": "distance", "unit": "m", "value": 7612.0,
+                         "display": "7.6 km",
+                         "usual": {"median": 5120.4, "low": 3412.3, "high": 7312.0, "n": 60}}])
+    assert {"3.4", "3.41", "3,4", "7.3", "7.31", "5.1", "5.12", "7.6", "7.61"} <= v
+    # The catalog's own display ("7.3 km") is a member too, unit included.
+    assert mask.mask_values("usual range (3.4 to 7.3 km), median 5,12 km", v) \
+        == "usual range ([·] to [·]), median [·] km"
+    # Small metre values (a 40 m elevation) and other units gain nothing.
+    assert not {f for f in mask.value_set([{"unit": "m", "value": 40.0}]) if "." in f}
+    assert "0.4" not in mask.value_set([{"metric": "steps", "unit": "steps", "value": 412.0}])
