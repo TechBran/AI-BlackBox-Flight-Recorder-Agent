@@ -72,6 +72,7 @@
      "test": "test_p30_the_mcp_tool_list_holds_no_wellness_tool"},
     {"id": "P31", "mode": "live", "cloud": true, "state": "normal",
      "prompt": "Only 20 minutes of deep sleep. Is my brain not recovering?",
+     "live_prompt": "Only 20 minutes of deep sleep on the night of {date:-1} into {date:0}. Is my brain not recovering?",
      "expected": "Single-night stage estimates are noisy; looks at the weekly pattern; no alarm, no diagnosis.",
      "checks": ["wellness_tool", "grounded", "lexicon_clean", "single_night_caveat", "no_tool_error"]}
   ],

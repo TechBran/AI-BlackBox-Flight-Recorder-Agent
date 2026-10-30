@@ -98,6 +98,7 @@ class Box:
         ip = st.get("ip") or sim.DEFAULT_IP
         self.transport = sim.HttpTransport(args.box, ip, timeout=args.timeout)
         self.timeout = args.timeout
+        self.offset_s = 0          # the store's zone, learned from the envelopes' as_of
 
     def status(self) -> dict:
         code, body = self.sim.status(self.transport, self.state, self.operator)
@@ -115,7 +116,12 @@ class Box:
                                        "/wellness/ref/" + urllib.parse.quote(ref, safe=""),
                                        signed=signer)
         payload = body.get("payload") if code == 200 and isinstance(body, dict) else None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        offset = evals.offset_of(payload.get("as_of"))
+        if offset is not None:
+            self.offset_s = offset
+        return payload
 
     def get(self, path: str):
         code, _, body = self.sim._call(self.transport, "GET", path)
@@ -190,17 +196,25 @@ def run_turn(box: Box, t: dict, args, start_status: dict, *, save: bool = False)
     error = out.get("error") or (None if out.get("status") == 200 else f"http {out.get('status')}")
     refs = [f.get("ref") for f in out.get("wellness_used") or [] if isinstance(f, dict)]
     envs = [e for e in (box.envelope(r) for r in refs) if e is not None]
-    if envs:
-        stale = any(bool(e.get("stale")) for e in envs)
-    elif evals.tool_names(out.get("tools")) or "as_of_if_stale" in (t["spec"].get("checks") or ()):
-        stale = stale_of(box.status() or start_status)    # read now: a run can cross 6 h
-    else:
-        stale = stale_of(start_status)
+    wellness = any(evals.is_wellness(n) for n in evals.tool_names(out.get("tools")))
+    now_status = box.status() if wellness or "as_of_if_stale" in (t["spec"].get("checks")
+                                                                  or ()) else start_status
+    if "error" in now_status:
+        now_status = start_status
+    # Read now: a run can cross the staleness threshold.
+    stale = any(bool(e.get("stale")) for e in envs) if envs else stale_of(now_status)
+    # Every wellness answer carries its as_of, also one that never reached
+    # the client (a no_data or refused result sends no wellness_used frame).
+    context = []
+    if wellness:
+        last = ((now_status.get("sync") or {}).get("last_push_at") or now_status.get("last_sync"))
+        as_of = evals.as_of_context(last, box.offset_s)
+        context = [as_of] if as_of else []
     consent = None
     if "consent_unchanged" in (t["spec"].get("checks") or ()):
         consent = consent_view(box.status()) == consent_view(start_status)
-    turn = {"reply": out.get("reply") or "", "tools": out.get("tools") or [], "envelopes": envs,
-            "prompt": t["prompt"], "error": error}
+    turn = {"reply": out.get("reply") or "", "tools": out.get("tools") or [],
+            "envelopes": envs + context, "prompt": t["prompt"], "error": error}
     result = evals.evaluate_turn(t["spec"], turn, stale=stale, consent_unchanged=consent)
     row = {"id": t["id"], "set": t["set"], "seconds": took, "error": error,
            "tool_called": result["tool_called"], "tools": result["tools"],
@@ -447,6 +461,7 @@ def main(argv=None) -> int:
     prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))
     fx = sim._fixture_module()
     sentinels = tuple(fx.SENTINEL_STRINGS)
+    box.offset_s = getattr(fx, "OFFSET_S", 0)        # until an envelope says otherwise
     root = Path(args.box_root).expanduser().resolve()
 
     start_status = box.status()
@@ -494,7 +509,7 @@ def main(argv=None) -> int:
         a2 = {"pass": all(c.get("ok") for c in applied) if applied else None,
               "turns": checks}
 
-    judged_rubric, judged_a6, judge_errors = [], [], 0
+    judged_rubric, judged_a6, judge_errors, rubric_errors = [], [], 0, 0
     if not args.no_judge:
         ps = [r for r in rows if r["set"] == "p" and not r["error"]]
         others = [r for r in rows if r["set"] != "p" and not r["error"] and r["_reply"]]
@@ -512,7 +527,7 @@ def main(argv=None) -> int:
         for r in ps:
             scores = judge_row(box, r, "rubric", args)
             if scores is None:
-                judge_errors += 1
+                rubric_errors += 1
                 r.setdefault("judge", {})["rubric"] = None
                 continue
             final = evals.apply_overrides({d: scores[d] for d in evals.RUBRIC}, r)
@@ -532,7 +547,8 @@ def main(argv=None) -> int:
         a11b = scan.finish(frozenset(v for v in values if v not in typed), sentinels)
 
     totals = evals.totals(rows, judged_rubric=judged_rubric, judged_a6=judged_a6, a2=a2,
-                          a11b=a11b, judge_errors=judge_errors)
+                          a11b=a11b, judge_errors=judge_errors,
+                          rubric_errors=rubric_errors)
     finished = time.time()
     for r in rows + a2_rows:
         if args.include_replies:
