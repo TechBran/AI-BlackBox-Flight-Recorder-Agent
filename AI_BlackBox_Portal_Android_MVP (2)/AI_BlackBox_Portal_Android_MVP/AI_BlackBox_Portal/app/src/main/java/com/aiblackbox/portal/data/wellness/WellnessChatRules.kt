@@ -142,18 +142,82 @@ object WellnessChatRules {
     fun queryOperator(pathWithQuery: String): String? =
         "http://bridge.invalid$pathWithQuery".toHttpUrlOrNull()?.queryParameter("operator")
 
+    // ── the in-app Portal's signer (spec §6.3) ─────────────────────────────────────────────
+
     /**
-     * `AndroidBridge.wellnessSign` (spec §6.3): the X-BlackBox-Origin value for a request the
-     * WebView Portal is about to send, or null. Same decision as the interceptor's; the
-     * Portal hands over only the method, the path with its query and the SHA-256 of the exact
-     * UTF-8 body bytes, never the body. The operator is the query's when it names one, else
-     * [appOperator] (the operator this app is set to: the bridge cannot read the body, and
-     * the box grants the credential only when the body's operator is the enrolled one).
+     * The WebView message channel the in-app Portal signs through:
+     * `WebViewCompat.addWebMessageListener(web, BRIDGE_CHANNEL, setOf(<paired origin>), …)`.
+     * Not an `addJavascriptInterface` method: those are injected into EVERY frame, the
+     * sandboxed app-preview iframe that runs registered apps' code among them, and cannot tell
+     * which frame called. The channel object exists only in frames of the paired origin (an
+     * opaque-origin iframe never matches), and each message says whether it came from the main
+     * frame.
+     *
+     * The contract with the Portal: `window.BlackBoxWellness.postMessage(JSON.stringify({id,
+     * method, path, sha256}))` (`path` with its query, `sha256` the lowercase hex SHA-256 of the
+     * exact UTF-8 body bytes, of the empty string when there is none); the answer arrives as a `message` event on
+     * `window.BlackBoxWellness` whose `data` is `JSON.stringify({id, value})`, `value` the
+     * X-BlackBox-Origin header or null. Every well-formed request gets exactly one answer.
+     */
+    const val BRIDGE_CHANNEL = "BlackBoxWellness"
+
+    /** One sign request from the Portal ([parseBridgeRequest]); [id] is echoed as it came (a string or an integer). */
+    data class BridgeSignRequest(val id: JsonPrimitive, val method: String, val pathWithQuery: String, val bodySha256Hex: String)
+
+    private val BRIDGE_ID_RE = Regex("[A-Za-z0-9_.:-]{1,64}")
+    private const val MAX_BRIDGE_MESSAGE = 2048
+
+    /** [message] as a sign request, or null (not JSON, a field missing or of the wrong type, too long): no answer. */
+    fun parseBridgeRequest(message: String?): BridgeSignRequest? {
+        if (message == null || message.length > MAX_BRIDGE_MESSAGE) return null
+        val obj = runCatching { JSON.parseToJsonElement(message) as? JsonObject }.getOrNull() ?: return null
+        val id = (obj["id"] as? JsonPrimitive)?.takeIf { p ->
+            if (p.isString) BRIDGE_ID_RE.matches(p.content) else p.content.toLongOrNull() != null
+        } ?: return null
+        val method = obj.str("method") ?: return null
+        val path = (obj["path"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+        val sha = obj.str("sha256") ?: return null
+        return BridgeSignRequest(id, method, path, sha)
+    }
+
+    /** The answer to [id]: `{"id": <id>, "value": <header or null>}`. */
+    fun bridgeReply(id: JsonPrimitive, value: String?): String =
+        JsonObject(mapOf("id" to id, "value" to (value?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull))).toString()
+
+    /**
+     * May a sign request be answered with a proof? Only from the paired box's MAIN frame:
+     * [sourceOrigin] is the framework's account of the sender (not the page's word) and must be
+     * [pairedOrigin], [isMainFrame] must hold, and the page the WebView shows must be the
+     * paired box ([pageOrigin]). A same-origin iframe, an opaque-origin one ("null") and a
+     * page that has navigated off the box never are.
+     */
+    fun bridgeCallerAllowed(sourceOrigin: String?, isMainFrame: Boolean, pairedOrigin: String?, pageOrigin: String?): Boolean =
+        isMainFrame && pairedOrigin != null && sameOrigin(sourceOrigin, pairedOrigin) && sameOrigin(pageOrigin, pairedOrigin)
+
+    /**
+     * The operator a Portal request is for. A POST is for [portalOperator], the operator the
+     * in-app Portal is on (the box reads the body's operator, which the bridge never sees; a
+     * query naming another is ignored). A GET must name exactly one `operator` in its query,
+     * and it must be [portalOperator]. Null (no proof) otherwise, and when the Portal's
+     * operator is unknown.
+     */
+    fun bridgeOperator(method: String, pathWithQuery: String, portalOperator: String?): String? {
+        val portal = portalOperator?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (method.trim().uppercase(Locale.ROOT) != "GET") return portal
+        val named = "http://bridge.invalid$pathWithQuery".toHttpUrlOrNull()?.queryParameterValues("operator") ?: return null
+        return named.singleOrNull()?.trim()?.takeIf { it == portal }
+    }
+
+    /**
+     * The X-BlackBox-Origin value for a request the in-app Portal is about to send, or null.
+     * Same decision as the interceptor's, for the operator [bridgeOperator] names; the Portal
+     * hands over only the method, the path with its query and the SHA-256 of the exact UTF-8
+     * body bytes, never the body. The caller has checked [bridgeCallerAllowed].
      */
     fun bridgeHeader(
         binding: WellnessBindingRecord?,
         state: WellnessSyncState?,
-        appOperator: String?,
+        portalOperator: String?,
         method: String,
         pathWithQuery: String,
         bodySha256Hex: String,
@@ -165,7 +229,7 @@ object WellnessChatRules {
         if (!OriginSigner.isWellFormedDigest(digest)) return null
         if (!pathWithQuery.startsWith("/") || pathWithQuery.length > MAX_BRIDGE_PATH) return null
         val path = OriginSigner.signedPath(pathWithQuery)
-        val operator = queryOperator(pathWithQuery) ?: appOperator
+        val operator = bridgeOperator(m, pathWithQuery, portalOperator) ?: return null
         val decision = signingDecision(binding, state, operator, m, path) as? SigningDecision.Sign ?: return null
         return runCatching {
             OriginSigner(decision.enrollmentId, decision.key).headerForDigest(m, path, digest, nowSec, nonceHex)

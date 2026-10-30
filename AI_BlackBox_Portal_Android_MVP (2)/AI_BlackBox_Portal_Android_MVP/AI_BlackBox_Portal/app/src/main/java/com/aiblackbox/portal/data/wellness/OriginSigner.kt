@@ -49,7 +49,7 @@ class OriginSigner(
 
     /**
      * The header value for a request whose body this phone never holds, only its digest: the
-     * WebView Portal (AndroidBridge.wellnessSign) hashes the exact UTF-8 bytes it sends and
+     * WebView Portal (the BlackBoxWellness channel) hashes the exact UTF-8 bytes it sends and
      * hands over [bodySha256Hex] (64 lowercase hex), so the body never crosses the bridge and
      * K never enters JavaScript.
      */

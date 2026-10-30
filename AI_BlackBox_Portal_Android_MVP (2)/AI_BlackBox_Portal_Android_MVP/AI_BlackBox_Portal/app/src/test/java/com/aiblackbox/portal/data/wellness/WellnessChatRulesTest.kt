@@ -119,7 +119,7 @@ class WellnessChatRulesTest {
         assertNull(WellnessChatRules.queryOperator("/chat/stream"))
     }
 
-    // ── the WebView bridge ─────────────────────────────────────────────────────────────────
+    // ── the in-app Portal's signer ─────────────────────────────────────────────────────────
 
     private val emptySha = OriginSigner.sha256Hex(ByteArray(0))
     private val nonce = "bf56b981bc41ebc0428ab719d684df76"
@@ -128,10 +128,10 @@ class WellnessChatRulesTest {
         method: String = "POST",
         path: String = "/chat/stream",
         sha: String = OriginSigner.sha256Hex("""{"operator":"wellness-fixture"}""".toByteArray()),
-        appOperator: String? = op,
+        portalOperator: String? = op,
         b: WellnessBindingRecord? = binding,
         st: WellnessSyncState? = state(),
-    ) = WellnessChatRules.bridgeHeader(b, st, appOperator, method, path, sha, 1_793_000_000L, nonce)
+    ) = WellnessChatRules.bridgeHeader(b, st, portalOperator, method, path, sha, 1_793_000_000L, nonce)
 
     @Test
     fun `the bridge signs an allow-listed request over the body digest it is given`() {
@@ -167,16 +167,19 @@ class WellnessChatRulesTest {
         assertNull(bridge(path = "/chat/stream" + "x".repeat(600)))
         assertNull(bridge(sha = "not-a-digest"))
         assertNull(bridge(sha = emptySha.dropLast(1)))
-        assertNull(bridge(appOperator = "someone-else"))
-        assertNull(bridge(appOperator = null))
+        assertNull(bridge(portalOperator = "someone-else"))
+        assertNull(bridge(portalOperator = null))
         assertNull(bridge(b = null))
         assertNull(bridge(st = state(WellnessRules.EnrollmentState.REVOKED)))
-        // the query names the operator for a read; it must be the enrolled one
+        // the query names the operator for a read; it must be the enrolled one AND the Portal's
         assertNull(bridge(method = "GET", path = "/wellness/status?operator=someone-else", sha = emptySha))
-        assertNotNull(bridge(method = "GET", path = "/wellness/status?operator=wellness-fixture", sha = emptySha,
-            appOperator = "someone-else"))
+        assertNull(bridge(method = "GET", path = "/wellness/status?operator=wellness-fixture", sha = emptySha,
+            portalOperator = "someone-else"))
+        assertNull(bridge(method = "GET", path = "/wellness/disclosures", sha = emptySha))
+        // a POST is for the Portal's operator, whatever its query says
+        assertNull(bridge(path = "/chat/stream?operator=wellness-fixture", portalOperator = "someone-else"))
         // an upper-case digest is the same digest
-        assertNotNull(bridge(method = "GET", path = "/wellness/disclosures", sha = emptySha.uppercase()))
+        assertNotNull(bridge(method = "GET", path = "/wellness/disclosures?operator=wellness-fixture", sha = emptySha.uppercase()))
     }
 
     // ── the turn's frames ──────────────────────────────────────────────────────────────────

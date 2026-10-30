@@ -44,12 +44,14 @@ object WellnessChatSigning {
     private fun nowSec(): Long = System.currentTimeMillis() / 1000 + runCatching { skewS() }.getOrDefault(0L)
 
     /**
-     * `AndroidBridge.wellnessSign` ([WellnessChatRules.bridgeHeader] over this phone's facts):
-     * the header value, or null. [appOperator] is the operator this app is set to.
+     * The in-app Portal's signer ([WellnessChatRules.BRIDGE_CHANNEL]; [WellnessChatRules.bridgeHeader]
+     * over this phone's facts): the header value, or null. [portalOperator] is the operator the
+     * in-app Portal is on. The caller has checked the message came from the paired box's main
+     * frame ([WellnessChatRules.bridgeCallerAllowed]).
      */
-    fun bridgeHeader(appOperator: String?, method: String, pathWithQuery: String, bodySha256Hex: String): String? {
+    fun bridgeHeader(portalOperator: String?, method: String, pathWithQuery: String, bodySha256Hex: String): String? {
         val f = runCatching { facts?.invoke() }.getOrNull() ?: return null
-        return WellnessChatRules.bridgeHeader(f.binding, f.state, appOperator, method, pathWithQuery, bodySha256Hex,
+        return WellnessChatRules.bridgeHeader(f.binding, f.state, portalOperator, method, pathWithQuery, bodySha256Hex,
             nowSec(), OriginSigner.newNonce())
     }
 }
