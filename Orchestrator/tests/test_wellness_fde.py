@@ -97,6 +97,51 @@ def test_an_unencrypted_mapping_is_not_encrypted(box):
     assert box.status()["root_encrypted"] is False
 
 
+def _over_partition(box):
+    disk = box.block("nvme0n1", "259:0", parent=box.sys / "devices" / "pci0000:00")
+    return box.block("nvme0n1p2", "259:2", parent=disk, partition=True)
+
+
+@pytest.mark.parametrize("uuid", ["CRYPT-VERITY-0123456789abcdef-root",
+                                  "CRYPT-INTEGRITY-root",
+                                  "CRYPT-SUBDEV-0a1b2c3d-root_dif"])
+def test_a_checking_mapping_is_not_encryption(box, uuid):
+    """cryptsetup names dm-verity and dm-integrity mappings CRYPT-* too, and
+    neither encrypts."""
+    box.block("dm-0", "253:0", uuid=uuid, slaves=[_over_partition(box)])
+    box.devs["/"] = os.makedev(253, 0)
+    assert box.status() == {"root_encrypted": False, "method": None, "store_encrypted": False}
+
+
+def test_luks_with_integrity_under_it_is_luks(box):
+    sub = box.block("dm-0", "253:0", uuid="CRYPT-SUBDEV-0a1b2c3d-root_dif",
+                    slaves=[_over_partition(box)])
+    box.block("dm-1", "253:1", uuid="CRYPT-LUKS2-0a1b2c3d-root", slaves=[sub])
+    box.devs["/"] = os.makedev(253, 1)
+    assert box.status()["method"] == "luks"
+
+
+def test_verity_over_luks_is_encrypted(box):
+    crypt = box.block("dm-0", "253:0", uuid="CRYPT-LUKS2-0a1b2c3d-data",
+                      slaves=[_over_partition(box)])
+    box.block("dm-1", "253:1", uuid="CRYPT-VERITY-feedface-root", slaves=[crypt])
+    box.devs["/"] = os.makedev(253, 1)
+    assert box.status()["root_encrypted"] is True and box.status()["method"] == "luks"
+
+
+@pytest.mark.parametrize("uuid", ["CRYPT-TCRYPT-vault", "CRYPT-BITLK-0a1b-win"])
+def test_other_cryptsetup_formats_are_dm_crypt(box, uuid):
+    box.block("dm-0", "253:0", uuid=uuid, slaves=[_over_partition(box)])
+    box.devs["/"] = os.makedev(253, 0)
+    assert box.status()["root_encrypted"] is True and box.status()["method"] == "dm-crypt"
+
+
+def test_a_cryptsetup_type_it_does_not_know_is_unknown(box):
+    box.block("dm-0", "253:0", uuid="CRYPT-NEWTHING-0a1b-root", slaves=[_over_partition(box)])
+    box.devs["/"] = os.makedev(253, 0)
+    assert box.status() == {"root_encrypted": None, "method": None, "store_encrypted": None}
+
+
 def test_btrfs_reads_its_device_from_mounts(box):
     """btrfs reports an anonymous device number; the mounts line names the
     real one (spaces in mount points come escaped as \\040)."""
@@ -196,8 +241,11 @@ def test_disclosure_times_use_the_offset_of_their_day(tmp_path, monkeypatch):
 
 
 def test_the_privacy_policy_points_at_the_status():
+    """It promises only what ships: the box reports the answer in its health
+    status (no Portal or Android card shows it yet)."""
     from Orchestrator.routes.wellness_routes import POLICY_PATH
     text = POLICY_PATH.read_text(encoding="utf-8")
     line = next(ln for ln in text.splitlines() if ln.startswith("- **At rest,**"))
-    assert "Settings, Health" in line and "encrypted" in line
+    assert "health status" in line and "encrypted" in line
+    assert "Settings, Health" not in line
     assert "ask whoever set up your box" not in text

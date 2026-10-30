@@ -53,7 +53,7 @@ BlackBox reads in the background only if you grant Health Connect's background p
 
 - There is **no backup** of your health store in this version. If the box's disk fails, the stored history is lost; Health Connect on your phone still holds your recent data.
 - **In transit,** data travels over Tailscale (WireGuard encryption), and over HTTPS where the box is set up for it.
-- **At rest,** the store is a private file on the box, with no encryption of its own in this version. The box checks whether its disk is encrypted (full-disk encryption) and shows the answer in Settings, Health.
+- **At rest,** the store is a private file on the box, with no encryption of its own in this version. The box checks whether its disk is encrypted (full-disk encryption) and reports the answer in its health status.
 
 ## Changes to this policy
 

@@ -13,26 +13,33 @@ Read-only heuristics, stdlib only: no sudo, no lsblk, and it never raises.
   2. That device in sysfs (/sys/dev/block/<major>:<minor>), then what it
      sits on: a partition's parent and a mapping's slaves/, all the way
      down (LVM on LUKS, RAID on dm-crypt).
-  3. A device-mapper target whose dm/uuid starts with "CRYPT-LUKS" is LUKS;
-     any other "CRYPT-" is plain dm-crypt. A device found with no such layer
+  3. cryptsetup names its mappings "CRYPT-<TYPE>-..." (dm/uuid). LUKS1 and
+     LUKS2 are LUKS; PLAIN, TCRYPT, BITLK, LOOPAES and FVAULT2 are dm-crypt.
+     VERITY, INTEGRITY and SUBDEV (the integrity layer under an
+     authenticated LUKS2 device) only check data, never encrypt it, so the
+     walk goes on beneath them. A device found with no encrypting layer
      under it is not encrypted (false).
 
 Anything it cannot see or recognise (overlay, zfs, tmpfs, a network mount,
-no sysfs entry) is null, never a guess. A self-encrypting drive is not
-visible this way and reads false. The privacy policy points at this answer
-(Settings, Health) instead of saying "ask whoever set up your box".
+no sysfs entry, a cryptsetup type this build does not know) is null, never
+a guess. A self-encrypting drive is not visible this way and reads false.
+The privacy policy points at this answer (the health status) instead of
+saying "ask whoever set up your box".
 """
 from __future__ import annotations
 
 import os
 import re
-from typing import Callable, Optional, Set, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 PROC_MOUNTS = "/proc/self/mounts"
 SYS_ROOT = "/sys"
 MAX_DEPTH = 12
 
 _ESCAPE = re.compile(r"\\([0-7]{3})")
+# cryptsetup's mapping types (dm/uuid "CRYPT-<TYPE>-...").
+CRYPT_TYPES = ("PLAIN", "TCRYPT", "BITLK", "LOOPAES", "FVAULT2")
+CHECK_TYPES = ("VERITY", "INTEGRITY", "SUBDEV")
 
 
 def _unescape(field: str) -> str:
@@ -79,13 +86,22 @@ def _mount_source(path: str, proc_mounts: str) -> Optional[str]:
     return source
 
 
-def _crypt_method(block_dir: str, seen: Set[str], depth: int) -> Optional[str]:
+def _crypt_method(block_dir: str, seen: Set[str], depth: int,
+                  unknown: List[str]) -> Optional[str]:
+    """The first encrypting layer at or under a block device; a cryptsetup
+    type it does not know goes into `unknown`."""
     if depth > MAX_DEPTH or block_dir in seen:
         return None
     seen.add(block_dir)
     uuid = _read(os.path.join(block_dir, "dm", "uuid")) or ""
     if uuid.startswith("CRYPT-"):
-        return "luks" if uuid.startswith("CRYPT-LUKS") else "dm-crypt"
+        kind = uuid[len("CRYPT-"):].split("-", 1)[0].upper()
+        if kind.startswith("LUKS"):
+            return "luks"
+        if kind in CRYPT_TYPES:
+            return "dm-crypt"
+        if kind not in CHECK_TYPES:
+            unknown.append(kind)
     under = []
     if os.path.exists(os.path.join(block_dir, "partition")):
         under.append(os.path.dirname(block_dir))
@@ -95,7 +111,7 @@ def _crypt_method(block_dir: str, seen: Set[str], depth: int) -> Optional[str]:
     except OSError:
         pass
     for d in under:
-        method = _crypt_method(d, seen, depth + 1)
+        method = _crypt_method(d, seen, depth + 1, unknown)
         if method:
             return method
     return None
@@ -120,7 +136,10 @@ def check(path: str, *, proc_mounts: str = PROC_MOUNTS, sys_root: str = SYS_ROOT
         block = os.path.join(sys_root, "dev", "block", f"{os.major(dev)}:{os.minor(dev)}")
         if not os.path.exists(block):
             return None, None
-        method = _crypt_method(os.path.realpath(block), set(), 0)
+        unknown: List[str] = []
+        method = _crypt_method(os.path.realpath(block), set(), 0, unknown)
+        if method is None and unknown:
+            return None, None
         return method is not None, method
     except Exception:  # noqa: BLE001 - a status line must never break a status call
         return None, None
