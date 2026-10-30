@@ -187,3 +187,70 @@ def test_cli_help_runs():
     with pytest.raises(SystemExit) as e:
         SIM.main(["--help"])
     assert e.value.code == 0
+
+
+class ScriptedChatBox:
+    """Answers /chat/stream with a scripted SSE body and /chat/save with a
+    scripted JSON reply; records every request so the save can be checked."""
+
+    def __init__(self, sse_events, save_reply=None):
+        self.sse = "".join(f"event: {e}\ndata: {json.dumps(d)}\n\n" for e, d in sse_events)
+        self.save_reply = save_reply if save_reply is not None else {"success": True, "minted": True}
+        self.requests = []
+
+    def request(self, method, path, body=b"", headers=None):
+        self.requests.append((method, path, json.loads(body) if body else None, headers or {}))
+        if path == "/chat/stream":
+            return 200, {"content-type": "text/event-stream"}, self.sse.encode()
+        if path == "/chat/save":
+            return 200, {}, json.dumps(self.save_reply).encode()
+        return 404, {}, b"{}"
+
+
+_SSE = [("stream_start", {"provider": "custom", "model": "box::m", "provenance": {},
+                          "wellness_turn": "wt_0123456789abcdef"}),
+        ("tool_start", {"tool": "wellness_summary"}),
+        ("wellness_used", {"ref": "w_1", "categories": ["sleep"], "provider": "custom:box"}),
+        ("content", "You slept "), ("content", "well."),
+        ("done", {})]
+
+
+def test_chat_reports_the_turn_key_and_saves_it_the_way_a_client_does(tmp_path):
+    state = _enrolled_state(tmp_path)
+    box = ScriptedChatBox(_SSE)
+    out = SIM.chat(box, state, prompt="How did I sleep?", provider="custom", model="box::m")
+    assert out["status"] == 200 and out["reply"] == "You slept well."
+    assert out["wellness_turn"] == "wt_0123456789abcdef"
+    assert [t["tool"] for t in out["tools"]] == ["wellness_summary"]
+    assert out["wellness_used"][0]["ref"] == "w_1" and out["error"] is None
+    assert "saved" not in out and [p for _, p, _, _ in box.requests] == ["/chat/stream"]
+    stream_headers = box.requests[0][3]
+    assert stream_headers["X-BlackBox-Origin"].startswith("v1;enr=en_0000abcd;")
+
+    box = ScriptedChatBox(_SSE, save_reply={"success": True, "minted": True, "snap_id": "SNAP-1"})
+    out = SIM.chat(box, state, prompt="How did I sleep?", provider="custom", model="box::m",
+                   save=True)
+    assert out["saved"] == {"status": 200,
+                            "body": {"success": True, "minted": True, "snap_id": "SNAP-1"}}
+    method, path, saved, headers = box.requests[1]
+    assert (method, path) == ("POST", "/chat/save")
+    assert saved == {"operator": OPERATOR, "user_message": "How did I sleep?",
+                     "assistant_response": "You slept well.", "carry_location": False,
+                     "model": "box::m", "wellness_turn": "wt_0123456789abcdef"}
+    assert "X-BlackBox-Origin" not in headers   # the save is unsigned, as the clients send it
+
+
+def test_chat_without_a_turn_key_saves_without_one_and_a_failed_stream_saves_nothing(tmp_path):
+    state = _enrolled_state(tmp_path)
+    box = ScriptedChatBox([("stream_start", {"provider": "google", "model": "g"}),
+                           ("content", "Hi."), ("done", {})])
+    out = SIM.chat(box, state, prompt="hi", save=True)
+    assert out["wellness_turn"] is None and out["wellness_used"] == [] and out["tools"] == []
+    assert "wellness_turn" not in box.requests[1][2] and box.requests[1][2]["model"] == "g"
+
+    box = ScriptedChatBox([("error", {"message": "provider down"})])
+    out = SIM.chat(box, state, prompt="hi", save=True)
+    assert out["reply"] == "" and out["error"] == {"message": "provider down"}
+    assert "saved" not in out and len(box.requests) == 1
+
+    assert SIM.chat(box, SIM.State(tmp_path / "empty"), prompt="hi") == {"status": 0, "error": "not_enrolled"}

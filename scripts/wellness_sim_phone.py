@@ -49,6 +49,10 @@ Subcommands:
               tools as it would on the enrolled phone. Prints the reply, the
               tools that ran and the UI-only wellness_used frames. --provider
               and --model as the chat clients send them (default: the box's).
+              Also prints wellness_turn, the turn key stream_start carries.
+              --save then records the turn through /chat/save echoing that
+              key, the way the wave-3 clients do, so the ledger copy is
+              masked and tagged (the box mints it per its auto-mint rule).
               The reply is the operator's own health data: it goes to this
               terminal only.
   unregister  removes the registry device, the sim pairing row and the state.
@@ -467,8 +471,11 @@ def _sse_events(text: str) -> list:
 
 
 def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None,
-         model: Optional[str] = None, operator: Optional[str] = None) -> dict:
-    """One signed /chat/stream turn: {status, reply, tools, wellness_used, error}."""
+         model: Optional[str] = None, operator: Optional[str] = None,
+         save: bool = False) -> dict:
+    """One signed /chat/stream turn: {status, reply, tools, wellness_used,
+    wellness_turn, error}; with save, also {saved: {status, body}} from
+    /chat/save echoing the turn key (unsigned, as the clients send it)."""
     signer = _signer(state)
     if signer is None:
         return {"status": 0, "error": "not_enrolled"}
@@ -485,11 +492,29 @@ def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None
                                                   "POST", "/chat/stream", data)}
     code, _, payload = transport.request("POST", "/chat/stream", data, headers)
     events = _sse_events(payload.decode("utf-8", "replace"))
-    return {"status": code,
-            "reply": "".join(d for e, d in events if e == "content" and isinstance(d, str)),
-            "tools": [d for e, d in events if e == "tool_start"],
-            "wellness_used": [d for e, d in events if e == "wellness_used"],
-            "error": next((d for e, d in events if e == "error"), None)}
+    start = next((d for e, d in events if e == "stream_start" and isinstance(d, dict)), {})
+    out = {"status": code,
+           "reply": "".join(d for e, d in events if e == "content" and isinstance(d, str)),
+           "tools": [d for e, d in events if e == "tool_start"],
+           "wellness_used": [d for e, d in events if e == "wellness_used"],
+           "wellness_turn": start.get("wellness_turn"),
+           "error": next((d for e, d in events if e == "error"), None)}
+    if save and code == 200 and out["reply"]:
+        saved = {"operator": body["operator"], "user_message": prompt,
+                 "assistant_response": out["reply"], "carry_location": False}
+        if start.get("model"):
+            saved["model"] = start["model"]
+        if out["wellness_turn"]:
+            saved["wellness_turn"] = out["wellness_turn"]
+        s_code, _, s_payload = transport.request(
+            "POST", "/chat/save", json.dumps(saved).encode(),
+            {"Content-Type": "application/json"})
+        try:
+            s_body = json.loads(s_payload.decode("utf-8", "replace"))
+        except ValueError:
+            s_body = {"raw_len": len(s_payload)}
+        out["saved"] = {"status": s_code, "body": s_body}
+    return out
 
 
 def unregister(transport, state: State, pairing_file: Path) -> None:
@@ -517,6 +542,9 @@ def main(argv=None) -> int:
     p.add_argument("--ip", default=None, help=f"the sim's loopback address (default {DEFAULT_IP})")
     p.add_argument("--port", type=int, default=None,
                    help=f"the sim listener's port = the box's simulator_port (default {DEFAULT_PORT})")
+    p.add_argument("--timeout", type=float, default=300.0,
+                   help="seconds to wait for the box per request (a cold custom-server load "
+                        "and a tool turn can take minutes; default 300)")
     p.add_argument("--box-root", default=str(REPO),
                    help="the box's install root, for credentials/wellness_sim_pairing.json")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -542,6 +570,8 @@ def main(argv=None) -> int:
     ch.add_argument("--prompt", required=True)
     ch.add_argument("--provider", default=None)
     ch.add_argument("--model", default=None)
+    ch.add_argument("--save", action="store_true",
+                    help="record the turn through /chat/save, echoing wellness_turn")
     sub.add_parser("unregister")
     args = p.parse_args(argv)
 
@@ -549,7 +579,7 @@ def main(argv=None) -> int:
     saved = state.load()
     ip = args.ip or saved.get("ip") or DEFAULT_IP
     port = args.port or saved.get("port") or DEFAULT_PORT
-    transport = HttpTransport(args.box, ip)
+    transport = HttpTransport(args.box, ip, timeout=args.timeout)
     pairing_file = Path(args.box_root) / "credentials" / "wellness_sim_pairing.json"
     out: object
     if args.cmd == "register":
@@ -581,7 +611,7 @@ def main(argv=None) -> int:
         out = {"nudged": at is not None}
     elif args.cmd == "chat":
         out = chat(transport, state, prompt=args.prompt, provider=args.provider,
-                   model=args.model)
+                   model=args.model, save=args.save)
     else:
         unregister(transport, state, pairing_file)
         out = {"unregistered": True}
