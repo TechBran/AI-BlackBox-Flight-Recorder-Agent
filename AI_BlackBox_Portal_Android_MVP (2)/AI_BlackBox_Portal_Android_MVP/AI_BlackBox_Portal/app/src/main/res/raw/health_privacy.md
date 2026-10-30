@@ -2,53 +2,59 @@
 
 Version 2026-10-29
 
-BlackBox Health helps you understand your own wearable data and remembers it alongside your day. It is a wellness feature. It is not a medical device, it does not diagnose anything, and it is not an emergency or medical alert system.
+BlackBox Health helps you understand your own health and fitness data and remembers it alongside your day. It is a wellness feature. It does not diagnose, treat or monitor any condition, it is not a medical device and it is not an emergency or medical alert system.
+
+## Who this covers
+
+Health is set up by one person, on their own Android phone, for themselves. Each person on a BlackBox has their own separate health store. Nobody else on the box, including its owner, can read, set up or change your health data or your choices. Health is for adults only: setup asks you to confirm that the data is your own, that only you use this phone's Health Connect, and that you are an adult.
 
 ## What BlackBox reads
 
-With your permission, the BlackBox app on your phone reads, read-only, what your watch, ring, cuff or scale has written into Android Health Connect, for the kinds of data you turn on:
+With your permission, the BlackBox app reads (and never writes) these kinds of data from Android Health Connect, which is where Samsung Health and other apps on your phone store what your watch, ring, cuff or scale records:
 
 - **Sleep:** sleep sessions and their stages.
-- **Heart:** heart rate, resting heart rate, heart rate variability, blood oxygen and breathing rate.
-- **Activity:** steps, distance, calories and workouts. Workout routes are never read (they are location history).
-- **Blood pressure:** readings, only if you turn it on. It is answered by AI on your own network by default.
+- **Heart:** heart rate (in 5-minute summaries, and 1-minute summaries during a workout), resting heart rate, heart rate variability, blood oxygen and breathing rate, when your devices record them.
+- **Activity:** steps, distance and calories by the hour, and your workouts (type, time, distance and heart rate). Workout routes are never read; they are location history.
+- **Blood pressure:** only if you turn it on. It is off by default, and when it is on it is answered only by AI on your own network unless you choose otherwise.
 
-Each kind is its own Health Connect permission, and you can turn any of them off at any time in Health Connect or in BlackBox, Settings, Health. Reading data older than 30 days and reading while the app is closed are separate permissions you choose on their own. BlackBox never writes to Health Connect or Samsung Health.
+You choose each category (off, ask, or proactive) and you can change your choice at any time in Settings, Health, on your phone. Turning a category off in BlackBox or in Health Connect stops BlackBox using it on your next question.
 
-## Where it goes
+BlackBox also notes which apps and devices wrote the data (for example "Samsung Health, a watch"), counts of records, and whether the phone could sync. It does not read anything else on your phone for this feature.
 
-- The phone sends what it reads only to **your own BlackBox box**, over your private Tailscale network, signed with a key only this phone and your box hold.
-- On the box it is kept in a private store for **you alone** (one store per person). No other person on the box can see it, including the box owner.
-- An AI model sees your health data only when you ask on your enrolled phone (or a browser you approved from it), and only an AI you allowed. **AI on your own network is allowed by default. Every cloud AI provider needs your explicit tick**, and Google needs a paid key.
-- Blood pressure, and anything you mark "local AI only", never goes to a cloud AI.
-- Every time an AI is given your health data, the box records when, which AI and which kinds of data. You can see this list in Settings, Health, "Who saw my health data".
+## Background reading
+
+BlackBox reads in the background only if you grant Health Connect's background permission, which is a separate choice you make on the phone. Without it, BlackBox reads only while the app is open. A first import of your history shows a visible notification while it runs; there are no hidden reads.
+
+## Where your data goes
+
+- **Your BlackBox.** The phone sends your data over your private Tailscale network to your own BlackBox, into a private store for you alone (a file readable only by the BlackBox service, in a private folder). Each request is signed with a key that only your enrolled phone holds.
+- **The AI that answers.** When you ask a health question, BlackBox gives the AI only the numbers that question needs. AI running on your own network, and on your phone, may answer by default. A cloud AI provider (such as Anthropic, OpenAI, Google or xAI) sees your health data only if you tick it in Settings, Health; Google also needs you to confirm your key is on a paid plan. "Only AI on my network" keeps every answer on your own hardware.
+- **Who saw it.** Every time health data reaches an AI, BlackBox records when, from which screen, which provider and model, and which categories, so you can see it in "Who saw my health data".
 
 ## What never happens
 
-- Your health data is never sold, and never used for advertising, insurance, credit or employment decisions.
-- Nothing about your health is sent to the BlackBox company.
-- Health numbers are never written into the BlackBox conversation memory. Conversations about your health are remembered with their numbers removed, and they are hidden from everyone else on the box.
-- Health is never answered over text messages (SMS), phone calls, remote tools or automated agents.
-- BlackBox never tells you that you have a disease or condition, never calls a value abnormal or dangerous, and never advises starting, stopping or changing a medication or treatment.
+- Your health numbers are never written into BlackBox's permanent conversation memory. A health conversation is saved with its numbers removed and a marker that hides it from anyone but you, and from any AI provider you did not allow. Your own words are saved as you typed them.
+- Health numbers are never written to the box's logs, to the Portal's web files or to the box's archives.
+- Your health data is never sold and never used for advertising, insurance, credit or employment decisions. Nothing about your health is sent to the company that makes BlackBox.
+- BlackBox never answers health questions over text messages, phone calls, remote tool connections, or command-line and computer-control agents.
+- An AI can never change your health settings; it can only tell you where to change them.
 - BlackBox never contacts emergency services.
 
-## How long it is kept
+## Deleting your data
 
-Your health detail is kept on your box until you erase it. Deleting a record in Health Connect or Samsung Health removes it from BlackBox too, for sleep sessions, workouts and readings of any age, and for daily totals of the last 30 days (older daily totals are reconciled monthly for the last 90 days). There is no backup of the health store in this version.
+- **In Health Connect:** when you delete a record there, BlackBox removes its copy on the next sync. Deleting old step or heart-rate detail that was imported in bulk may not be mirrored for data older than 90 days.
+- **Pause:** collection stops; BlackBox can still answer from what it already stored and says that it is paused.
+- **Disconnect:** collection stops, and you choose to keep or delete what was stored. Kept history comes back if you set up Health again on the same phone; a different phone starts with a new, empty store, and Stop & erase removes both.
+- **Moving to a new phone:** while your current phone is set up, it is asked to approve the move. If it cannot be reached, the move goes ahead, your stored history moves with it, and the old phone is told and stops sending.
+- **Stop & erase:** from your enrolled phone, BlackBox deletes your health store, revokes your phone's key and tells the phone to forget its health settings. Your past health conversations stay in your BlackBox memory, but they contain no health numbers.
+- **If your operator is removed from the box,** your health store is erased the same way.
 
-## Your controls
+## Backups and encryption
 
-In BlackBox, Settings, Health on your phone you can:
+- There is **no backup** of your health store in this version. If the box's disk fails, the stored history is lost; Health Connect on your phone still holds your recent data.
+- **In transit,** data travels over Tailscale (WireGuard encryption), and over HTTPS where the box is set up for it.
+- **At rest,** the store is a private file on the box, with no encryption of its own in this version. The box checks whether its disk is encrypted (full-disk encryption) and reports the answer in its health status.
 
-- turn each kind of data Off, Ask or Proactive;
-- choose which AI may see it, or "Only AI on my network";
-- **Pause** collection, or **Disconnect** and choose to keep or delete what is stored;
-- **Stop and erase**, which deletes your health store and this phone's key. Your past conversations stay in your BlackBox memory, but they contain no health numbers.
+## Changes to this policy
 
-## On this phone
-
-The phone keeps its key, its sync bookkeeping and data waiting to be sent in app storage that is excluded from Android backup and device transfer. Disconnecting or erasing clears it.
-
-## Questions
-
-Ask whoever runs your BlackBox box. The same policy is served by your box at `/wellness/privacy-policy`.
+When this policy changes, its version changes, and the BlackBox app shows you the new version before it collects anything more.
