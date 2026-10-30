@@ -1,0 +1,59 @@
+{
+  "name": "wellness_summary",
+  "description": "This person's own wearable health data (sleep, heart, activity and, if they turned it on, blood pressure) for one period, in one call: every metric they share with its value and display / spoken strings, their own usual range and how this compares (within, above or below your usual range), coverage (how much of the period the watch was worn) and the notable workouts. Use it first for questions like 'how did I sleep last night', 'what was my resting heart rate this week', 'how active was I yesterday', 'should I run today', 'am I recovering', 'why am I so tired' or when planning the day. It also returns as_of (when the phone last synced) and stale, gaps with the reason a value is missing (watch not worn, not synced, permission off), troubles to explain, and a ref.",
+  "category": "wellness",
+  "groups": [
+    "chat"
+  ],
+  "tier": 1,
+  "x-availability": {
+    "feature": "wellness"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "period": {
+        "type": "string",
+        "enum": [
+          "today",
+          "last_night",
+          "yesterday",
+          "this_week",
+          "last_week",
+          "last_7_days",
+          "last_30_days",
+          "custom"
+        ],
+        "description": "The period: today, last_night (the sleep that ended this morning), yesterday, this_week, last_week, last_7_days, last_30_days, or custom with start and end."
+      },
+      "start": {
+        "type": "string",
+        "description": "custom only: the first day, YYYY-MM-DD, a local calendar day."
+      },
+      "end": {
+        "type": "string",
+        "description": "custom only: the last day, YYYY-MM-DD, a local calendar day; at most 92 days after start."
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "sleep",
+            "heart",
+            "activity",
+            "blood_pressure"
+          ]
+        },
+        "x-source": "wellness_categories",
+        "description": "Optional: only these categories (sleep, heart, activity, blood_pressure). Omit for every category the person shares."
+      }
+    },
+    "required": [
+      "period"
+    ]
+  },
+  "returns": "An envelope: ref, period {label, start, end, tz}, as_of, stale, paused, metrics[] {metric, label, value, unit, display, spoken, usual {median, low, high, n}, vs_usual {label, delta_display}, coverage {pct, label}, method, flags} (multi-day periods add the daily average, total, lowest and highest day), sessions[] (notable workouts), gaps[] {metric, day, reason}, troubles[] {title, fix}, sources[], notes[]. A missing value is 'not recorded', never 0. Errors come back with a fix to pass on: not_enrolled, category_off, provider_not_allowed, surface_not_allowed, paused, no_data, not_enough_history.",
+  "example": "wellness_summary(period=\"last_night\")",
+  "notes": "WELLNESS RULES: Wellness information only. Never diagnose, never name a condition from the data, never call a value abnormal or dangerous, never advise starting, stopping or changing medication or treatment. Use only numbers from this turn's wellness_* results, quoted through their display or spoken strings; never compute, estimate or recall health numbers. Say \"as of <time>\" when the data is stale and state coverage when it is incomplete. Missing data is \"not recorded\", never zero. Compare with the person's own usual range. Draw no conclusion from one night. If the user describes chest pain, fainting, severe breathlessness, stroke signs or thoughts of self-harm, the first sentence tells them to call emergency services. Don't raise health topics they didn't ask about. You can't change health sharing; point to Settings, Health on their phone. You can see only this operator's own data."
+}

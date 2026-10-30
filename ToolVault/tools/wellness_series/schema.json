@@ -1,0 +1,90 @@
+{
+  "name": "wellness_series",
+  "description": "One health metric over time, as up to 120 points: the trend or the shape of a day or a season. Use it for 'how has my resting heart rate changed this month', 'show my steps over the last 90 days', 'my heart rate during this afternoon', 'did my sleep get shorter since I started the new job'. Reaches the whole stored history (up to 365 days per call), coarsened automatically to fit. Returns points[] {t, value, display, coverage_pct} (null = not recorded), granularity_used, the person's usual range (baseline), as_of and a ref.",
+  "category": "wellness",
+  "groups": [
+    "chat"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "wellness"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "metric": {
+        "type": "string",
+        "enum": [
+          "sleep_duration",
+          "sleeping_hr_median",
+          "sleeping_hr_p10",
+          "resting_hr",
+          "heart_rate",
+          "hrv",
+          "spo2",
+          "respiratory_rate",
+          "steps",
+          "distance",
+          "active_calories",
+          "total_calories",
+          "exercise",
+          "bp_systolic",
+          "bp_diastolic"
+        ],
+        "x-source": "wellness_metrics",
+        "description": "The metric: sleep_duration, sleeping_hr_median, resting_hr, heart_rate, hrv, spo2, respiratory_rate, steps, distance, active_calories, total_calories, exercise, bp_systolic, bp_diastolic (only the ones this person shares)."
+      },
+      "range": {
+        "type": "string",
+        "enum": [
+          "last_24_hours",
+          "last_7_days",
+          "last_30_days",
+          "last_90_days",
+          "last_365_days"
+        ],
+        "description": "A window ending now; or give start and end instead. Default last_7_days."
+      },
+      "start": {
+        "type": "string",
+        "description": "Instead of range: the first day, YYYY-MM-DD, a local calendar day."
+      },
+      "end": {
+        "type": "string",
+        "description": "Instead of range: the last day, YYYY-MM-DD, a local calendar day; at most 365 days after start."
+      },
+      "granularity": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "5min",
+          "hour",
+          "day",
+          "week",
+          "month"
+        ],
+        "description": "One point per: auto (default), 5min (heart rate, windows of 3 hours or less), hour, day, week, month."
+      },
+      "stat": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "sum",
+          "mean",
+          "median",
+          "min",
+          "max",
+          "p10",
+          "latest"
+        ],
+        "description": "How a point combines its readings: auto (default: sum for steps-like totals, mean otherwise), sum, mean, median, min, max, p10, latest."
+      }
+    },
+    "required": [
+      "metric"
+    ]
+  },
+  "returns": "An envelope: ref, metric, unit, category, window, granularity_used, stat, points[] {t, value, display, coverage_pct} (value null = not recorded), baseline {median, low, high, n} (the person's usual range), as_of, stale, troubles, notes. Errors carry a fix: unknown_metric, invalid_range, category_off, provider_not_allowed, no_data, not_enough_history.",
+  "example": "wellness_series(metric=\"resting_hr\", range=\"last_90_days\", granularity=\"week\")",
+  "notes": "WELLNESS RULES: Wellness information only. Never diagnose, never name a condition from the data, never call a value abnormal or dangerous, never advise starting, stopping or changing medication or treatment. Use only numbers from this turn's wellness_* results, quoted through their display or spoken strings; never compute, estimate or recall health numbers. Say \"as of <time>\" when the data is stale and state coverage when it is incomplete. Missing data is \"not recorded\", never zero. Compare with the person's own usual range. Draw no conclusion from one night. If the user describes chest pain, fainting, severe breathlessness, stroke signs or thoughts of self-harm, the first sentence tells them to call emergency services. Don't raise health topics they didn't ask about. You can't change health sharing; point to Settings, Health on their phone. You can see only this operator's own data."
+}

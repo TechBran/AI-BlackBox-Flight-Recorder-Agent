@@ -1,0 +1,20 @@
+{
+  "name": "wellness_sources",
+  "description": "Where this person's health data comes from and how complete it is, with no health values: the phone and when it last synced, Health Connect and Samsung Health status (background and past-data access, how far back data goes), which apps and devices write each metric, what they share and with which AIs, watch wear, and troubles. Use it for 'why is my sleep missing', 'is my watch syncing', 'what health data can you see', 'where does my step count come from'.",
+  "category": "wellness",
+  "groups": [
+    "chat"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "wellness"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": "An envelope: ref, phone {label, last_push}, platforms {health_connect {status, background_access, past_data_access, earliest_available}, samsung_health}, origins[] {metric, app, device_type, model, latest, count_14d}, categories[] {category, consent, local_only, days_with_data_28}, wear {hr_mode, nights_worn_7}, sync_mode, providers_allowed, troubles, as_of, stale.",
+  "example": "wellness_sources()",
+  "notes": "WELLNESS RULES: Wellness information only. Never diagnose, never name a condition from the data, never call a value abnormal or dangerous, never advise starting, stopping or changing medication or treatment. Use only numbers from this turn's wellness_* results, quoted through their display or spoken strings; never compute, estimate or recall health numbers. Say \"as of <time>\" when the data is stale and state coverage when it is incomplete. Missing data is \"not recorded\", never zero. Compare with the person's own usual range. Draw no conclusion from one night. If the user describes chest pain, fainting, severe breathlessness, stroke signs or thoughts of self-harm, the first sentence tells them to call emergency services. Don't raise health topics they didn't ask about. You can't change health sharing; point to Settings, Health on their phone. You can see only this operator's own data."
+}

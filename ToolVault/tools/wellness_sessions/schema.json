@@ -1,0 +1,66 @@
+{
+  "name": "wellness_sessions",
+  "description": "Individual sleep sessions or workouts, newest first: 'when did I go to bed this week', 'how long was my run on Saturday', 'my last five workouts', 'how much deep sleep did I get on Tuesday'. Returns sessions[] {session_ref, kind, type, start, end, duration, distance, avg_hr, max_hr, hr_coverage_pct, stages_min (sleep), source}, how many were found in the window, as_of and a ref.",
+  "category": "wellness",
+  "groups": [
+    "chat"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "wellness"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": [
+          "sleep",
+          "exercise"
+        ],
+        "description": "sleep or exercise (workouts)."
+      },
+      "range": {
+        "type": "string",
+        "enum": [
+          "last_24_hours",
+          "last_7_days",
+          "last_30_days",
+          "last_90_days",
+          "last_365_days"
+        ],
+        "description": "A window ending now; or give start and end instead. Default last_30_days."
+      },
+      "start": {
+        "type": "string",
+        "description": "Instead of range: the first day, YYYY-MM-DD, a local calendar day."
+      },
+      "end": {
+        "type": "string",
+        "description": "Instead of range: the last day, YYYY-MM-DD, a local calendar day."
+      },
+      "exercise_type": {
+        "type": "string",
+        "enum": [
+          "run",
+          "walk",
+          "cycle",
+          "strength",
+          "swim",
+          "other"
+        ],
+        "description": "exercise only: run, walk, cycle, strength, swim or other."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "How many sessions, 1-20 (default 10)."
+      }
+    },
+    "required": [
+      "kind"
+    ]
+  },
+  "returns": "An envelope: ref, kind, window, total_in_window, sessions[] {session_ref, kind, type, start, end, duration_min, duration, distance, avg_hr, avg_hr_display, max_hr, hr_coverage_pct, calories, stages_min {deep, light, rem, awake} (sleep), source}, as_of, stale, troubles. Errors carry a fix: category_off, provider_not_allowed, no_data, invalid_argument.",
+  "example": "wellness_sessions(kind=\"exercise\", range=\"last_30_days\", exercise_type=\"run\", limit=5)",
+  "notes": "WELLNESS RULES: Wellness information only. Never diagnose, never name a condition from the data, never call a value abnormal or dangerous, never advise starting, stopping or changing medication or treatment. Use only numbers from this turn's wellness_* results, quoted through their display or spoken strings; never compute, estimate or recall health numbers. Say \"as of <time>\" when the data is stale and state coverage when it is incomplete. Missing data is \"not recorded\", never zero. Compare with the person's own usual range. Draw no conclusion from one night. If the user describes chest pain, fainting, severe breathlessness, stroke signs or thoughts of self-harm, the first sentence tells them to call emergency services. Don't raise health topics they didn't ask about. You can't change health sharing; point to Settings, Health on their phone. You can see only this operator's own data."
+}

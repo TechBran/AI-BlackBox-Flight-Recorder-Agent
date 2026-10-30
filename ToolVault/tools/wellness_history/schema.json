@@ -1,0 +1,46 @@
+{
+  "name": "wellness_history",
+  "description": "The day-by-day health table for a date range (up to 92 days per call): one row per day with sleep duration, bedtime and wake time, sleeping and resting heart rate, HRV, blood oxygen, breathing rate, steps, distance, active calories, workout minutes (and blood pressure if shared), plus whether the watch was worn. Use it to reason over weeks in one call: 'compare my sleep before and after my trip', 'which days this month did I sleep under six hours', 'how did last week go day by day'. Returns columns, rows (null = not recorded), units, the person's usual ranges, as_of and a ref; long ranges come back as weekly rows to fit.",
+  "category": "wellness",
+  "groups": [
+    "chat"
+  ],
+  "tier": 2,
+  "x-availability": {
+    "feature": "wellness"
+  },
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "start": {
+        "type": "string",
+        "description": "The first day, YYYY-MM-DD, a local calendar day."
+      },
+      "end": {
+        "type": "string",
+        "description": "The last day, YYYY-MM-DD, a local calendar day; at most 92 days after start."
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "sleep",
+            "heart",
+            "activity",
+            "blood_pressure"
+          ]
+        },
+        "x-source": "wellness_categories",
+        "description": "Optional: only these categories (sleep, heart, activity, blood_pressure). Omit for every category the person shares."
+      }
+    },
+    "required": [
+      "start",
+      "end"
+    ]
+  },
+  "returns": "An envelope: ref, start, end, resolution (day, or week/month when coarsened), columns (day first, then the metrics, night_worn, day_wear_h), rows (values in the column's unit, null = not recorded), units, baselines {metric: {median, low, high, n}}, legend, as_of, stale, troubles. Errors carry a fix: invalid_range, category_off, provider_not_allowed, no_data, not_enough_history.",
+  "example": "wellness_history(start=\"2026-09-01\", end=\"2026-09-30\")",
+  "notes": "WELLNESS RULES: Wellness information only. Never diagnose, never name a condition from the data, never call a value abnormal or dangerous, never advise starting, stopping or changing medication or treatment. Use only numbers from this turn's wellness_* results, quoted through their display or spoken strings; never compute, estimate or recall health numbers. Say \"as of <time>\" when the data is stale and state coverage when it is incomplete. Missing data is \"not recorded\", never zero. Compare with the person's own usual range. Draw no conclusion from one night. If the user describes chest pain, fainting, severe breathlessness, stroke signs or thoughts of self-harm, the first sentence tells them to call emergency services. Don't raise health topics they didn't ask about. You can't change health sharing; point to Settings, Health on their phone. You can see only this operator's own data."
+}
