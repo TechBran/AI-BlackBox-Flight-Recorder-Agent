@@ -111,6 +111,12 @@ data class WellnessUiState(
     /** The box's current policy text (GET /wellness/privacy-policy) and the version it names, while [policyHold]. */
     val policyText: String? = null,
     val policyTextVersion: String? = null,
+    /**
+     * This phone's key belongs to another box address than the one the app uses now
+     * (WellnessRules.keyElsewhereOf): nothing syncs or is signed until the person sets Health up
+     * with this box or forgets it here. Null otherwise.
+     */
+    val keyElsewhere: WellnessRules.KeyElsewhere? = null,
 ) {
     val bound: Boolean get() = boundOperator != null
 }
@@ -157,6 +163,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val record = binding.current()
         val client = client()
         val signer = binding.signer()
+        // A key for another box address: every signed call below is refused on this phone
+        // (IngestClient sends nothing), and the screen says why instead of looking active.
+        val elsewhere = WellnessRules.keyElsewhereOf(record?.boxOrigin, WellnessGraph.boxOrigin(app))
         val statusOperator = record?.operator ?: operator
         var statusPolicy: String? = null
         var box = if (client != null && statusOperator.isNotBlank()) {
@@ -232,8 +241,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             local.filter { it == "hc_unavailable" || it == "hc_needs_update" })
         val boxState = WellnessRules.shownState(box?.state, box?.credentialed == true, st.enrollmentState())
         // The policy changed: the card shows the box's own current text (and agreeing records
-        // the version of THAT text, never one the person did not see).
-        val policyHold = record != null && WellnessRules.policyHold(st)
+        // the version of THAT text, never one the person did not see). Not while the key belongs
+        // to another box address: the paired box's text is not the one this binding's box holds.
+        val policyHold = record != null && elsewhere == null && WellnessRules.policyHold(st)
         val policy = if (policyHold && client != null) {
             client.get(IngestClient.PRIVACY_POLICY, null).takeIf { it.ok }
         } else null
@@ -251,9 +261,10 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 box = box,
                 settings = box?.takeIf { it.credentialed }?.settings() ?: s.settings,
                 chip = WellnessRules.statusChip(boxState, record != null, troubleCodes, held = st.localHold != null,
-                    policyHold = policyHold),
+                    policyHold = policyHold, keyElsewhere = elsewhere != null),
                 shownState = boxState,
                 policyHold = policyHold,
+                keyElsewhere = elsewhere,
                 policyText = policy?.body?.takeIf { it.isNotBlank() },
                 policyTextVersion = WellnessRules.policyVersion(policy?.policyVersion),
                 troubles = troubleCodes.mapNotNull { WellnessRules.troubleCard(it) },
@@ -374,8 +385,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             replace = s.setup.replace,
         )
         if (outcome is WellnessEnrollment.Outcome.Enrolled) {
-            // The person agreed to the privacy policy this enrollment was made under: the version
-            // the enroll reply carries (a later one on the box holds the collector until agreed).
+            // The person agreed to the policy text setup showed them (the bundled copy). The enroll
+            // reply names the box's version: a newer one holds the collector from the start, and the
+            // Health screen shows the box's own text first (WellnessRules.enrolledUnderPolicy).
             writeState { WellnessRules.enrolledUnderPolicy(it, outcome.policyVersion) }
         }
         // Providers and local-only are settings, sent signed once the box takes them from this phone.
@@ -423,6 +435,8 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val s = state.value
         val record = binding.current() ?: run { say("Set up Health on this phone first."); return@launch }
         val client = client() ?: return@launch
+        // A key for another box address reads no settings and signs no change (the card says why).
+        if (s.keyElsewhere != null) { say(WellnessRules.KEY_ELSEWHERE_SHORT); return@launch }
         // Edit only from the box's own view of the settings: a diff against the phone's defaults
         // could carry a change (even a widening one) the person never made.
         if (s.box?.credentialed != true) {
@@ -440,7 +454,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             it.copy(busy = false, settings = parsed?.takeIf { p -> p.credentialed }?.settings() ?: if (reply.ok) new else old,
                 box = parsed ?: it.box)
         }
-        if (!reply.ok) say(if (reply.reached) "The box didn't accept that change." else "Couldn't reach your box.")
+        if (!reply.ok) say(WellnessRules.unsentMessage(reply.reached, reply.error, "The box didn't accept that change."))
         else {
             // The collector filters every push by this, so a category turned off here is never
             // delivered from the outbox afterwards.
@@ -478,7 +492,11 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
     // ── sync ───────────────────────────────────────────────────────────────────────────────
 
     fun syncNow() = viewModelScope.launch {
-        if (withContext(Dispatchers.IO) { binding.current() } == null) return@launch
+        val record = withContext(Dispatchers.IO) { binding.current() } ?: return@launch
+        if (WellnessRules.keyElsewhere(record.boxOrigin, WellnessGraph.boxOrigin(app))) {
+            say(WellnessRules.KEY_ELSEWHERE_SHORT)
+            return@launch
+        }
         writeState { it.copy(needsReconnect = false) }
         WellnessScheduler.syncNow(app)
         say("Syncing health data now.")
@@ -508,10 +526,12 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
      * answers: the hold ([WellnessSyncState.localHold]) stops every read and push before the
      * request goes out. Then the box is told, signed with the key, which stays until the box
      * confirms (erase needs it, and a retry must be possible). A box that no longer accepts
-     * the key at all ends Health on this phone (WellnessRules.narrowingOutcome).
+     * the key at all ends Health on this phone (WellnessRules.narrowingOutcome). A key for
+     * another box address tells no box at all (WellnessRules.elsewhereNarrowing decides what
+     * stays; [keepHistory] is Disconnect's choice).
      */
     private fun narrow(path: String, hold: String, extra: (JsonObjectBuilderScope) -> Unit = {},
-                       onConfirmed: suspend () -> Unit) = viewModelScope.launch {
+                       keepHistory: Boolean? = null, onConfirmed: suspend () -> Unit) = viewModelScope.launch {
         val record = withContext(Dispatchers.IO) { binding.current() } ?: run { say("Health isn't set up on this phone."); return@launch }
         val signer = binding.signer()
         _state.update { it.copy(busy = true) }
@@ -524,8 +544,16 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         // one signed retry tells a drifted clock from a key the box no longer accepts.
         if (reply.status == 401 && client != null) reply = client.action(path, requestBody, signer)
         _state.update { it.copy(busy = false) }
-        when (WellnessRules.narrowingOutcome(reply.status)) {
+        when (WellnessRules.narrowingOutcome(reply.status, reply.error)) {
             WellnessRules.NarrowingOutcome.CONFIRMED -> onConfirmed()
+            WellnessRules.NarrowingOutcome.KEY_ELSEWHERE -> {
+                val what = WellnessRules.elsewhereNarrowing(hold, keepHistory)
+                if (what.forgetHere) {
+                    WellnessScheduler.cancelAll(app)
+                    withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
+                }
+                say(what.message)
+            }
             WellnessRules.NarrowingOutcome.KEY_REFUSED -> {
                 WellnessScheduler.cancelAll(app)
                 withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
@@ -557,7 +585,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             WellnessScheduler.syncNow(app)
             say("Health collection resumed.")
         } else {
-            say(if (reply.reached) "The box didn't accept that." else "Couldn't reach your box.")
+            say(WellnessRules.unsentMessage(reply.reached, reply.error, "The box didn't accept that."))
         }
         refresh()
     }
@@ -587,7 +615,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
     fun disconnect(keepHistory: Boolean?) {
         if (!WellnessRules.disconnectAllowed(keepHistory)) { say("Choose Keep history or Delete history."); return }
         narrow(IngestClient.DISCONNECT, WellnessRules.HOLD_DISCONNECT,
-            extra = { it.put("keep_history", JsonPrimitive(keepHistory!!)) }) {
+            extra = { it.put("keep_history", JsonPrimitive(keepHistory!!)) }, keepHistory = keepHistory) {
             WellnessScheduler.cancelAll(app)
             withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
             say(if (keepHistory == true) "Disconnected. Your stored history stays on the box."
@@ -617,6 +645,20 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
         }
         say(outcome.message)
+        refresh()
+    }
+
+    /**
+     * "Forget Health on this phone", on the card for a key that belongs to another box address
+     * (WellnessRules.keyElsewhereOf): this phone's key, settings and outbox go; no box is told
+     * (the phone cannot tell which box it would be telling), so the box Health was set up
+     * through keeps what it stored.
+     */
+    fun forgetHere() = viewModelScope.launch {
+        if (withContext(Dispatchers.IO) { binding.current() } == null) return@launch
+        WellnessScheduler.cancelAll(app)
+        withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
+        say(WellnessRules.FORGOT_HERE_MESSAGE)
         refresh()
     }
 

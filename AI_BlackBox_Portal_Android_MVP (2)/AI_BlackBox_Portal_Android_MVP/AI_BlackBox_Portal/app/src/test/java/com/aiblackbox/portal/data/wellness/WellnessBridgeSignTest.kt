@@ -121,6 +121,22 @@ class WellnessBridgeSignTest {
         assertNull("not adopted, not signed", WellnessChatSigning.bridgeHeader(op, "POST", "/chat/stream", sha))
     }
 
+    @Test
+    fun `a request the bridge refuses never pins an older binding`() {
+        val adopted = mutableListOf<String>()
+        install(boundTo = null, adopt = { adopted += it; true })
+        assertNull("no ?operator=", WellnessChatSigning.bridgeHeader(op, "GET", "/fossil/snapshot/SNAP-1", emptySha))
+        assertNull("another operator", WellnessChatSigning.bridgeHeader("someone-else", "POST", "/chat/stream", sha))
+        assertNull("off the list", WellnessChatSigning.bridgeHeader(op, "POST", "/wellness/erase", sha))
+        assertEquals(emptyList<String>(), adopted)
+        install(WellnessRules.EnrollmentState.REVOKED, boundTo = null, adopt = { adopted += it; true })
+        assertNull(WellnessChatSigning.bridgeHeader(op, "POST", "/chat/stream", sha))
+        assertEquals("a revoked enrollment adopts nothing", emptyList<String>(), adopted)
+        install(boundTo = null, adopt = { adopted += it; true })
+        assertNotNull(WellnessChatSigning.bridgeHeader(op, "GET", "/fossil/snapshot/SNAP-1?operator=$op", emptySha))
+        assertEquals("the first signed use adopts", listOf("http://box.invalid:9091"), adopted)
+    }
+
     // ── who may ask ────────────────────────────────────────────────────────────────────────
 
     @Test

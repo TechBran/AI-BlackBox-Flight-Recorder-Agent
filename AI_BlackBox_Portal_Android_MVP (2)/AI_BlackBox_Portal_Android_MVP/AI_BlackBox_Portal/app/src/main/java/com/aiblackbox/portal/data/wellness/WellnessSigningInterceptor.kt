@@ -45,7 +45,9 @@ class WellnessSigningInterceptor(
      * paired box when the binding belongs to another one (the app was re-pointed:
      * [WellnessChatRules.keyUse]); a binding older than its `box_origin` is pinned to the
      * paired box on its first signed use through [adoptOrigin] (WellnessBinding.adoptBoxOrigin;
-     * false, the default, = it could not be, so nothing is signed).
+     * false, the default, = it could not be, so nothing is signed). Only a request that is
+     * really signed adopts ([commitKeyUse], the last step): one that goes out unsigned anyway
+     * (another operator's, a revoked state's) never pins a binding to the box it went to.
      */
     class Facts(
         val binding: WellnessBindingRecord?,
@@ -77,7 +79,8 @@ class WellnessSigningInterceptor(
         if (request.header("Content-Encoding") != null) return null
         val f = facts() ?: return null
         if (f.binding == null) return null
-        if (!keyPinned(f, request.url.toString())) return null
+        val use = keyUse(f, request.url.toString())
+        if (use is WellnessChatRules.KeyUse.Refused) return null
         val body = request.body
         val bytes: ByteArray? = when {
             body == null -> null
@@ -92,6 +95,8 @@ class WellnessSigningInterceptor(
             request.tag(ForOperator::class.java)?.operator)
         val decision = WellnessChatRules.signingDecision(f.binding, f.state, operator, request.method, path)
             as? WellnessChatRules.SigningDecision.Sign ?: return null
+        // Decided: this request is signed. Only now may an older binding be pinned to its box.
+        if (!commitKeyUse(f, use)) return null
         val header = OriginSigner(decision.enrollmentId, decision.key)
             .header(request.method, path, bytes ?: EMPTY, nowSec(), nonce())
         val builder = request.newBuilder().header(OriginSigner.HEADER, header)
@@ -114,15 +119,21 @@ class WellnessSigningInterceptor(
             builder.tag(SignHealth::class.java, SignHealth)
                 .let { b -> operator?.takeIf { it.isNotBlank() }?.let { b.tag(ForOperator::class.java, ForOperator(it)) } ?: b }
 
+        /** Where [f]'s key may go for [requestUrl] ([WellnessChatRules.keyUse]). No side effect. */
+        fun keyUse(f: Facts, requestUrl: String): WellnessChatRules.KeyUse =
+            WellnessChatRules.keyUse(f.binding?.boxOrigin, requestUrl, f.boxOrigin)
+
         /**
-         * May [f]'s key sign a request to [requestUrl] ([WellnessChatRules.keyUse])? A binding
-         * without `box_origin` adopts the paired box here, once, and signs only if that stuck.
+         * The last step before a proof goes out, once everything else has decided to sign:
+         * Pinned signs; Adopt pins a binding without `box_origin` to the paired box now (once,
+         * [Facts.adoptOrigin]) and signs only if that stuck; Refused never signs. Decide first,
+         * adopt last: contract (f) pins an older binding to "the paired origin of its first
+         * signed use", never to a box that only saw an unsigned request.
          */
-        fun keyPinned(f: Facts, requestUrl: String): Boolean =
-            when (val use = WellnessChatRules.keyUse(f.binding?.boxOrigin, requestUrl, f.boxOrigin)) {
-                WellnessChatRules.KeyUse.Pinned -> true
-                is WellnessChatRules.KeyUse.Adopt -> runCatching { f.adoptOrigin(use.origin) }.getOrDefault(false)
-                is WellnessChatRules.KeyUse.Refused -> false
-            }
+        fun commitKeyUse(f: Facts, use: WellnessChatRules.KeyUse): Boolean = when (use) {
+            WellnessChatRules.KeyUse.Pinned -> true
+            is WellnessChatRules.KeyUse.Adopt -> runCatching { f.adoptOrigin(use.origin) }.getOrDefault(false)
+            is WellnessChatRules.KeyUse.Refused -> false
+        }
     }
 }

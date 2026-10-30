@@ -49,6 +49,13 @@ class PolicyHashTest {
     }
 
     @Test
+    fun `the version setup agrees to is the bundled copy's own Version line`() {
+        val bundled = above("src/main/res/raw/health_privacy.md")!!
+        assertEquals("bump WellnessRules.BUNDLED_POLICY_VERSION with the bundled policy",
+            WellnessRules.BUNDLED_POLICY_VERSION, WellnessRules.policyVersionOfText(bundled.readText()))
+    }
+
+    @Test
     fun `the bundled policy is the box's own copy when the repo is checked out whole`() {
         val box = above("Orchestrator/wellness/policy/health_privacy.md") ?: return // the app built on its own
         val bundled = above("src/main/res/raw/health_privacy.md")!!

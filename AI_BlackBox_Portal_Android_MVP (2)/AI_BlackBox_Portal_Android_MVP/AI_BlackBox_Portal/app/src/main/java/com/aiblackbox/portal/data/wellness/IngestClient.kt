@@ -131,8 +131,12 @@ class IngestClient(
         const val PRIVACY_POLICY = "/wellness/privacy-policy"
         private const val MAX_REPLY_CHARS = 1_000_000
 
-        /** A signed call not sent: the key belongs to another box than this client's ([keyPinned]). */
-        const val OTHER_BOX = "other_box"
+        /**
+         * A signed call not sent: the key belongs to another box than this client's ([keyPinned]).
+         * WellnessRules turns it into words that say so ([WellnessRules.unsentMessage]) and into the
+         * Health screen's "set up with another box address" card ([WellnessRules.keyElsewhereOf]).
+         */
+        const val OTHER_BOX = WellnessChatRules.KEY_OTHER_BOX
 
         /** Drift under this is left alone (the box allows 120 s; HTTP dates have 1 s grain). */
         const val SKEW_TOLERANCE_S = 30L

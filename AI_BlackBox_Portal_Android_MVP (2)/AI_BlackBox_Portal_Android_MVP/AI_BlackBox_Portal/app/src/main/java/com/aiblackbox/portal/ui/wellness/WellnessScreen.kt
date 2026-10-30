@@ -53,8 +53,10 @@ import com.aiblackbox.portal.ui.theme.Neutral700
  * with their fixes, what BlackBox may use (Off / Ask / Proactive), where it may go ("Only AI
  * on my network", providers, local-only per kind), the health instinct prompt, where you can
  * ask, the briefing placeholder (M7.3), who saw my health data, and Pause / Disconnect /
- * Stop & erase; "The privacy policy changed" while the collector holds for a new version, and
- * "Health is turned off on your BlackBox" when the box's owner turned it off (no setup then).
+ * Stop & erase; "The privacy policy changed" while the collector holds for a new version,
+ * "Health is turned off on your BlackBox" when the box's owner turned it off (no setup then),
+ * and "Health was set up with another box address" when the app now uses another address than
+ * the one this phone's key was made with (nothing syncs or is signed until the person chooses).
  * Not set up: the setup flow. The Probe exists only in debug builds and in a
  * build made with `-PwellnessProbe` (the M7.1 device walk).
  */
@@ -155,6 +157,8 @@ private fun Enrolled(state: WellnessUiState, viewModel: WellnessViewModel) {
         HealthCard("Needs attention") { HealthNote(WellnessRules.DISABLED_MESSAGE, HealthAmber) }
     }
 
+    state.keyElsewhere?.let { KeyElsewhereCard(it, viewModel) }
+
     if (state.policyHold) PolicyChangedCard(state, viewModel)
 
     WellnessStatusScreen(state, viewModel)
@@ -253,6 +257,22 @@ private fun InstinctPromptCard(current: String?, viewModel: WellnessViewModel) {
         Row {
             HealthButton("Save", enabled = text != (current ?: "")) { viewModel.saveInstinctPrompt(text) }
             HealthButton("Reset to default", color = Neutral700) { text = ""; viewModel.resetInstinctPrompt() }
+        }
+    }
+}
+
+/**
+ * "Health was set up with another box address" (contract (f)): the key works only with the
+ * address it was made through, so the phone neither syncs nor signs for the one the app uses
+ * now. Set Health up again with this box (the Reconnect setup), or forget it on this phone.
+ */
+@Composable
+private fun KeyElsewhereCard(k: WellnessRules.KeyElsewhere, viewModel: WellnessViewModel) {
+    HealthCard(WellnessRules.KEY_ELSEWHERE_TITLE) {
+        HealthNote(WellnessRules.keyElsewhereMessage(k), HealthAmber)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            HealthButton(WellnessRules.SET_UP_HERE_LABEL) { viewModel.startSetup() }
+            HealthButton(WellnessRules.FORGET_HERE_LABEL, color = Neutral700) { viewModel.forgetHere() }
         }
     }
 }

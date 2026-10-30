@@ -70,9 +70,10 @@ data class WellnessSyncState(
      */
     @SerialName("pending_settings") val pendingSettings: PendingSetupSettings? = null,
     /**
-     * The privacy policy version the person agreed to: the enroll reply's at enrollment, then the
-     * one of the text they agreed to on the "The privacy policy changed" card. Null in a state
-     * written before it was kept ([WellnessRules.LEGACY_POLICY_VERSION]).
+     * The privacy policy version the person agreed to: at enrollment the one of the text setup
+     * showed (the bundled copy, [WellnessRules.BUNDLED_POLICY_VERSION]), then the one of the text
+     * they agreed to on the "The privacy policy changed" card. Null in a state written before it
+     * was kept ([WellnessRules.LEGACY_POLICY_VERSION]).
      */
     @SerialName("policy_version_acked") val policyVersionAcked: String? = null,
     /**

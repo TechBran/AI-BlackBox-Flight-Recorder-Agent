@@ -56,7 +56,8 @@ object WellnessRules {
      * trouble list. A phone that holds no binding is "Not set up" whatever the box says: the
      * collector cannot run without K. Health turned off on the box is "Needs attention" either
      * way (there is nothing to set up until it is back on), and so is a privacy policy the
-     * person has not agreed to yet ([policyHold]).
+     * person has not agreed to yet ([policyHold]), and a key that belongs to another box address
+     * than the one the app uses now ([keyElsewhere]: nothing syncs, whatever the phone last saw).
      */
     fun statusChip(
         state: EnrollmentState,
@@ -64,11 +65,13 @@ object WellnessRules {
         troubles: List<String>,
         held: Boolean = false,
         policyHold: Boolean = false,
+        keyElsewhere: Boolean = false,
     ): StatusChip = when {
         state == EnrollmentState.DISABLED -> StatusChip.NEEDS_ATTENTION
         !boundHere -> StatusChip.NOT_SET_UP
         state == EnrollmentState.NOT_SET_UP || state == EnrollmentState.AWAITING_PHONE ||
             state == EnrollmentState.REVOKED -> StatusChip.NOT_SET_UP
+        keyElsewhere -> StatusChip.NEEDS_ATTENTION
         // A Pause / Disconnect / erase asked for here and not yet confirmed by the box: the
         // phone has already stopped, so it says so.
         held || state == EnrollmentState.PAUSED -> StatusChip.PAUSED
@@ -226,6 +229,8 @@ object WellnessRules {
         val held: Boolean = false,
         /** The box names a privacy policy the person has not agreed to yet ([policyHold]). */
         val policyHold: Boolean = false,
+        /** This phone's key belongs to another box address than the paired one ([keyElsewhere]). */
+        val keyElsewhere: Boolean = false,
     )
 
     /**
@@ -238,6 +243,8 @@ object WellnessRules {
         !i.bound -> SyncDecision.Skip("not_enrolled")
         i.stopped -> SyncDecision.Skip("stopped")
         i.held -> SyncDecision.Skip("held")
+        // Nothing the phone reads could be delivered: the key signs for no other box address.
+        i.keyElsewhere -> SyncDecision.Skip(KEY_ELSEWHERE)
         // The bundled policy promises the new version is shown before anything more is collected.
         i.policyHold -> SyncDecision.Skip(POLICY_CHANGED)
         i.state == EnrollmentState.PAUSED -> SyncDecision.Skip("paused")
@@ -260,11 +267,21 @@ object WellnessRules {
 
     /**
      * Should the app start (or resume) the history import? Not once it is done, and never while
-     * the box refused the key, a narrowing is held, or the enrollment is paused or over: the
-     * import would only read Health Connect into an outbox nobody may receive.
+     * the box refused the key, a narrowing is held, the person has not agreed to the box's
+     * current privacy policy ([policyHold]), the key belongs to another box address
+     * ([keyElsewhere]), or the enrollment is paused or over: the import would only read Health
+     * Connect into an outbox nobody may receive (and its worker would flash the "Importing health
+     * history" notification for a page it then skips).
      */
-    fun shouldStartBackfill(done: Boolean, needsReconnect: Boolean, held: Boolean, state: EnrollmentState): Boolean =
-        !done && !needsReconnect && !held && state != EnrollmentState.PAUSED &&
+    fun shouldStartBackfill(
+        done: Boolean,
+        needsReconnect: Boolean,
+        held: Boolean,
+        state: EnrollmentState,
+        policyHold: Boolean = false,
+        keyElsewhere: Boolean = false,
+    ): Boolean =
+        !done && !needsReconnect && !held && !policyHold && !keyElsewhere && state != EnrollmentState.PAUSED &&
             state != EnrollmentState.REVOKED && state != EnrollmentState.OWNERSHIP_CHANGED &&
             // Waiting for the old phone's approval: the box takes nothing yet, and a decline
             // revokes this key. The import starts on the first app open after the approval.
@@ -306,13 +323,114 @@ object WellnessRules {
         KEY_REFUSED,
         /** No answer or another refusal: stay stopped (the hold stays) and let the person retry. */
         UNCONFIRMED,
+        /**
+         * Never sent: the key belongs to another box address than the paired one ([keyElsewhere];
+         * IngestClient answers -1 [WellnessChatRules.KEY_OTHER_BOX] without a request). No box
+         * was told; [elsewhereNarrowing] says what the phone does.
+         */
+        KEY_ELSEWHERE,
     }
 
-    fun narrowingOutcome(status: Int): NarrowingOutcome = when (status) {
-        in 200..299 -> NarrowingOutcome.CONFIRMED
-        401, 409, 410 -> NarrowingOutcome.KEY_REFUSED
+    fun narrowingOutcome(status: Int, error: String? = null): NarrowingOutcome = when {
+        status in 200..299 -> NarrowingOutcome.CONFIRMED
+        status == 401 || status == 409 || status == 410 -> NarrowingOutcome.KEY_REFUSED
+        status < 0 && error == WellnessChatRules.KEY_OTHER_BOX -> NarrowingOutcome.KEY_ELSEWHERE
         else -> NarrowingOutcome.UNCONFIRMED
     }
+
+    /** What the phone does with a narrowing no box could be told of ([NarrowingOutcome.KEY_ELSEWHERE]). */
+    data class ElsewhereNarrowing(val forgetHere: Boolean, val message: String)
+
+    /**
+     * A Pause, Disconnect or Stop & erase asked for while the key belongs to another box address.
+     * The phone cannot tell whether the paired box is the binding's box under a new name or
+     * another box (where the same operator name may be someone else's), so it tells neither.
+     * Pause stays a pause on this phone. "Disconnect, keep history" asks for nothing on the box,
+     * so Health is forgotten here. A delete (Disconnect, delete history; Stop & erase) keeps the
+     * hold AND the key: the box deletes a health store only for its enrolled phone's signature,
+     * so forgetting the key would leave that store with no way to erase it from this phone
+     * ("Forget Health on this phone" stays on the screen for a person who wants that anyway).
+     */
+    fun elsewhereNarrowing(hold: String, keepHistory: Boolean?): ElsewhereNarrowing = when {
+        hold == HOLD_PAUSE -> ElsewhereNarrowing(forgetHere = false, PAUSED_ELSEWHERE_MESSAGE)
+        hold == HOLD_DISCONNECT && keepHistory == true -> ElsewhereNarrowing(forgetHere = true, FORGOT_HERE_MESSAGE)
+        else -> ElsewhereNarrowing(forgetHere = false, NOT_DELETED_ELSEWHERE_MESSAGE)
+    }
+
+    // ── a key for another box address (contract (f)) ──────────────────────────────────────
+
+    /** The skip reason while the key belongs to another box address ([keyElsewhere]). */
+    const val KEY_ELSEWHERE = "key_other_box"
+
+    /** The binding's box and the box the app uses now, when they differ ([keyElsewhereOf]). */
+    data class KeyElsewhere(val boundTo: String, val pairedWith: String)
+
+    /**
+     * Does this phone hold a key the app may not use any more? The binding names the box that
+     * delivered it (`box_origin`) and the app is paired with another address now: re-pointed at
+     * another box, or the same box reached under another name (a tailnet IP and its https name
+     * are two origins). The phone cannot tell the two apart, so it signs nothing for the paired
+     * box and syncs nothing (WellnessChatRules.keyUse); this says so, so the Health screen can
+     * offer setting Health up with the paired box, or forgetting it here, instead of looking
+     * active while nothing happens. A binding older than `box_origin` is never elsewhere (it
+     * adopts the paired box on its first signed use), and an unpaired app is not either.
+     */
+    fun keyElsewhereOf(bindingOrigin: String?, pairedOrigin: String?): KeyElsewhere? {
+        val paired = WellnessChatRules.originOf(pairedOrigin) ?: return null
+        if (bindingOrigin.isNullOrBlank()) return null
+        val use = WellnessChatRules.keyUse(bindingOrigin, paired, paired)
+        if (use != WellnessChatRules.KeyUse.Refused(WellnessChatRules.KEY_OTHER_BOX)) return null
+        return KeyElsewhere(WellnessChatRules.originOf(bindingOrigin) ?: bindingOrigin.trim(), paired)
+    }
+
+    fun keyElsewhere(bindingOrigin: String?, pairedOrigin: String?): Boolean = keyElsewhereOf(bindingOrigin, pairedOrigin) != null
+
+    const val KEY_ELSEWHERE_TITLE = "Health was set up with another box address"
+
+    /** The card's words: both addresses, as the app knows them (no health data in either). */
+    fun keyElsewhereMessage(k: KeyElsewhere): String =
+        "Health on this phone was set up through ${k.boundTo}, and this app now uses ${k.pairedWith}. The phone's " +
+            "health key works only with the address it was set up through, so nothing syncs and no health request is " +
+            "signed. Set Health up again with this box, or forget Health on this phone."
+
+    const val SET_UP_HERE_LABEL = "Set up Health with this box"
+    const val FORGET_HERE_LABEL = "Forget Health on this phone"
+
+    /** A signed call the phone did not send because the key belongs to another box address. */
+    const val KEY_ELSEWHERE_SHORT = "Nothing was sent: this phone's health key works only with the box address Health " +
+        "was set up through."
+    const val FORGOT_HERE_MESSAGE = "Health was removed from this phone. The box it was set up through wasn't told " +
+        "and keeps what it stored."
+    const val PAUSED_ELSEWHERE_MESSAGE = "Paused on this phone. No box was told: this phone's health key works only " +
+        "with the address Health was set up through."
+    const val NOT_DELETED_ELSEWHERE_MESSAGE = "Stopped on this phone, but nothing was deleted: only the box address " +
+        "Health was set up through can delete it. Point the app back at it and try again."
+
+    /**
+     * The words for a signed call that did not go through: [KEY_ELSEWHERE_SHORT] when it was
+     * never sent for the key's box ([WellnessChatRules.KEY_OTHER_BOX]), else [refused] when the
+     * box answered, else "Couldn't reach your box."
+     */
+    fun unsentMessage(reached: Boolean, error: String?, refused: String): String = when {
+        error == WellnessChatRules.KEY_OTHER_BOX -> KEY_ELSEWHERE_SHORT
+        reached -> refused
+        else -> "Couldn't reach your box."
+    }
+
+    // ── the capability report ──────────────────────────────────────────────────────────────
+
+    /**
+     * May the phone run the capability probe and send its report now? The report is collection
+     * too (the policy lists "counts of records"; the probe reads 14 days of Health Connect), so
+     * it goes only when collection may: never while the box refused the key, a narrowing is held,
+     * the person has not agreed to the box's current policy ([policyHold]: "the app shows you the
+     * new version before it collects anything more"), the key belongs to another box address, or
+     * collection is paused or over.
+     */
+    fun mayReportCapabilities(st: WellnessSyncState, keyElsewhere: Boolean): Boolean =
+        !st.needsReconnect && st.localHold == null && !policyHold(st) && !keyElsewhere &&
+            st.enrollmentState() != EnrollmentState.PAUSED && st.enrollmentState() != EnrollmentState.REVOKED &&
+            st.enrollmentState() != EnrollmentState.OWNERSHIP_CHANGED
 
     // ── moving Health to another phone (spec §3.1; `POST /wellness/replace-approve`) ──────
 
@@ -352,6 +470,19 @@ object WellnessRules {
      */
     const val LEGACY_POLICY_VERSION = "2026-10-29"
 
+    /**
+     * The version of the policy this app bundles (`res/raw/health_privacy.md`, its "Version"
+     * line; PolicyHashTest holds the two together): the text setup shows, so the one a new
+     * enrollment agrees to ([enrolledUnderPolicy]). Changes with the bundled copy.
+     */
+    const val BUNDLED_POLICY_VERSION = "2026-10-29"
+
+    private val POLICY_VERSION_LINE = Regex("""^Version\s+(\S+)\s*$""", RegexOption.MULTILINE)
+
+    /** The version a policy text names on its own "Version" line, or null. */
+    fun policyVersionOfText(markdown: String?): String? =
+        markdown?.let { POLICY_VERSION_LINE.find(it)?.groupValues?.get(1) }?.let { policyVersion(it) }
+
     private val POLICY_VERSION_RE = Regex("[A-Za-z0-9._-]{1,40}")
 
     /** [text] as a policy version, or null (absent, or not a version token). */
@@ -386,9 +517,21 @@ object WellnessRules {
     fun agreePolicy(st: WellnessSyncState, version: String): WellnessSyncState =
         policyVersion(version)?.let { st.copy(policyVersionAcked = it, policyVersionBox = it) } ?: st
 
-    /** [st] at enrollment: the person agreed to the version the enroll reply carried. */
-    fun enrolledUnderPolicy(st: WellnessSyncState, version: String?): WellnessSyncState =
-        policyVersion(version)?.let { st.copy(policyVersionAcked = it, policyVersionBox = it) } ?: st
+    /**
+     * [st] at enrollment. The person agreed to the text setup showed them: the copy bundled in
+     * this app ([shown], [BUNDLED_POLICY_VERSION]), not the version the enroll reply names
+     * ([replyVersion]), which they may never have seen (a box updated ahead of the app). The
+     * reply's version is what the box has now ([noteBoxPolicy]): when it differs, the collector
+     * holds from the start and the Health screen shows the box's own text first. An agreement
+     * this phone already recorded to exactly the reply's version (the policy card, before a
+     * Reconnect) stands.
+     */
+    fun enrolledUnderPolicy(st: WellnessSyncState, replyVersion: String?, shown: String = BUNDLED_POLICY_VERSION): WellnessSyncState {
+        val reply = policyVersion(replyVersion)
+        val acked = if (reply != null && policyVersion(st.policyVersionAcked) == reply) reply
+            else policyVersion(shown) ?: LEGACY_POLICY_VERSION
+        return noteBoxPolicy(st.copy(policyVersionAcked = acked), reply)
+    }
 
     /** May the policy card offer "I agree"? Only over the box's text, fetched, with the version it names. */
     fun mayAgreeToPolicy(text: String?, version: String?): Boolean = !text.isNullOrBlank() && policyVersion(version) != null

@@ -66,6 +66,16 @@ object WellnessGraph {
         return binding(app).mayUseKeyFor(requestUrl, boxOrigin(app))
     }
 
+    /**
+     * Does this phone's key belong to another box address than the one the app is paired with
+     * now (WellnessRules.keyElsewhere)? Then nothing syncs or is signed, and the Health screen
+     * says so instead of looking active.
+     */
+    fun keyElsewhere(context: Context): Boolean {
+        val app = context.applicationContext
+        return WellnessRules.keyElsewhere(binding(app).current()?.boxOrigin, boxOrigin(app))
+    }
+
     /** A client for [origin] whose key use is pinned ([keyPinned]). */
     private fun newClient(app: Context, origin: String): IngestClient =
         IngestClient(origin, keyPinned = { url -> keyPinned(app, url) })
@@ -117,6 +127,7 @@ object WellnessGraph {
                         BlackBoxNotificationManager(app).showWellnessNotice("Reconnect Health",
                             "Open BlackBox, Settings, Health, and set this phone up again.", "wellness-reconnect")
                     },
+                    pairedOrigin = { boxOrigin(app) },
                 ).also {
                     engine = it
                     engineOrigin = origin
@@ -149,13 +160,17 @@ object WellnessGraph {
     /**
      * Run the probe and send the capability report (counts only) when it is due: daily, after
      * each sync once the grants differ from the last report (a change made in Health Connect's
-     * own settings), and at once with [force] (a grant made in the app).
+     * own settings), and at once with [force] (a grant made in the app). Never while collection
+     * may not run (WellnessRules.mayReportCapabilities: the report is collection too, so a
+     * privacy policy the person has not agreed to, a pause or a held narrowing stops it, [force]
+     * included, before the probe reads anything).
      */
     suspend fun pushCapabilities(context: Context, force: Boolean = false): CapabilityProbe.Result? {
         val app = context.applicationContext
         val record = binding(app).current() ?: return null
         val client = client(app) ?: return null
         val st = state(app).load()
+        if (!WellnessRules.mayReportCapabilities(st, keyElsewhere(app))) return null
         val now = System.currentTimeMillis()
         // A grant added or withdrawn in Health Connect's own settings re-sends the report at once.
         val grants = runCatching { gateway(app).grantedPermissions() }.getOrDefault(emptySet()).sorted()

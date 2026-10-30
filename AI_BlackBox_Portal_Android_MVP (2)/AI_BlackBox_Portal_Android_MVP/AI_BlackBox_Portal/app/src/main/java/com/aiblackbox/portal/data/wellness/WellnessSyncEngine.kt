@@ -32,6 +32,10 @@ import java.time.ZoneId
  * to (a credentialed status, an answer's X-Policy-Version), nothing is read or pushed until they
  * agree on the Health screen ([WellnessRules.policyHold]); a push stops at that answer.
  *
+ * So does a key that belongs to another box address than the one the app is paired with now
+ * ([pairedOrigin]; WellnessRules.keyElsewhereOf): nothing it read could be delivered, so it reads
+ * nothing and asks the box nothing until the person sets Health up again or forgets it here.
+ *
  * Logs carry counts only, never a value, a key or a payload.
  */
 class WellnessSyncEngine(
@@ -54,6 +58,8 @@ class WellnessSyncEngine(
     private val putSettings: (suspend (body: String, signer: OriginSigner) -> WellnessOutbox.SendResult)? = null,
     /** The box refused those setup choices for good: tell the person to set them again. */
     private val onSetupSettingsRefused: () -> Unit = {},
+    /** The box the app is paired with now (WellnessGraph.boxOrigin); null = unknown, never a reason to stop. */
+    private val pairedOrigin: () -> String? = { null },
 ) {
 
     data class SyncReport(
@@ -80,9 +86,13 @@ class WellnessSyncEngine(
         if (!binding.runIfCurrent(gen, block)) throw StaleRunException()
     }
 
+    /** Does the run's key belong to another box address than the paired one (WellnessRules.keyElsewhere)? */
+    private fun keyElsewhere(record: WellnessBindingRecord): Boolean =
+        WellnessRules.keyElsewhere(record.boxOrigin, runCatching { pairedOrigin() }.getOrNull())
+
     /** The gate both kinds of run share (WellnessRules.maySync), from what the phone holds now. */
-    private fun gate(st: WellnessSyncState, sdk: HcSdkStatus, granted: Set<String>, readable: List<HcType>,
-                     inForeground: Boolean, now: Long): WellnessRules.SyncDecision = WellnessRules.maySync(
+    private fun gate(record: WellnessBindingRecord, st: WellnessSyncState, sdk: HcSdkStatus, granted: Set<String>,
+                     readable: List<HcType>, inForeground: Boolean, now: Long): WellnessRules.SyncDecision = WellnessRules.maySync(
         WellnessRules.SyncInputs(
             bound = true,
             state = st.enrollmentState().let {
@@ -98,6 +108,7 @@ class WellnessSyncEngine(
             nowMs = now,
             held = st.localHold != null,
             policyHold = WellnessRules.policyHold(st),
+            keyElsewhere = keyElsewhere(record),
         ),
     )
 
@@ -120,7 +131,7 @@ class WellnessSyncEngine(
             val sdk = gateway.sdkStatus()
             val granted = grantedNow(sdk)
             val readable = WellnessRules.readableTypes(st.consent(), granted)
-            val decision = gate(st, sdk, granted, readable, inForeground, now)
+            val decision = gate(record, st, sdk, granted, readable, inForeground, now)
             if (decision is WellnessRules.SyncDecision.Skip) {
                 Log.d(TAG, "sync skipped (${decision.reason})")
                 // Reading is not allowed now, but what was read earlier may still be delivered.
@@ -306,7 +317,7 @@ class WellnessSyncEngine(
         val granted = grantedNow(sdk)
         val readable = WellnessRules.readableTypes(st.consent(), granted)
         val backgroundGranted = WellnessCatalog.PERMISSION_BACKGROUND in granted
-        when (val decision = gate(st, sdk, granted, readable, inForeground, now)) {
+        when (val decision = gate(record, st, sdk, granted, readable, inForeground, now)) {
             is WellnessRules.SyncDecision.Skip -> return if (decision.reason == "backoff")
                 BackfillStep.QuotaBackoff(st.backoffUntilMs - now, requeue = backgroundGranted)
             else BackfillStep.Skipped(decision.reason)
@@ -515,8 +526,9 @@ class WellnessSyncEngine(
         val fetch = fetchStatus ?: return null
         val now = clock()
         val st = state.load()
-        // Stopped (a refused key) or held here: the run ends at the gate anyway, so ask nothing.
-        if (st.needsReconnect || st.localHold != null) return null
+        // Stopped (a refused key), held here, or a key for another box address: the run ends at
+        // the gate anyway, so ask nothing.
+        if (st.needsReconnect || st.localHold != null || keyElsewhere(record)) return null
         if (st.lastStatusMs in (now - STATUS_EVERY_MS + 1)..now) return null
         val signer = OriginSigner(record.enrollmentId, record.k)
         val reply = signedCall { fetch(record.operator, signer) }

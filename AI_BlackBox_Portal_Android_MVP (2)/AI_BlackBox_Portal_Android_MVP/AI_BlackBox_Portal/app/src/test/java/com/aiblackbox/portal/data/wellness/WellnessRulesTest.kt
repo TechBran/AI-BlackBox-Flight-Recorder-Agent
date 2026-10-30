@@ -364,7 +364,7 @@ class WellnessRulesTest {
     }
 
     @Test
-    fun `enrollment records the reply's version, a new one holds, and agreeing to its text lifts the hold`() {
+    fun `enrollment records the text setup showed, a new one holds, and agreeing to its text lifts the hold`() {
         var st = WellnessRules.enrolledUnderPolicy(WellnessSyncState(), "2026-10-29")
         assertEquals("2026-10-29", st.policyVersionAcked)
         assertFalse(WellnessRules.policyHold(st))
@@ -385,6 +385,68 @@ class WellnessRulesTest {
         st = WellnessRules.agreePolicy(WellnessRules.noteBoxPolicy(st, "2026-12-01"), "2026-12-02")
         assertEquals("2026-12-02", st.policyVersionAcked)
         assertFalse(WellnessRules.policyHold(st))
+    }
+
+    @Test
+    fun `an enroll reply naming a newer policy than the one setup showed holds the collector from the start`() {
+        // Setup shows the bundled copy; a box updated ahead of the app names a version the person never read.
+        val st = WellnessRules.enrolledUnderPolicy(WellnessSyncState(), "2026-11-15")
+        assertEquals(WellnessRules.BUNDLED_POLICY_VERSION, st.policyVersionAcked)
+        assertEquals("2026-11-15", st.policyVersionBox)
+        assertTrue(WellnessRules.policyHold(st))
+        assertFalse(WellnessRules.mayReportCapabilities(st.copy(state = EnrollmentState.ACTIVE.wire), keyElsewhere = false))
+        // the card's "I agree" over the box's own text lifts it
+        assertFalse(WellnessRules.policyHold(WellnessRules.agreePolicy(st, "2026-11-15")))
+        // an older box that names no version: the bundled text is what was agreed, nothing holds
+        val quiet = WellnessRules.enrolledUnderPolicy(WellnessSyncState(), null)
+        assertEquals(WellnessRules.BUNDLED_POLICY_VERSION, quiet.policyVersionAcked)
+        assertFalse(WellnessRules.policyHold(quiet))
+        // a Reconnect after the person already agreed to exactly the box's version keeps that agreement
+        val agreed = WellnessRules.agreePolicy(st, "2026-11-15")
+        val again = WellnessRules.enrolledUnderPolicy(agreed, "2026-11-15")
+        assertEquals("2026-11-15", again.policyVersionAcked)
+        assertFalse(WellnessRules.policyHold(again))
+        // but not an agreement to some other version: the newer reply holds until its text is read
+        val older = WellnessRules.enrolledUnderPolicy(agreed, "2026-12-01")
+        assertEquals(WellnessRules.BUNDLED_POLICY_VERSION, older.policyVersionAcked)
+        assertTrue(WellnessRules.policyHold(older))
+        // the version a text names on its own line
+        assertEquals("2026-10-29", WellnessRules.policyVersionOfText("# Policy\n\nVersion 2026-10-29\n\nText."))
+        assertEquals("2026-11-15", WellnessRules.policyVersionOfText("# Policy\r\nVersion 2026-11-15\r\n"))
+        assertNull(WellnessRules.policyVersionOfText("# Policy\n\nThis version changes."))
+        assertNull(WellnessRules.policyVersionOfText(null))
+    }
+
+    @Test
+    fun `the capability report goes only when collection may, and the import waits for the policy too`() {
+        val active = WellnessSyncState(state = EnrollmentState.ACTIVE.wire)
+        assertTrue(WellnessRules.mayReportCapabilities(active, keyElsewhere = false))
+        val newPolicy = WellnessRules.noteBoxPolicy(active, "2026-11-15")
+        assertFalse("a policy not agreed to", WellnessRules.mayReportCapabilities(newPolicy, keyElsewhere = false))
+        assertTrue("agreed", WellnessRules.mayReportCapabilities(WellnessRules.agreePolicy(newPolicy, "2026-11-15"), false))
+        assertFalse("a held narrowing", WellnessRules.mayReportCapabilities(active.copy(localHold = WellnessRules.HOLD_PAUSE), false))
+        assertFalse("a refused key", WellnessRules.mayReportCapabilities(active.copy(needsReconnect = true), false))
+        assertFalse("a key for another box address", WellnessRules.mayReportCapabilities(active, keyElsewhere = true))
+        for (s in listOf(EnrollmentState.PAUSED, EnrollmentState.REVOKED, EnrollmentState.OWNERSHIP_CHANGED))
+            assertFalse(s.wire, WellnessRules.mayReportCapabilities(WellnessSyncState(state = s.wire), false))
+        assertTrue(WellnessRules.mayReportCapabilities(WellnessSyncState(state = EnrollmentState.STALE.wire), false))
+
+        assertFalse("no import flashes its notification for a page it would skip",
+            WellnessRules.shouldStartBackfill(false, false, false, EnrollmentState.ACTIVE, policyHold = true))
+        assertFalse(WellnessRules.shouldStartBackfill(false, false, false, EnrollmentState.ACTIVE, keyElsewhere = true))
+        assertTrue(WellnessRules.shouldStartBackfill(false, false, false, EnrollmentState.ACTIVE, policyHold = false, keyElsewhere = false))
+    }
+
+    @Test
+    fun `a narrowing never sent for the key's box is not a box that could not be reached`() {
+        assertEquals(WellnessRules.NarrowingOutcome.KEY_ELSEWHERE, WellnessRules.narrowingOutcome(-1, WellnessChatRules.KEY_OTHER_BOX))
+        assertEquals(WellnessRules.NarrowingOutcome.KEY_ELSEWHERE, WellnessRules.narrowingOutcome(-1, IngestClient.OTHER_BOX))
+        assertEquals(WellnessRules.NarrowingOutcome.UNCONFIRMED, WellnessRules.narrowingOutcome(-1, "SocketTimeoutException"))
+        assertEquals("an answer is never mistaken for it", WellnessRules.NarrowingOutcome.CONFIRMED,
+            WellnessRules.narrowingOutcome(200, WellnessChatRules.KEY_OTHER_BOX))
+        assertEquals(WellnessRules.KEY_ELSEWHERE_SHORT, WellnessRules.unsentMessage(false, WellnessChatRules.KEY_OTHER_BOX, "x"))
+        assertEquals("x", WellnessRules.unsentMessage(true, null, "x"))
+        assertEquals("Couldn't reach your box.", WellnessRules.unsentMessage(false, "ConnectException", "x"))
     }
 
     @Test

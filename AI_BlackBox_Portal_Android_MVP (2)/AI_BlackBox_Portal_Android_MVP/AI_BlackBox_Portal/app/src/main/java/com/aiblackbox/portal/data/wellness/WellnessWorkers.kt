@@ -89,18 +89,25 @@ object WellnessScheduler {
         }
     }
 
-    /** The box confirmed the enrollment: first sync, the periodic job, and the history import. */
+    /**
+     * The box confirmed the enrollment: first sync, the periodic job, and the history import
+     * (not while the box already names a privacy policy newer than the one setup showed: the
+     * import starts once the person agrees, after the sync "I agree" asks for).
+     */
     fun onEnrolled(context: Context) {
         val st = WellnessGraph.state(context).load()
         schedulePeriodic(context, st.intervalMin)
         syncNow(context)
-        startBackfill(context)
+        if (!WellnessRules.policyHold(st)) startBackfill(context)
     }
 
-    /** Whether [st] wants the history import (re)started (WellnessRules decides). */
-    fun backfillWanted(st: WellnessSyncState): Boolean = WellnessRules.shouldStartBackfill(
+    /**
+     * Whether [st] wants the history import (re)started (WellnessRules decides); [keyElsewhere]
+     * = this phone's key belongs to another box address (WellnessGraph.keyElsewhere).
+     */
+    fun backfillWanted(st: WellnessSyncState, keyElsewhere: Boolean): Boolean = WellnessRules.shouldStartBackfill(
         done = st.backfill.done, needsReconnect = st.needsReconnect, held = st.localHold != null,
-        state = st.enrollmentState(),
+        state = st.enrollmentState(), policyHold = WellnessRules.policyHold(st), keyElsewhere = keyElsewhere,
     )
 
     /**
@@ -118,7 +125,7 @@ object WellnessScheduler {
             store.update { it.copy(lastForegroundSyncMs = nowMs) }
             syncNow(app)
         }
-        if (backfillWanted(st)) startBackfill(app)
+        if (backfillWanted(st, WellnessGraph.keyElsewhere(app))) startBackfill(app)
     }
 }
 
@@ -147,7 +154,8 @@ class WellnessSyncWorker(context: Context, params: WorkerParameters) : Coroutine
             // A history import that is due (first run, or a category just turned on) needs a
             // visible foreground worker, which Android allows only while the app is open.
             if (WellnessGraph.binding(app).current() != null &&
-                WellnessScheduler.backfillWanted(WellnessGraph.state(app).load()) && AppForegroundState.isForeground()) {
+                WellnessScheduler.backfillWanted(WellnessGraph.state(app).load(), WellnessGraph.keyElsewhere(app)) &&
+                AppForegroundState.isForeground()) {
                 WellnessScheduler.startBackfill(app)
             }
             Result.success()

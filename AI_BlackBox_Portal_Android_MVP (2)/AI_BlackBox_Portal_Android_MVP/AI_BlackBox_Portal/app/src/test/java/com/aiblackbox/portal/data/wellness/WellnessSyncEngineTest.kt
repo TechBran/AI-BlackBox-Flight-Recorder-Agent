@@ -48,6 +48,7 @@ class WellnessSyncEngineTest {
     private var settingsRefusedNotices = 0
 
     private fun newEngine(
+        paired: (() -> String?)? = null,
         put: (suspend (String) -> WellnessOutbox.SendResult)? = null,
         fetch: (suspend () -> WellnessOutbox.SendResult)? = null,
     ) = WellnessSyncEngine(
@@ -80,6 +81,7 @@ class WellnessSyncEngineTest {
             }
         },
         onSetupSettingsRefused = { settingsRefusedNotices++ },
+        pairedOrigin = paired ?: { null },
     )
 
     private val engine = newEngine()
@@ -778,6 +780,58 @@ class WellnessSyncEngineTest {
         assertEquals(WellnessSyncEngine.POLICY_HELD, engine.sync(false).outcome)
         assertEquals(1, received.size)
         assertEquals(2, outbox.size())
+    }
+
+    // ── a key for another box address (contract (f)) ──────────────────────────────────────
+
+    @Test
+    fun `a key for another box address reads nothing, asks nothing and pushes nothing until it is the paired box again`() = runBlocking {
+        val boxA = "http://100.64.0.10:9091"
+        var paired = boxA
+        val e = newEngine(fetch = { WellnessOutbox.SendResult(200, statusBody(allAsk)) }, paired = { paired })
+        binding.installId()
+        val intent = binding.beginIntent(WellnessFixtures.OPERATOR, boxA)
+        binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_0badc0de", 1, intent.nonce, key))
+        state.update { it.copy(state = "active") }
+        e.sync(false)
+        gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
+        reply = { WellnessOutbox.SendResult(-1) }
+        now += 61_000
+        e.sync(false)
+        assertEquals(1, outbox.size())
+
+        // The app is re-pointed (another box, or the same box under its https name).
+        paired = "https://blackbox.example.ts.net"
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        received.clear()
+        val reads = gw.reads
+        val asked = statusCalls
+        now += 61_000
+        gw.upsert(WellnessFixtures.sleepNight("sleep-2", 4))
+        assertEquals("skipped:" + WellnessRules.KEY_ELSEWHERE, e.sync(true).outcome)
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped(WellnessRules.KEY_ELSEWHERE), e.backfillPage(inForeground = true))
+        assertEquals("nothing is read", reads, gw.reads)
+        assertEquals("no status is asked for", asked, statusCalls)
+        assertTrue("nothing is pushed", received.isEmpty())
+        assertEquals("what waits stays on the phone", 1, outbox.size())
+        assertFalse("not a refused key: no reconnect", state.load().needsReconnect)
+        assertNotNull(binding.current())
+
+        // Pointed back at the box it was set up with: it carries on.
+        paired = boxA
+        now += 61_000
+        assertEquals("ok", e.sync(false).outcome)
+        assertTrue(received.isNotEmpty())
+        assertEquals(0, outbox.size())
+    }
+
+    @Test
+    fun `an older binding without box_origin, or no paired box known, is never held for it`() = runBlocking {
+        val e = newEngine(paired = { "https://blackbox.example.ts.net" })
+        enroll()                                   // an older build's binding: no box_origin
+        assertNull(binding.current()!!.boxOrigin)
+        assertEquals("ok", e.sync(false).outcome)
+        assertEquals("ok", engine.sync(false).outcome) // the default: the paired box is unknown
     }
 
     // ── review fix: bucket groups say which local day they replace ────────────────────────

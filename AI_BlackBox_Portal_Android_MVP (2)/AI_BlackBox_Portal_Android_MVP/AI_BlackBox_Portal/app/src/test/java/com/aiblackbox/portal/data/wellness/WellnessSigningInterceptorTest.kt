@@ -320,6 +320,27 @@ class WellnessSigningInterceptorTest {
     }
 
     @Test
+    fun `a request that goes out unsigned never pins an older binding, decide first and adopt last`() {
+        val legacy = enrolled.binding!!.copy(boxOrigin = null)
+        val adopted = mutableListOf<String>()
+        fun facts(state: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.ACTIVE) =
+            WellnessSigningInterceptor.Facts(legacy, WellnessSyncState(state = state.wire), server.url("").toString(),
+                adoptOrigin = { adopted += it; true })
+        // another operator's turn, a revoked enrollment, a ledger read for nobody, a path off the list
+        val unsigned = listOf(
+            facts() to post("/chat/stream", chatBody("someone-else")),
+            facts(WellnessRules.EnrollmentState.REVOKED) to post("/chat/stream", chatBody()),
+            facts() to ledger("SNAP-42", screen = null),
+            facts() to post("/wellness/erase", """{"operator":"$op"}"""),
+        )
+        for ((f, r) in unsigned) assertUntouched(send(client(f = f), r), plain(r))
+        assertEquals("nothing unsigned adopted a box", emptyList<String>(), adopted)
+        // the first request that is really signed pins it
+        assertTrue(send(client(f = facts()), post("/chat/stream", chatBody())).headers[OriginSigner.HEADER] != null)
+        assertEquals(listOf(WellnessChatRules.originOf(server.url("").toString())), adopted)
+    }
+
+    @Test
     fun `through the real binding an older record is pinned on its first signed use, rewritten once`() {
         val files = WellnessFiles(WellnessFixtures.tempDir("pin"))
         val binding = WellnessBinding(files)
@@ -330,6 +351,11 @@ class WellnessSigningInterceptorTest {
         val live = { WellnessSigningInterceptor.Facts(binding.current(), enrolled.state, paired, adoptOrigin = binding::adoptBoxOrigin) }
         val c = OkHttpClient.Builder().addInterceptor(WellnessSigningInterceptor(live, { 1_793_000_000L })).build()
 
+        // another operator's turn first: unsigned, and the record is untouched
+        val untouched = files.binding.readText()
+        assertNull(send(c, post("/chat/stream", chatBody("someone-else"))).headers[OriginSigner.HEADER])
+        assertEquals(untouched, files.binding.readText())
+        assertNull(binding.current()!!.boxOrigin)
         assertTrue(send(c, post("/chat/stream", chatBody())).headers[OriginSigner.HEADER] != null)
         assertEquals(WellnessChatRules.originOf(paired), binding.current()!!.boxOrigin)
         val written = files.binding.readText()

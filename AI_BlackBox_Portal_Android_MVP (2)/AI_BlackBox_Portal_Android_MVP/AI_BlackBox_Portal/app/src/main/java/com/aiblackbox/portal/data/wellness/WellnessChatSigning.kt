@@ -50,13 +50,18 @@ object WellnessChatSigning {
      * in-app Portal is on. The caller has checked the message came from the paired box's main
      * frame ([WellnessChatRules.bridgeCallerAllowed]), so the request goes to the paired box; the
      * key still signs only when the binding was made with that box (contract (f): an app
-     * re-pointed at another box gives its Portal no proof).
+     * re-pointed at another box gives its Portal no proof). An older binding adopts the paired
+     * box only for a request that gets a header (decide first, adopt last), never for one the
+     * bridge's rules refuse.
      */
     fun bridgeHeader(portalOperator: String?, method: String, pathWithQuery: String, bodySha256Hex: String): String? {
         val f = runCatching { facts?.invoke() }.getOrNull() ?: return null
         val paired = f.boxOrigin ?: return null
-        if (f.binding == null || !WellnessSigningInterceptor.keyPinned(f, paired)) return null
-        return WellnessChatRules.bridgeHeader(f.binding, f.state, portalOperator, method, pathWithQuery, bodySha256Hex,
-            nowSec(), OriginSigner.newNonce())
+        if (f.binding == null) return null
+        val use = WellnessSigningInterceptor.keyUse(f, paired)
+        if (use is WellnessChatRules.KeyUse.Refused) return null
+        val header = WellnessChatRules.bridgeHeader(f.binding, f.state, portalOperator, method, pathWithQuery, bodySha256Hex,
+            nowSec(), OriginSigner.newNonce()) ?: return null
+        return header.takeIf { WellnessSigningInterceptor.commitKeyUse(f, use) }
     }
 }
