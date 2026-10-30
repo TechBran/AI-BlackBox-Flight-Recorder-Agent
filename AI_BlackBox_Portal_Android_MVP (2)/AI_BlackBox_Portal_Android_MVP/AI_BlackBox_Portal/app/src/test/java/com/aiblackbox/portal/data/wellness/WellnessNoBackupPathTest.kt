@@ -74,4 +74,18 @@ class WellnessNoBackupContextTest {
         assertFalse(files.root.canonicalFile.toPath().startsWith(app.filesDir.canonicalFile.toPath()))
         assertTrue(WellnessGraph.files(app).root == files.root)
     }
+
+    @Test
+    fun `a chat history that used health data is written under the no-backup dir only`(): Unit = kotlinx.coroutines.runBlocking {
+        val app: Application = RuntimeEnvironment.getApplication()
+        val store = com.aiblackbox.portal.data.store.ChatHistoryStore(app)
+        val reply = com.aiblackbox.portal.data.model.UiMessage(role = "assistant", content = "You slept 6 h 49 min, resting 57 bpm.",
+            wellnessRef = "w-20261028-ab12", wellnessUsed = WellnessUsed("w-20261028-ab12", categories = listOf("sleep")))
+        store.save(WellnessFixtures.OPERATOR, listOf(reply))
+        val inFiles = app.filesDir.walkTopDown().filter { it.isFile }.toList()
+        for (f in inFiles) assertFalse("$f holds a health value", f.readText().contains("57 bpm"))
+        val written = app.noBackupFilesDir.walkTopDown().filter { it.isFile && it.readText().contains("57 bpm") }.toList()
+        assertTrue("the history is under no_backup", written.isNotEmpty())
+        store.clearAll()
+    }
 }
