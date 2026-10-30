@@ -10,18 +10,17 @@ before any decompression.
 Values: a structurally valid batch is never refused for one implausible value.
 Such a row is stored FLAGGED (excluded from every rollup) and counted; a row
 this build cannot use (an unknown metric, a grain that does not fit, a time in
-the future, a row outside the day its replace_day group names) is dropped and
-counted. Both counts go to the ingest log, never
-the values.
+the future, a time outside the day its replace_day group names) is dropped and
+counted. Both counts go to the ingest log, never the values.
 
 Consent, in depth: the phone should not read a category that is off, and a
 row of one that arrives anyway is dropped here (counted as "category_off",
 logged as a count, never stored, and the app it names is not recorded for
-it). The consent is read when the batch is
-written, under the store's write lock, so a category turned off while a
-batch was in flight is already off; one turned back on starts with the next
-push (nothing dropped is kept for later). A workout is activity, so with
-heart off it is kept without the heart rate it carries.
+it). The consent is read when the batch is written, under the store's write
+lock, so a category turned off while a batch was in flight is already off;
+one turned back on starts with the next push (nothing dropped is kept for
+later). A workout is activity, so with heart off it is kept without the
+heart rate it carries.
 
 Retention: once [wellness] detail_years has pruned a store, rows older than
 its detail cutoff are dropped ("past_retention"); those days are frozen
