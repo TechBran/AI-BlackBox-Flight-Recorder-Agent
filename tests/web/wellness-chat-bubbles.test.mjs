@@ -474,10 +474,11 @@ test("the Portal's health constants match the box's", () => {
     assert.ok(py("mask.py").includes(`\nMASK = "${WELLNESS_MASK}"\n`), "the ledger's mask");
     assert.match(py("origin_proof.py"), /^HEADER = "X-BlackBox-Origin"$/m);
     assert.equal(ORIGIN_HEADER, "X-BlackBox-Origin");
-    // Refs: "w-<day>-" + token_hex(2), or token_hex(4) after 20 collisions.
+    // Refs: "w-<day>-" + token_hex(4) (8 hex), or token_hex(8) after 20 collisions;
+    // older deliveries carry 4 hex, and the Portal accepts 4 to 16 like the app.
     const api = py("api.py");
-    assert.ok(api.includes('ref = f"w-{day}-{secrets.token_hex(2)}"') && api.includes('return f"w-{day}-{secrets.token_hex(4)}"'));
-    for (const ref of ["w-20261029-7f3a", "w-20261029-7f3a9b0c"]) assert.equal(isMaskedHealthTurn(WELLNESS_MASK, ref), true);
+    assert.ok(api.includes('ref = f"w-{day}-{secrets.token_hex(4)}"') && api.includes('return f"w-{day}-{secrets.token_hex(8)}"'));
+    for (const ref of ["w-20261029-7f3a", "w-20261029-7f3a9b0c", "w-20261029-7f3a9b0c7f3a9b0c"]) assert.equal(isMaskedHealthTurn(WELLNESS_MASK, ref), true);
     // The provider names the box gives its destinations.
     const block = py("destinations.py").match(/^PROVIDER_LABELS = \{([^}]*)\}/m);
     assert.ok(block, "destinations.PROVIDER_LABELS");
