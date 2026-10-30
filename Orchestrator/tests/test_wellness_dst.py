@@ -67,6 +67,79 @@ def test_wall_clock_times_on_the_change_day(variant, hours):
         assert offs.local_minutes(day, first + H) == 90
 
 
+def _real_zone(name):
+    zoneinfo = pytest.importorskip("zoneinfo")
+    try:
+        return zoneinfo.ZoneInfo(name)
+    except zoneinfo.ZoneInfoNotFoundError:
+        pytest.skip(f"no tz data for {name}")
+
+
+def _zone_year(name, year=2026):
+    """A real zone's midnight offsets for a year (what the phone sends), and
+    the days whose next midnight has another offset."""
+    from datetime import date, datetime, timedelta
+    tz = _real_zone(name)
+    offs, d = {}, date(year, 1, 1)
+    while d.year == year:
+        offs[d.isoformat()] = int(datetime(d.year, d.month, d.day, tzinfo=tz)
+                                  .utcoffset().total_seconds())
+        d += timedelta(days=1)
+    days = sorted(offs)
+    return tz, store_mod.Offsets(offs), [a for a, b in zip(days, days[1:]) if offs[a] != offs[b]]
+
+
+def _real_offset(tz, ts):
+    from datetime import datetime
+    return int(datetime.fromtimestamp(ts / 1000, tz).utcoffset().total_seconds())
+
+
+@pytest.mark.parametrize("name", ["America/New_York", "America/Chicago", "America/Denver",
+                                  "America/Los_Angeles", "America/Anchorage",
+                                  "America/Halifax", "America/St_Johns"])
+def test_north_american_changes_read_the_real_wall_clock(name):
+    """Every North American change is at 02:00 local, the store's switch:
+    every instant of every change day shows its real offset."""
+    tz, offs, changes = _zone_year(name)
+    assert len(changes) == 2
+    for day in changes:
+        start, end = offs.bounds(day)
+        for t in range(start, end, 5 * 60_000):
+            real = _real_offset(tz, t)
+            assert offs.offset_at(t) == real, (day, t)
+            minutes = offs.local_minutes(day, t)
+            assert minutes == (t + real * 1000 - store_mod._midnight_ms(day)) / 60_000
+            back = offs.at_local(day, minutes)
+            # The repeated hour of a fall-back night maps back to its first pass.
+            assert back == t or (back == t - H and offs.local_minutes(day, back) == minutes)
+
+
+@pytest.mark.parametrize("name,day", [("Europe/Berlin", "2026-03-29"),
+                                      ("Europe/London", "2026-10-25")])
+def test_european_changes_at_02_00_on_the_first_offset_are_exact(name, day):
+    tz, offs, changes = _zone_year(name)
+    assert day in changes
+    start, end = offs.bounds(day)
+    assert all(offs.offset_at(t) == _real_offset(tz, t) for t in range(start, end, 5 * 60_000))
+
+
+@pytest.mark.parametrize("name", ["Europe/London", "Europe/Berlin", "Europe/Helsinki",
+                                  "Australia/Sydney", "Pacific/Auckland"])
+def test_other_changes_are_off_only_inside_the_change_hours(name):
+    """Europe changes at 01:00 UTC and Australia and New Zealand fall back at
+    03:00: there the store's 02:00 switch reads an hour off, but only in the
+    hours between the two, and never moves an instant to another day."""
+    tz, offs, changes = _zone_year(name)
+    for day in changes:
+        start, end = offs.bounds(day)
+        for t in range(start, end, 5 * 60_000):
+            off = offs.offset_at(t)
+            if off != _real_offset(tz, t):
+                assert abs(off - _real_offset(tz, t)) == 3600
+                assert t - start < 5 * H, (day, t)
+            assert offs.day_of(t) == day
+
+
 # ------------------------------------------------------------------ ingest
 
 def _rows(variant, metric, grain):

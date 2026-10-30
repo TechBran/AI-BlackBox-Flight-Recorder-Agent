@@ -67,10 +67,16 @@ DAY_MS = 86_400_000
 HC_MERGED = "hc_merged"
 # Inside a day whose two offsets differ (a DST change, or travel), a
 # wall-clock time before 02:00 reads on the day's first offset and a later
-# one on the second. That is exact for the US and central-European changes
-# (both at 02:00 local, so the repeated 01:00-02:00 of a fall-back night
-# reads 01:xx both times); a zone that changes at another hour reads up to an
-# hour off between that hour and 02:00, and travel is approximate the same way.
+# one on the second. That is exact where the change happens at 02:00 on the
+# first offset: all of North America (the repeated 01:00-02:00 of a
+# fall-back night reads 01:xx both times), and in Europe, where every change
+# is at 01:00 UTC, the central-European spring and the British autumn
+# changes. The other European changes (the central-European autumn at 03:00
+# local, the British spring at 01:00, eastern Europe at 03:00 and 04:00),
+# the Australian and New Zealand autumn change (03:00) and the few zones
+# that change at midnight read an hour off between the real change and
+# 02:00; a day's bounds and sums never depend on the switch. Travel is
+# approximate the same way; exact everywhere would need the zone's name.
 ZONE_SWITCH_MIN = 120
 # A day can run this many hours past its 24th (a fall-back day is 25; flying
 # west across zones a little more). A replace never reaches further than
