@@ -254,3 +254,61 @@ def test_chat_without_a_turn_key_saves_without_one_and_a_failed_stream_saves_not
     assert "saved" not in out and len(box.requests) == 1
 
     assert SIM.chat(box, SIM.State(tmp_path / "empty"), prompt="hi") == {"status": 0, "error": "not_enrolled"}
+
+
+# ------------------------------------------------------------------ settings (the cloud tick)
+
+def test_settings_widens_with_the_signature_and_narrows_back(sim_box, tmp_path):
+    """The phone's Health screen, scripted: a signed PUT /wellness/settings
+    through the real route ticks a cloud provider (widening needs the
+    signature, W21), reports the signed status before and after, and puts the
+    list back. A key that is not the phone's changes nothing."""
+    t, state, port = sim_box["t"], sim_box["state"], sim_box["port"]
+    SIM.register(t, state, operator=OPERATOR, ip=SIM_IP, port=port,
+                 pairing_file=paths.sim_pairing_path())
+    caps = FX.load("continuous_120")["capabilities"]
+    assert SIM.enroll(t, state, operator=OPERATOR, capability_report=caps, ip=SIM_IP,
+                      port=port)["status"] == 200
+
+    out = SIM.settings(t, state, providers=["anthropic"])
+    assert out["status"] == 200, out
+    assert out["before"]["providers_allowed"] == []
+    assert out["after"]["providers_allowed"] == ["anthropic"]
+    assert enroll.get_enrollment(OPERATOR)["providers_allowed"] == ["anthropic"]
+
+    out = SIM.settings(t, state, providers=[], categories={"activity": "off"},
+                       local_only={"sleep": True}, instinct_prompt="Check my sleep first.")
+    assert out["status"] == 200, out
+    assert out["before"]["providers_allowed"] == ["anthropic"]
+    assert out["after"]["providers_allowed"] == []
+    assert out["after"]["categories"]["activity"] == "off"
+    assert out["after"]["local_only"]["sleep"] is True
+    assert out["after"]["instinct_prompt"] == "custom"
+    assert SIM.settings(t, state, instinct_prompt="")["after"]["instinct_prompt"] == "default"
+
+    forged = SIM.State(tmp_path / "forged")
+    forged.update(key="A" * 43, enrollment_id=state.load()["enrollment_id"], epoch=1,
+                  operator=OPERATOR)
+    out = SIM.settings(t, forged, providers=["anthropic", "openai"])
+    assert out["status"] == 401 and "after" not in out
+    assert enroll.get_enrollment(OPERATOR)["providers_allowed"] == []
+    assert SIM.settings(t, SIM.State(tmp_path / "empty"), providers=["anthropic"]) == \
+        {"status": 0, "error": "not_enrolled"}
+
+
+def test_settings_flags():
+    def kw(*argv):
+        return SIM.settings_kwargs(SIM.build_parser().parse_args(["settings", *argv]))
+
+    assert kw("--providers", "anthropic", "custom:lan-box") == \
+        {"providers": ["anthropic", "custom:lan-box"]}
+    assert kw("--providers") == {"providers": []} == kw("--local-only")
+    assert kw("--category", "sleep=off", "--categories", "heart=on",
+              "--category-local-only", "sleep=on", "--google-paid-key", "no",
+              "--instinct-prompt", "") == {
+        "categories": {"sleep": "off", "heart": "ask"}, "local_only": {"sleep": True},
+        "google_paid_key_confirmed": False, "instinct_prompt": ""}
+    for bad in (("--local-only", "--providers", "openai"), ("--category", "sleep"),
+                ("--category", "sleep=always"), ()):
+        with pytest.raises(SystemExit):
+            kw(*bad)

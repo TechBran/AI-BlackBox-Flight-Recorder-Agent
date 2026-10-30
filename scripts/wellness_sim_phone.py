@@ -20,6 +20,7 @@ a phone ONLY while config.ini has
     python3 scripts/wellness_sim_phone.py serve          # the listener alone, foreground
     python3 scripts/wellness_sim_phone.py nudge-wait     # wait for the box's /wellness/sync
     python3 scripts/wellness_sim_phone.py chat --prompt "How did I sleep last night?"
+    python3 scripts/wellness_sim_phone.py settings --providers anthropic
     python3 scripts/wellness_sim_phone.py unregister
 
 Subcommands:
@@ -55,6 +56,14 @@ Subcommands:
               masked and tagged (the box mints it per its auto-mint rule).
               The reply is the operator's own health data: it goes to this
               terminal only.
+  settings    one SIGNED PUT /wellness/settings, as the phone's Health screen
+              sends it: --providers <ids...> (the whole allowed list; no ids or
+              --local-only: only AI on my network), --category NAME=on|off,
+              --category-local-only NAME=on|off, --google-paid-key yes|no,
+              --instinct-prompt TEXT ("" = the default). Widening needs this
+              signature (rule W21). Prints the signed status's providers_allowed,
+              categories and local_only before and after, so a cloud tick for
+              the evals is scriptable and undoable.
   unregister  removes the registry device, the sim pairing row and the state.
 
 State (the key, the enrollment, the intent nonce) lives in --state-dir,
@@ -517,6 +526,90 @@ def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None
     return out
 
 
+_KEEP = object()
+CONSENT_WORDS = {"on": "ask", "ask": "ask", "proactive": "proactive", "off": "off"}
+SWITCH_WORDS = {"on": True, "yes": True, "true": True, "off": False, "no": False, "false": False}
+
+
+def _settings_view(body: dict) -> dict:
+    """What a settings change moves (the instinct prompt as custom/default)."""
+    body = body if isinstance(body, dict) else {}
+    out = {k: body.get(k) for k in ("providers_allowed", "categories", "local_only",
+                                    "google_paid_key_confirmed")}
+    out["instinct_prompt"] = "custom" if body.get("instinct_prompt") else "default"
+    return out
+
+
+def settings(transport, state: State, *, operator: Optional[str] = None,
+             providers: Optional[list] = None, categories: Optional[dict] = None,
+             local_only: Optional[dict] = None, google_paid_key_confirmed: Optional[bool] = None,
+             instinct_prompt=_KEEP) -> dict:
+    """One SIGNED PUT /wellness/settings, the phone's own Health settings
+    screen: `providers` is the whole allowed list ([] = only AI on my
+    network); `categories` {category: ask|proactive|off}; `local_only`
+    {category: bool}; `instinct_prompt` ("" or None = the default). Widening
+    needs this signature (W21). Returns {status, before, after} (the signed
+    status's providers_allowed, categories, local_only, ...) or the refusal."""
+    signer = _signer(state)
+    if signer is None:
+        return {"status": 0, "error": "not_enrolled"}
+    op = operator or state.load().get("operator") or ""
+    _code, before = status(transport, state, op)
+    body: dict = {"operator": op}
+    if providers is not None:
+        body["providers_allowed"] = list(providers)
+    if categories:
+        body["categories"] = dict(categories)
+    if local_only:
+        body["local_only"] = dict(local_only)
+    if google_paid_key_confirmed is not None:
+        body["google_paid_key_confirmed"] = bool(google_paid_key_confirmed)
+    if instinct_prompt is not _KEEP:
+        body["instinct_prompt"] = instinct_prompt or None
+    code, _, after = _call(transport, "PUT", "/wellness/settings", body, signed=signer)
+    out = {"status": code, "before": _settings_view(before)}
+    if code == 200:
+        out["after"] = _settings_view(after)
+    else:
+        out.update(error=after.get("error"), detail=after.get("detail"), fix=after.get("fix"))
+    return out
+
+
+def _pairs(items, words: dict, what: str) -> dict:
+    out = {}
+    for item in items or ():
+        name, sep, value = str(item).partition("=")
+        if not sep or value.strip().lower() not in words:
+            raise SystemExit(f"settings: {what} takes NAME={'|'.join(sorted(words))}, "
+                             f"got {item!r}")
+        out[name.strip().lower()] = words[value.strip().lower()]
+    return out
+
+
+def settings_kwargs(args) -> dict:
+    """The settings() keywords for the `settings` subcommand's flags."""
+    if args.local_only and args.providers:
+        raise SystemExit("settings: --local-only allows no cloud provider; drop --providers")
+    kw: dict = {}
+    if args.local_only:
+        kw["providers"] = []
+    elif args.providers is not None:
+        kw["providers"] = list(args.providers)
+    cats = _pairs(args.category, CONSENT_WORDS, "--category")
+    if cats:
+        kw["categories"] = cats
+    local = _pairs(args.category_local_only, SWITCH_WORDS, "--category-local-only")
+    if local:
+        kw["local_only"] = local
+    if args.google_paid_key is not None:
+        kw["google_paid_key_confirmed"] = args.google_paid_key == "yes"
+    if args.instinct_prompt is not None:
+        kw["instinct_prompt"] = args.instinct_prompt
+    if not kw:
+        raise SystemExit("settings: nothing to change (see settings --help)")
+    return kw
+
+
 def unregister(transport, state: State, pairing_file: Path) -> None:
     st = state.load()
     _call(transport, "DELETE", f"/devices/{st.get('device_id') or DEVICE_ID}")
@@ -534,7 +627,7 @@ def unregister(transport, state: State, pairing_file: Path) -> None:
 
 # ------------------------------------------------------------------ CLI
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--box", default=DEFAULT_BOX, help="the BlackBox URL (default %(default)s)")
@@ -572,7 +665,29 @@ def main(argv=None) -> int:
     ch.add_argument("--model", default=None)
     ch.add_argument("--save", action="store_true",
                     help="record the turn through /chat/save, echoing wellness_turn")
+    st = sub.add_parser("settings", help="the phone's Health settings (a signed PUT "
+                                         "/wellness/settings)")
+    st.add_argument("--operator", default=None)
+    st.add_argument("--providers", nargs="*", default=None, metavar="ID",
+                    help="the whole allowed list (anthropic, openai, xai, google, "
+                         "custom:<alias>); with no ids: only AI on my network")
+    st.add_argument("--local-only", action="store_true",
+                    help="only AI on my network (no cloud provider), the screen's top switch")
+    st.add_argument("--category", "--categories", dest="category", action="append", default=[],
+                    metavar="NAME=on|off|ask|proactive",
+                    help="a category's consent (sleep, heart, activity, blood_pressure)")
+    st.add_argument("--category-local-only", action="append", default=[], metavar="NAME=on|off",
+                    help="keep a category on local models only")
+    st.add_argument("--google-paid-key", choices=("yes", "no"), default=None,
+                    help="'My Google key is on a paid plan'")
+    st.add_argument("--instinct-prompt", default=None,
+                    help='the health instinct prompt ("" = back to the default)')
     sub.add_parser("unregister")
+    return p
+
+
+def main(argv=None) -> int:
+    p = build_parser()
     args = p.parse_args(argv)
 
     state = State(Path(args.state_dir).expanduser())
@@ -612,6 +727,8 @@ def main(argv=None) -> int:
     elif args.cmd == "chat":
         out = chat(transport, state, prompt=args.prompt, provider=args.provider,
                    model=args.model, save=args.save)
+    elif args.cmd == "settings":
+        out = settings(transport, state, operator=args.operator, **settings_kwargs(args))
     else:
         unregister(transport, state, pairing_file)
         out = {"unregistered": True}
