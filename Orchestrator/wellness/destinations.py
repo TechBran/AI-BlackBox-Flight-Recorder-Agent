@@ -200,7 +200,15 @@ def allowed(provider, category: str, enrollment: Optional[dict], model: Optional
     """(may this destination receive `category`, why not)."""
     if not enrollment:
         return False, "not_enrolled"
-    dest = destination(provider, model, resolver)
+    return allowed_to(destination(provider, model, resolver), category, enrollment)
+
+
+def allowed_to(dest: Destination, category: str,
+               enrollment: Optional[dict]) -> Tuple[bool, Optional[str]]:
+    """allowed() for a destination already resolved (one resolution serves
+    every category of a turn)."""
+    if not enrollment:
+        return False, "not_enrolled"
     if dest.cls is None:
         return False, dest.reason or "unknown_provider"
     if dest.cls in (LOCAL, ON_DEVICE):

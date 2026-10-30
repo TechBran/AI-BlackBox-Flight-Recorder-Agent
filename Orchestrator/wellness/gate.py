@@ -9,18 +9,20 @@ The six checks, in order; the first that fails is the answer:
      (the last three answer from stored data and say so)                     not_enrolled
   4. the category is consented (ask or proactive)                            category_off
   5. the surface is not on the never-list, and the turn holds a credential
-     or the box is in household mode                                         surface_not_allowed
+     or the box is in household mode (cron, voice and on-device turns always
+     need their own credential: turn.CREDENTIAL_ONLY_SURFACES)              surface_not_allowed
   6. the provider may receive the category (destinations.allowed)            provider_not_allowed
 
 evaluate() is pure over its inputs (the matrix test drives it directly);
-check() reads the switch, the roster and the enrollment fresh and calls it.
-Offering (wave 2) and every executor call check(); the executor's call is the
-authoritative one.
+check() reads the switch, the roster and the enrollment fresh and calls it;
+check_all() does the same for every category with one read of each.
+Offering (Orchestrator/wellness/access.py) asks check_all(); every executor
+call asks check(), and the executor's call is the authoritative one.
 """
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 from Orchestrator.wellness import catalog, turn as turn_mod
 
@@ -95,7 +97,8 @@ def evaluate(*, enabled: bool, roster: Iterable[str], reserved: Iterable[str],
         return _deny("category_off", category)
     if turn.surface in turn_mod.NEVER_SURFACES or turn.surface not in turn_mod.ALLOWED_SURFACES:
         return _deny("surface_not_allowed", turn.surface or "none")
-    if not turn.credential_ok and not household(enrollment.get("surfaces_mode"), humans):
+    if not turn.credential_ok and (turn.surface in turn_mod.CREDENTIAL_ONLY_SURFACES or
+                                   not household(enrollment.get("surfaces_mode"), humans)):
         return _deny("surface_not_allowed", "no_credential")
     ok, why = destination_ok()
     if not ok:
@@ -126,8 +129,36 @@ def check(category: str, *, operator: Optional[str] = None,
                                                     model=turn.model, resolver=resolver))
 
 
+def check_all(*, operator: Optional[str] = None, turn: Optional[turn_mod.WellnessTurn] = None,
+              resolver=None) -> Dict[str, GateResult]:
+    """check() for every category, reading the switch, the roster, the
+    enrollment and the destination once (offering asks this per injection)."""
+    from Orchestrator import config
+    from Orchestrator.wellness import destinations, enroll
+    turn = turn if turn is not None else turn_mod.current()
+    op = operator if operator is not None else (turn.operator if turn else None)
+    roster, reserved = _roster()
+    enrollment = enroll.get_enrollment(op) if op else None
+    if enrollment is not None:
+        enrollment = dict(enrollment, state=enroll.effective_state(enrollment))
+    enabled = config.wellness_enabled()
+    resolved: list = []
+
+    def destination_ok(category: str):
+        def ok():
+            if not resolved:
+                resolved.append(destinations.destination(turn.provider, turn.model, resolver))
+            return destinations.allowed_to(resolved[0], category, enrollment)
+        return ok
+
+    return {c: evaluate(enabled=enabled, roster=roster, reserved=reserved, operator=op,
+                        turn=turn, enrollment=enrollment, category=c,
+                        destination_ok=destination_ok(c))
+            for c in catalog.CATEGORIES}
+
+
 def allowed_categories(*, operator: Optional[str] = None,
                        turn: Optional[turn_mod.WellnessTurn] = None, resolver=None) -> list:
     """The categories the current turn may read (each through the full gate)."""
-    return [c for c in catalog.CATEGORIES
-            if check(c, operator=operator, turn=turn, resolver=resolver).ok]
+    results = check_all(operator=operator, turn=turn, resolver=resolver)
+    return [c for c in catalog.CATEGORIES if results[c].ok]

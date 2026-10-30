@@ -43,6 +43,18 @@ NEVER_SURFACES = frozenset({
     "cli_agent", "cu_agent", "system", "flight_recorder",
 })
 
+# Allowed surfaces that read health only with their own credential, household
+# mode or not: a cron job is a wellness template created from the enrolled
+# phone (M7.3), a voice session is opened signed on it (M7.5), and the
+# on-device model runs on the source phone (M7.5). None of them is "anyone on
+# the tailnet", which is all household mode stands in for.
+CREDENTIAL_ONLY_SURFACES = frozenset({SURFACE_CRON, SURFACE_VOICE, SURFACE_ON_DEVICE})
+
+# What a request or a queued task may DECLARE about itself (cron, MCP): a
+# declaration can only narrow, so only surfaces the gate refuses on their own
+# are accepted; a credential comes from a verified signature, never a field.
+DECLARABLE_SURFACES = NEVER_SURFACES | {SURFACE_CRON}
+
 
 @dataclasses.dataclass(frozen=True)
 class WellnessTurn:
