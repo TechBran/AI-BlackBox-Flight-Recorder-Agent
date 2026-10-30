@@ -86,10 +86,15 @@ data class WellnessRefSheet(
         private fun summaryRows(env: JsonObject): List<Row> {
             val out = mutableListOf<Row>()
             for (m in env.arr("metrics")) {
-                val label = m.str("label") ?: metricName(m.str("metric")) ?: continue
+                val label = m.str("label") ?: displayName(m.str("metric")) ?: continue
                 val value = m.str("display") ?: "not recorded"
-                val vs = m["vs_usual"] as? JsonObject
-                val detail = listOfNotNull(vs?.str("label"), vs?.str("delta_display")).joinToString(", ").ifEmpty { null }
+                // A compacted envelope (api.py, to fit the token budget) drops the label and keeps
+                // vs_usual as its label string only.
+                val detail = when (val vs = m["vs_usual"]) {
+                    is JsonObject -> listOfNotNull(vs.str("label"), vs.str("delta_display")).joinToString(", ").ifEmpty { null }
+                    is JsonPrimitive -> vs.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
+                    else -> null
+                }
                 out += Row(label, value, detail)
             }
             out += sessionRows(env.arr("sessions"))
@@ -163,7 +168,7 @@ data class WellnessRefSheet(
             val cov = m["coverage"] as? JsonObject ?: return@mapNotNull null
             val label = cov.str("label") ?: return@mapNotNull null
             val pct = cov["pct"]?.let { (it as? JsonPrimitive)?.intOrNull }
-            val name = m.str("label") ?: metricName(m.str("metric")) ?: return@mapNotNull null
+            val name = m.str("label") ?: displayName(m.str("metric")) ?: return@mapNotNull null
             "$name: $label" + (pct?.let { " ($it%)" } ?: "")
         }.distinct()
 
@@ -179,17 +184,27 @@ data class WellnessRefSheet(
             return out.distinct()
         }
 
-        /** The catalog's metric names, for the few places the envelope gives an id only. */
-        private val METRIC_NAMES = mapOf(
+        /**
+         * The catalog's metric names (every id of Orchestrator/wellness/catalog.METRICS, plus the
+         * history table's clock columns), for the places the envelope gives an id only: a
+         * compacted summary drops every label.
+         */
+        internal val METRIC_NAMES = mapOf(
             "sleep_duration" to "Sleep", "sleep_stages" to "Sleep stages", "sleep_onset" to "Asleep",
             "sleep_wake" to "Woke", "sleeping_hr_median" to "Sleeping heart rate",
             "sleeping_hr_p10" to "Sleeping heart rate (low)", "resting_hr" to "Resting heart rate",
             "heart_rate" to "Heart rate", "hrv" to "Heart rate variability", "spo2" to "Blood oxygen",
             "respiratory_rate" to "Breathing rate", "steps" to "Steps", "distance" to "Distance",
-            "active_calories" to "Active calories", "exercise" to "Exercise", "blood_pressure" to "Blood pressure",
+            "active_calories" to "Active calories", "total_calories" to "Total calories", "exercise" to "Exercise",
+            "blood_pressure" to "Blood pressure", "bp_systolic" to "Blood pressure (systolic)",
+            "bp_diastolic" to "Blood pressure (diastolic)",
         )
 
         private fun metricName(id: String?): String? = id?.let { METRIC_NAMES[it] }
+
+        /** [metricName], else the id itself made readable ("new_metric" -> "New metric"): a row is never dropped for its name. */
+        private fun displayName(id: String?): String? = metricName(id)
+            ?: id?.trim()?.takeIf { it.isNotEmpty() }?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }
 
         private fun JsonObject.str(key: String): String? =
             (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }

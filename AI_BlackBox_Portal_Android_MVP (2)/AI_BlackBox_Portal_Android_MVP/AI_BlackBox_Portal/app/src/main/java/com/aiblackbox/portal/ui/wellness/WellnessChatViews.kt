@@ -117,7 +117,9 @@ fun WellnessBubbleExtras(
     used: WellnessUsed?,
     wellness: WellnessChatContext?,
 ) {
-    used?.let { WellnessFooter(it, wellness?.sourceLabel) }
+    used?.let {
+        WellnessFooter(it, WellnessChatRules.footerSource(wellness?.operator, wellness?.enrolledOperator, wellness?.sourceLabel))
+    }
     val refs = used?.refs ?: listOfNotNull(wellnessRef)
     if (wellness != null &&
         WellnessChatRules.offersShowNumbers(text, refs, wellness.operator, wellness.enrolledOperator)

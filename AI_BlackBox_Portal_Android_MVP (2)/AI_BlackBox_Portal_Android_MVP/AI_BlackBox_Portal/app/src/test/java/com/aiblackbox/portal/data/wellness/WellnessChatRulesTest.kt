@@ -182,6 +182,19 @@ class WellnessChatRulesTest {
         assertNotNull(bridge(method = "GET", path = "/wellness/disclosures?operator=wellness-fixture", sha = emptySha.uppercase()))
     }
 
+    @Test
+    fun `the footer names this phone only for the operator it is the source of`() {
+        assertEquals("Test phone (SM-TEST)", WellnessChatRules.footerSource(op, op, "Test phone (SM-TEST)"))
+        assertEquals("Test phone (SM-TEST)", WellnessChatRules.footerSource(" $op ", op, "Test phone (SM-TEST)"))
+        assertNull("another operator's turn", WellnessChatRules.footerSource("someone-else", op, "Test phone (SM-TEST)"))
+        assertNull("no binding here", WellnessChatRules.footerSource(op, null, "Test phone (SM-TEST)"))
+        assertNull(WellnessChatRules.footerSource(null, op, "Test phone (SM-TEST)"))
+        assertNull(WellnessChatRules.footerSource(op, op, null))
+        val used = WellnessUsed("w-20261028-ab12", categories = listOf("sleep"))
+        assertTrue(WellnessChatRules.footerLine(used, WellnessChatRules.footerSource("someone-else", op, "Test phone"), 0L,
+            ZoneId.of("UTC"), true).contains(" · your phone"))
+    }
+
     // ── the turn's frames ──────────────────────────────────────────────────────────────────
 
     @Test

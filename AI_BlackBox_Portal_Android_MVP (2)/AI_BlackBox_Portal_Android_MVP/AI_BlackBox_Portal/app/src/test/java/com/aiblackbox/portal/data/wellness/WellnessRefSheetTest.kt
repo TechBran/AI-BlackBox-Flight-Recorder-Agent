@@ -62,6 +62,39 @@ class WellnessRefSheetTest {
             "Sleep stages are device estimates; one night is noisy."), sheet.notes)
     }
 
+    /** Every metric id the box's catalog defines (Orchestrator/wellness/catalog.py METRICS). */
+    private fun catalogMetricIds(): List<String> {
+        var dir: java.io.File? = java.io.File("").absoluteFile
+        repeat(10) {
+            val d = dir ?: return@repeat
+            val f = java.io.File(d, "Orchestrator/wellness/catalog.py")
+            if (f.exists()) return Regex("Metric\\(\"([a-z0-9_]+)\"").findAll(f.readText()).map { it.groupValues[1] }.toList()
+            dir = d.parentFile
+        }
+        throw AssertionError("catalog.py not found above ${java.io.File("").absolutePath}")
+    }
+
+    @Test
+    fun `a compacted summary keeps every catalog metric, blood pressure and total calories among them`() {
+        val ids = catalogMetricIds()
+        assertTrue("the catalog parsed: $ids", ids.size >= 16 && "bp_systolic" in ids && "total_calories" in ids)
+        // api.py's compaction drops each metric's label and keeps vs_usual as its label string.
+        val metrics = (ids + "a_new_metric").joinToString(",") { id ->
+            """{"metric":"$id","category":"x","value":1.0,"display":"1 unit","vs_usual":"within your usual range",
+               "coverage":{"pct":100,"label":"7 of 7 days with data"},"compact":true}"""
+        }
+        val sheet = WellnessRefSheet.parse(ref("wellness_summary",
+            """{"ok":true,"tool":"wellness_summary","as_of":"2026-10-28T11:55-04:00","metrics":[$metrics]}"""))!!
+        assertEquals("one row per metric", ids.size + 1, sheet.rows.size)
+        for (id in ids) assertTrue("$id has a name", id in WellnessRefSheet.METRIC_NAMES)
+        assertTrue(sheet.rows.any { it.label == "Blood pressure (systolic)" })
+        assertTrue(sheet.rows.any { it.label == "Blood pressure (diastolic)" })
+        assertTrue(sheet.rows.any { it.label == "Total calories" })
+        assertEquals("an unknown id still shows, named by its id", "A new metric", sheet.rows.last().label)
+        assertTrue(sheet.rows.all { it.detail == "within your usual range" })
+        assertEquals(ids.size + 1, sheet.coverage.size)
+    }
+
     @Test
     fun `a series lists each point's display string, a session list each session`() {
         val series = WellnessRefSheet.parse(ref("wellness_series", """

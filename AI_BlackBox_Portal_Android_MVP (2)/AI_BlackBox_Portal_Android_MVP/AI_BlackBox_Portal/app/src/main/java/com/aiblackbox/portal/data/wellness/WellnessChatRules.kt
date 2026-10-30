@@ -294,6 +294,14 @@ object WellnessChatRules {
     }
 
     /**
+     * The footer's source: this phone's label only when the chat is for the operator this phone
+     * is the health source of. Another operator's turn (household mode lets one through) used
+     * THEIR source, which this phone cannot name, so the footer says "your phone" generically.
+     */
+    fun footerSource(chatOperator: String?, enrolledOperator: String?, sourceLabel: String?): String? =
+        sourceLabel?.takeIf { !enrolledOperator.isNullOrBlank() && chatOperator?.trim() == enrolledOperator }
+
+    /**
      * The box's `as_of` (ISO-8601 with an offset, minute grain) in [zone]: the clock time when
      * it is today there, else the date ("Oct 27"; with the year when it is not this year).
      * Null when absent or unreadable.
