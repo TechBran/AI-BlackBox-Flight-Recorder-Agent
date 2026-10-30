@@ -483,8 +483,10 @@ def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None
          model: Optional[str] = None, operator: Optional[str] = None,
          save: bool = False) -> dict:
     """One signed /chat/stream turn: {status, reply, tools, wellness_used,
-    wellness_turn, error}; with save, also {saved: {status, body}} from
-    /chat/save echoing the turn key (unsigned, as the clients send it)."""
+    wellness_turn, provenance, error} (provenance: the snapshot ids
+    stream_start says the turn's context was given); with save, also
+    {saved: {status, body}} from /chat/save echoing the turn key (unsigned,
+    as the clients send it)."""
     signer = _signer(state)
     if signer is None:
         return {"status": 0, "error": "not_enrolled"}
@@ -507,6 +509,8 @@ def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None
            "tools": [d for e, d in events if e == "tool_start"],
            "wellness_used": [d for e, d in events if e == "wellness_used"],
            "wellness_turn": start.get("wellness_turn"),
+           "provenance": start.get("provenance") if isinstance(start.get("provenance"),
+                                                               dict) else {},
            "error": next((d for e, d in events if e == "error"), None)}
     if save and code == 200 and out["reply"]:
         saved = {"operator": body["operator"], "user_message": prompt,
@@ -686,6 +690,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def exit_code(cmd: str, out) -> int:
+    """Non-zero when the box refused: a settings change or a chat turn that
+    did not come back 200 (the cloud tick's restore must not fail quietly)."""
+    if cmd in ("settings", "chat") and isinstance(out, dict):
+        return 0 if out.get("status") == 200 and not out.get("error") else 1
+    return 0
+
+
 def main(argv=None) -> int:
     p = build_parser()
     args = p.parse_args(argv)
@@ -733,7 +745,7 @@ def main(argv=None) -> int:
         unregister(transport, state, pairing_file)
         out = {"unregistered": True}
     print(json.dumps(out, indent=2))
-    return 0
+    return exit_code(args.cmd, out)
 
 
 if __name__ == "__main__":

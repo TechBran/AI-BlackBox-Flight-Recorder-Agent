@@ -207,7 +207,8 @@ class ScriptedChatBox:
         return 404, {}, b"{}"
 
 
-_SSE = [("stream_start", {"provider": "custom", "model": "box::m", "provenance": {},
+_SSE = [("stream_start", {"provider": "custom", "model": "box::m",
+                          "provenance": {"recent": ["SNAP-20261030-0001"], "keyword": []},
                           "wellness_turn": "wt_0123456789abcdef"}),
         ("tool_start", {"tool": "wellness_summary"}),
         ("wellness_used", {"ref": "w_1", "categories": ["sleep"], "provider": "custom:box"}),
@@ -223,6 +224,7 @@ def test_chat_reports_the_turn_key_and_saves_it_the_way_a_client_does(tmp_path):
     assert out["wellness_turn"] == "wt_0123456789abcdef"
     assert [t["tool"] for t in out["tools"]] == ["wellness_summary"]
     assert out["wellness_used"][0]["ref"] == "w_1" and out["error"] is None
+    assert out["provenance"] == {"recent": ["SNAP-20261030-0001"], "keyword": []}
     assert "saved" not in out and [p for _, p, _, _ in box.requests] == ["/chat/stream"]
     stream_headers = box.requests[0][3]
     assert stream_headers["X-BlackBox-Origin"].startswith("v1;enr=en_0000abcd;")
@@ -248,17 +250,20 @@ def test_chat_without_a_turn_key_saves_without_one_and_a_failed_stream_saves_not
     assert out["wellness_turn"] is None and out["wellness_used"] == [] and out["tools"] == []
     assert "wellness_turn" not in box.requests[1][2] and box.requests[1][2]["model"] == "g"
 
+    assert out["provenance"] == {}
+
     box = ScriptedChatBox([("error", {"message": "provider down"})])
     out = SIM.chat(box, state, prompt="hi", save=True)
     assert out["reply"] == "" and out["error"] == {"message": "provider down"}
     assert "saved" not in out and len(box.requests) == 1
+    assert SIM.exit_code("chat", out) == 1            # a failed turn is a failed command
 
     assert SIM.chat(box, SIM.State(tmp_path / "empty"), prompt="hi") == {"status": 0, "error": "not_enrolled"}
 
 
 # ------------------------------------------------------------------ settings (the cloud tick)
 
-def test_settings_widens_with_the_signature_and_narrows_back(sim_box, tmp_path):
+def test_settings_widens_with_the_signature_and_narrows_back(sim_box, tmp_path, monkeypatch):
     """The phone's Health screen, scripted: a signed PUT /wellness/settings
     through the real route ticks a cloud provider (widening needs the
     signature, W21), reports the signed status before and after, and puts the
@@ -292,6 +297,12 @@ def test_settings_widens_with_the_signature_and_narrows_back(sim_box, tmp_path):
     out = SIM.settings(t, forged, providers=["anthropic", "openai"])
     assert out["status"] == 401 and "after" not in out
     assert enroll.get_enrollment(OPERATOR)["providers_allowed"] == []
+    # The CLI's exit code says so: the cloud tick's restore cannot fail quietly.
+    monkeypatch.setattr(SIM, "HttpTransport", lambda *a, **k: t)
+    assert SIM.main(["--state-dir", str(tmp_path / "forged"), "settings", "--providers",
+                     "anthropic"]) == 1
+    assert enroll.get_enrollment(OPERATOR)["providers_allowed"] == []
+    assert SIM.main(["--state-dir", str(state.path.parent), "settings", "--providers"]) == 0
     assert SIM.settings(t, SIM.State(tmp_path / "empty"), providers=["anthropic"]) == \
         {"status": 0, "error": "not_enrolled"}
 
