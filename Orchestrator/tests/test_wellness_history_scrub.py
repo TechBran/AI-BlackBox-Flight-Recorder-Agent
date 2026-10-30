@@ -340,14 +340,26 @@ def test_an_unproven_turn_keeps_ordinary_numbers_for_an_allowed_provider(op, mon
 
 
 def test_the_scrubs_failure_path_masks_a_tagged_bubble_entirely(op, monkeypatch):
-    """When the scrub itself fails (the store locked, a broken record), a
-    bubble tagged wellness_ref loses every number and the rest get the unit
-    rule: the failure path can never say more than the unproven path."""
+    """When the scrub itself fails, a bubble tagged wellness_ref loses every
+    number, and an untagged one is treated exactly as the unproven path would
+    treat it: the unit rule when the provider may not have the operator's
+    data, as written when it may (so a store that fails to open tells an
+    unproven caller nothing); when even the record could not be read, the
+    unit rule applies (fail-closed)."""
     from Orchestrator.wellness import enroll
-    monkeypatch.setattr(enroll, "effective_state", lambda rec: (_ for _ in ()).throw(RuntimeError("x")))
-    out = mask.scrub_history(_history(op["refs"]["night"], "47.3 is within range, 12,345 too."),
-                             OPERATOR, "anthropic")
+    plain = "Coverage rose to 87% and the request took 250 ms."
+    tagged = "47.3 is within range, 12,345 too."
+    untagged = "Your sleeping heart rate was 47.3 and 12,345 steps."
+    # The store fails to open (the record was read): the normal rule.
+    monkeypatch.setattr(enroll, "store_for", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    out = mask.scrub_history(_history(op["refs"]["night"], tagged), OPERATOR, "anthropic")
     assert out[1] == {"role": "assistant", "content": "[·] is within range, [·] too."}
-    out = mask.scrub_history(_history(None, "Your sleeping heart rate was 47.3 and 12,345 steps."),
-                             OPERATOR, "anthropic")
+    assert mask.scrub_history(_history(None, plain), OPERATOR, "anthropic")[1]["content"] == plain
+    out = mask.scrub_history(_history(None, untagged), OPERATOR, "openai")   # not ticked
     assert "47.3" not in out[1]["content"] and "12,345" not in out[1]["content"]
+    # Not even the record could be read: fail closed, the unit rule everywhere.
+    monkeypatch.setattr(enroll, "effective_state", lambda rec: (_ for _ in ()).throw(RuntimeError("x")))
+    out = mask.scrub_history(_history(op["refs"]["night"], tagged), OPERATOR, "anthropic")
+    assert out[1] == {"role": "assistant", "content": "[·] is within range, [·] too."}
+    assert mask.scrub_history(_history(None, plain), OPERATOR, "anthropic")[1]["content"] == \
+        mask.mask_text(plain, frozenset())

@@ -689,8 +689,9 @@ def key_may_deliver(key, operator: Optional[str], *, now_ms: Optional[int] = Non
     """Was `key` issued to a turn of `operator` that could receive a delivery,
     and does that still hold? A credential-proven key stands for its hour; a
     household-proven key only while the operator is live and in household
-    mode NOW (access.household_now), so narrowing, pausing or disconnecting
-    revokes the keys household mode handed out."""
+    mode NOW (access.household_now), so narrowing or disconnecting revokes
+    the keys household mode handed out (paused is a gate state: the tools
+    answer from stored data, and so may such a key)."""
     from Orchestrator.wellness import access, turn as turn_mod
     how = turn_mod.issued(key, operator, now_ms=now_ms)
     if how == turn_mod.BY_CREDENTIAL:
@@ -1040,18 +1041,12 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
     if not isinstance(messages, list):
         return messages
     has_refs = any(isinstance(m, dict) and "wellness_ref" in m for m in messages)
+    blanket = None     # the failure path says no more than the unproven path would
     try:
         from Orchestrator.wellness import destinations, enroll, gate, store as store_mod
         from Orchestrator.wellness import turn as turn_mod
         rec = enroll.get_enrollment(operator) if operator else None
         live = bool(rec) and enroll.effective_state(rec) in gate.GATE_STATES
-        st = enroll.store_for(rec, create=False) if rec else None
-        # Health data on this box: a live enrollment, or a store kept after a
-        # disconnect. Nobody else's history is touched.
-        holds = live or st is not None
-        if not holds and not has_refs:
-            return messages
-        now_ms = _now_ms() if now_ms is None else now_ms
 
         def allowed(cats) -> bool:
             return live and all(destinations.allowed(provider, c, rec, model=model)[0]
@@ -1059,6 +1054,16 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
 
         consented = [c for c in catalog.CATEGORIES
                      if ((rec or {}).get("categories") or {}).get(c) in catalog.CONSENTED]
+        # Decided from the record alone first (what the failure path may use
+        # without ever having opened the store), exactly once holds is known.
+        blanket = rec is not None and not allowed(consented or catalog.CATEGORIES)
+        st = enroll.store_for(rec, create=False) if rec else None
+        # Health data on this box: a live enrollment, or a store kept after a
+        # disconnect. Nobody else's history is touched.
+        holds = live or st is not None
+        if not holds and not has_refs:
+            return messages
+        now_ms = _now_ms() if now_ms is None else now_ms
         blanket = holds and not allowed(consented or catalog.CATEGORIES)
         if proven is None:
             t = turn_mod.current()
@@ -1118,10 +1123,16 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
         return out if changed else messages
     except Exception as e:  # noqa: BLE001 - a failed scrub must not send the numbers
         print(f"[WELLNESS] history scrub failed ({type(e).__name__}); masking every assistant turn")
-        return [_without_ref(_message_text_masked(m, frozenset(),
-                                                  every_number=bool(m.get("wellness_ref"))))
-                if isinstance(m, dict) and m.get("role") == "assistant" else _without_ref(m)
-                for m in messages]
+        unit = True if blanket is None else blanket
+        out = []
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                if m.get("wellness_ref"):
+                    m = _message_text_masked(m, frozenset(), every_number=True)
+                elif unit:
+                    m = _message_text_masked(m, frozenset())
+            out.append(_without_ref(m))
+        return out
 
 
 def _recent_history_rows(st, now_ms: int, window_ms: int = HISTORY_WINDOW_MS) -> List[dict]:

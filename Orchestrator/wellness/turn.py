@@ -131,7 +131,7 @@ def issued(key, operator: Optional[str], *, now_ms: Optional[int] = None) -> Opt
     operator's key (nothing is ever proven by a key the box does not remember
     issuing for such a turn of this operator). A household-proven key is
     only as good as household mode is NOW: callers re-check it
-    (mask.key_may_deliver), so narrowing or pausing revokes such keys."""
+    (mask.key_may_deliver), so narrowing or disconnecting revokes such keys."""
     if not isinstance(key, str) or not key or not operator:
         return None
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
