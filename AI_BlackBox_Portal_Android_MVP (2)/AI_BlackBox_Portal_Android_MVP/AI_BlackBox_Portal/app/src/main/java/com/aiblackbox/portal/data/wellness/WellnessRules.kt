@@ -313,7 +313,53 @@ object WellnessRules {
 
     const val ENROLLED_MESSAGE = "This phone is now your health source."
     const val AWAITING_APPROVAL_MESSAGE = "Almost done: on the phone that is your health source now, open BlackBox, " +
-        "Settings, Health and approve this one. Your history and AI choices move with it."
+        "Settings, Health and approve this one. Your history moves with it, and the AI choices you made here apply " +
+        "once it's approved."
+
+    /** The setup's AI choices as they wait for a replacement's approval ([WellnessSyncState.pendingSettings]). */
+    fun pendingSettingsOf(setup: Settings): PendingSetupSettings = PendingSetupSettings(
+        localOnly = setup.localOnly.mapKeys { it.key.wire },
+        providersAllowed = setup.providersAllowed.sorted(),
+        googlePaidKeyConfirmed = setup.googlePaidKeyConfirmed,
+    )
+
+    /**
+     * The signed `PUT /wellness/settings` body that applies [pending] (the AI choices setup made
+     * while the replacement waited) over [box]'s settings, or null while it is not due: nothing
+     * waits, or [box] is not this phone's credentialed status yet (only the operator's ACTIVE
+     * phone reads it, so a credentialed status means the old phone approved). It states
+     * exactly the setup's fields (WellnessStatusParser.SETUP_FIELDS), as a direct enrollment does.
+     */
+    fun pendingSettingsBody(operator: String, pending: PendingSetupSettings?, box: WellnessBoxStatus?): String? {
+        if (pending == null || box == null || !box.credentialed || operator.isBlank()) return null
+        if (box.state == EnrollmentState.REPLACE_PENDING) return null
+        val current = box.settings()
+        val wanted = current.copy(
+            localOnly = WellnessCategory.entries.associateWith { pending.localOnly[it.wire] ?: current.localOnly[it] ?: true },
+            providersAllowed = pending.providersAllowed.toSet(),
+            googlePaidKeyConfirmed = pending.googlePaidKeyConfirmed,
+        )
+        return WellnessStatusParser.settingsBody(operator, current, wanted, WellnessStatusParser.SETUP_FIELDS)
+    }
+
+    /** What happened to the waiting setup choices after their PUT. */
+    enum class PendingSettingsOutcome {
+        /** The box took them: clear them. */
+        SAVED,
+        /** The box refused them for good: clear them and tell the person to set them again. */
+        REFUSED,
+        /** No answer, a drifted clock (401), a rate limit or a box error: try at the next status read. */
+        RETRY,
+    }
+
+    fun pendingSettingsOutcome(status: Int): PendingSettingsOutcome = when {
+        status in 200..299 -> PendingSettingsOutcome.SAVED
+        status in 400..499 && status != 401 && status != 408 && status != 429 -> PendingSettingsOutcome.REFUSED
+        else -> PendingSettingsOutcome.RETRY
+    }
+
+    const val PENDING_SETTINGS_REFUSED_MESSAGE =
+        "Health moved to this phone, but the AI choices you made during setup didn't save. Set them again in Health settings."
 
     /** What the old phone does after its answer to a replacement. */
     enum class ReplaceOutcome(val message: String) {

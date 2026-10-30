@@ -45,6 +45,10 @@ class WellnessSyncEngine(
     private val onReconnectNeeded: () -> Unit = {},
     /** Signed `GET /wellness/status?operator=` for the live binding; null = never ask (some tests). */
     private val fetchStatus: (suspend (operator: String, signer: OriginSigner) -> WellnessOutbox.SendResult)? = null,
+    /** Signed `PUT /wellness/settings` (the setup choices a replacement kept waiting); null = never send. */
+    private val putSettings: (suspend (body: String, signer: OriginSigner) -> WellnessOutbox.SendResult)? = null,
+    /** The box refused those setup choices for good: tell the person to set them again. */
+    private val onSetupSettingsRefused: () -> Unit = {},
 ) {
 
     data class SyncReport(
@@ -526,6 +530,7 @@ class WellnessSyncEngine(
                         )
                     }
                 }
+                sendPendingSettings(record, gen, box, signer)
                 null
             }
             WellnessRules.StatusReaction.PAUSED -> {
@@ -538,6 +543,26 @@ class WellnessSyncEngine(
                 write(gen) { state.update { it.copy(lastStatusMs = now) } }
                 null
             }
+        }
+    }
+
+    /**
+     * The old phone approved this replacement (this phone's signed status is credentialed now):
+     * send the AI choices setup made while it waited ([WellnessSyncState.pendingSettings]),
+     * which the approval did not carry. No answer keeps them for the next status read.
+     */
+    private suspend fun sendPendingSettings(record: WellnessBindingRecord, gen: Long, box: WellnessBoxStatus?, signer: OriginSigner) {
+        val put = putSettings ?: return
+        val body = WellnessRules.pendingSettingsBody(record.operator, state.load().pendingSettings, box) ?: return
+        val reply = signedCall { put(body, signer) }
+        when (WellnessRules.pendingSettingsOutcome(reply.status)) {
+            WellnessRules.PendingSettingsOutcome.SAVED -> write(gen) { state.update { it.copy(pendingSettings = null) } }
+            WellnessRules.PendingSettingsOutcome.REFUSED -> {
+                write(gen) { state.update { it.copy(pendingSettings = null) } }
+                Log.w(TAG, "setup settings refused after the replacement (${reply.status})")
+                runCatching { onSetupSettingsRefused() }
+            }
+            WellnessRules.PendingSettingsOutcome.RETRY -> Unit
         }
     }
 

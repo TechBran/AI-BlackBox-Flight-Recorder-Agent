@@ -151,10 +151,29 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val client = client()
         val signer = binding.signer()
         val statusOperator = record?.operator ?: operator
-        val box = if (client != null && statusOperator.isNotBlank()) {
+        var box = if (client != null && statusOperator.isNotBlank()) {
             val reply = client.status(statusOperator, signer)
             if (reply.ok) WellnessStatusParser.parse(reply.body) else null
         } else null
+        // A replacement the old phone has approved: the AI choices setup made while it waited
+        // go now (the collector's status read sends them too, whichever comes first).
+        if (record != null && client != null && signer != null) {
+            val pending = withContext(Dispatchers.IO) { store.load() }.pendingSettings
+            WellnessRules.pendingSettingsBody(record.operator, pending, box)?.let { body ->
+                val put = client.putSettings(body, signer)
+                when (WellnessRules.pendingSettingsOutcome(put.status)) {
+                    WellnessRules.PendingSettingsOutcome.SAVED -> {
+                        writeState { it.copy(pendingSettings = null) }
+                        box = WellnessStatusParser.parse(put.body)?.takeIf { it.credentialed } ?: box
+                    }
+                    WellnessRules.PendingSettingsOutcome.REFUSED -> {
+                        writeState { it.copy(pendingSettings = null) }
+                        say(WellnessRules.PENDING_SETTINGS_REFUSED_MESSAGE)
+                    }
+                    WellnessRules.PendingSettingsOutcome.RETRY -> Unit
+                }
+            }
+        }
         // The box's consent is the truth; the collector reads what it says.
         if (box?.categories != null) {
             writeState { st ->
@@ -330,21 +349,28 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             assignToMe = s.setup.assignToMe,
             replace = s.setup.replace,
         )
+        // Providers and local-only are settings, sent signed once the box takes them from this phone.
+        val wanted = WellnessRules.Settings(
+            categories = s.setup.consent, localOnly = s.setup.localOnly,
+            providersAllowed = s.setup.providersAllowed, googlePaidKeyConfirmed = s.setup.googlePaidKeyConfirmed,
+        )
         if (outcome is WellnessEnrollment.Outcome.Enrolled && outcome.awaitsApproval) {
             // A replacement of a source that is still online: the box takes nothing from this
-            // phone until the old one approves (its settings, the AI choices among them, move
-            // with the approval), so no settings call. The periodic sync reads the signed
-            // status and finds the enrollment active once it is approved.
+            // phone until the old one approves, and the approval keeps the OLD enrollment's AI
+            // choices. So the ones made here wait in the collector's state and go in one signed
+            // PUT once this phone's own signed status is credentialed (the periodic sync's
+            // status read, or this screen's refresh; WellnessRules.pendingSettingsBody).
             outcome.syncIntervalMin?.let { m -> writeState { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
-            writeState { it.copy(state = WellnessRules.EnrollmentState.REPLACE_PENDING.wire) }
+            writeState {
+                it.copy(state = WellnessRules.EnrollmentState.REPLACE_PENDING.wire,
+                    pendingSettings = WellnessRules.pendingSettingsOf(wanted))
+            }
             WellnessScheduler.onEnrolled(app)
         } else if (outcome is WellnessEnrollment.Outcome.Enrolled) {
             outcome.syncIntervalMin?.let { m -> writeState { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
-            // Providers and local-only are settings: one signed PUT, now that this phone holds the key.
-            val wanted = WellnessRules.Settings(
-                categories = s.setup.consent, localOnly = s.setup.localOnly,
-                providersAllowed = s.setup.providersAllowed, googlePaidKeyConfirmed = s.setup.googlePaidKeyConfirmed,
-            )
+            // An earlier attempt's waiting choices must never be sent over these later.
+            writeState { it.copy(pendingSettings = null) }
+            // Now that this phone holds the key: one signed PUT.
             val body = WellnessStatusParser.settingsBody(s.operator, wanted, wanted, WellnessStatusParser.SETUP_FIELDS)
             val put = binding.signer()?.let { client.putSettings(body, it) }
             if (put?.ok != true) say("Health is set up, but your AI choices didn't save. Set them again in Health settings.")

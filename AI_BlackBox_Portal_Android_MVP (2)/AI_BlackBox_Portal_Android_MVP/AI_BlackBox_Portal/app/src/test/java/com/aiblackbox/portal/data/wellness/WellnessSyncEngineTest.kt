@@ -43,7 +43,14 @@ class WellnessSyncEngineTest {
     /** Signed status reads the engine made, and what the stand-in box answers them. */
     private var statusCalls = 0
 
-    private fun newEngine(fetch: (suspend () -> WellnessOutbox.SendResult)? = null) = WellnessSyncEngine(
+    /** Settings PUTs the engine made (the body, and whether the signature verified). */
+    private val settingsPuts = mutableListOf<Pair<String, Boolean>>()
+    private var settingsRefusedNotices = 0
+
+    private fun newEngine(
+        put: (suspend (String) -> WellnessOutbox.SendResult)? = null,
+        fetch: (suspend () -> WellnessOutbox.SendResult)? = null,
+    ) = WellnessSyncEngine(
         gateway = gw, binding = binding, tokens = tokens, dayIndex = DayIndex(files.dayIndex), outbox = outbox,
         state = state,
         send = { bytes, signer ->
@@ -62,6 +69,17 @@ class WellnessSyncEngineTest {
         onStopped = { status, error -> stopped = status to error },
         onReconnectNeeded = { reconnectNotices++ },
         fetchStatus = fetch?.let { f -> { _, _ -> statusCalls++; f() } },
+        putSettings = put?.let { p ->
+            { body, signer ->
+                val bytes = body.toByteArray()
+                val header = signer.header("PUT", "/wellness/settings", bytes, now / 1000, "b".repeat(32))
+                val enr = header.substringAfter("enr=").substringBefore(';')
+                settingsPuts += body to (header.substringAfter("sig=") == OriginSigner.signature(OriginSigner.decodeKey(keyFor(enr)),
+                    enr, now / 1000, "b".repeat(32), "PUT", "/wellness/settings", bytes))
+                p(body)
+            }
+        },
+        onSetupSettingsRefused = { settingsRefusedNotices++ },
     )
 
     private val engine = newEngine()
@@ -596,6 +614,63 @@ class WellnessSyncEngineTest {
         assertEquals("reconnect", refused.sync(false).outcome)
         assertTrue(state.load().needsReconnect)
         assertEquals(1, reconnectNotices)
+    }
+
+    // ── review fix: a replacement's setup choices wait for the approval ──────────────────
+
+    private val waiting = PendingSetupSettings(localOnly = mapOf("sleep" to false), providersAllowed = listOf("anthropic"))
+
+    @Test
+    fun `a replacement's setup choices go in one signed PUT once the old phone approved, then are cleared`() = runBlocking {
+        var approved = false
+        val e = newEngine(
+            fetch = {
+                if (approved) WellnessOutbox.SendResult(200, statusBody(allAsk))
+                // Waiting: this phone reads what anyone reads (four fields, the old enrollment's state).
+                else WellnessOutbox.SendResult(200, """{"state":"active","enrolled":true,"source_label":"Old phone","last_sync":null}""")
+            },
+            put = { WellnessOutbox.SendResult(200, statusBody(allAsk)) },
+        )
+        enroll()
+        state.update { it.copy(state = "replace_pending", pendingSettings = waiting) }
+        e.sync(false)
+        assertTrue("nothing is sent while the replacement waits", settingsPuts.isEmpty())
+        assertEquals(waiting, state.load().pendingSettings)
+
+        approved = true
+        now += 61_000
+        e.sync(false)
+        assertEquals(1, settingsPuts.size)
+        val (body, signed) = settingsPuts.single()
+        assertTrue("signed with this phone's key", signed)
+        val sent = Json.parseToJsonElement(body).jsonObject
+        assertEquals(listOf("anthropic"), sent.getValue("providers_allowed").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals("false", sent.getValue("local_only").jsonObject.getValue("sleep").jsonPrimitive.content)
+        assertNull(state.load().pendingSettings)
+        assertEquals("active", state.load().state)
+
+        now += 61_000
+        e.sync(false)
+        assertEquals("sent once", 1, settingsPuts.size)
+    }
+
+    @Test
+    fun `no answer keeps the waiting choices, a refusal drops them and tells the person`() = runBlocking {
+        var answer = WellnessOutbox.SendResult(-1)
+        val e = newEngine(fetch = { WellnessOutbox.SendResult(200, statusBody(allAsk)) }, put = { answer })
+        enroll()
+        state.update { it.copy(pendingSettings = waiting) }
+        e.sync(false)
+        assertEquals(1, settingsPuts.size)
+        assertEquals(waiting, state.load().pendingSettings)
+        assertEquals(0, settingsRefusedNotices)
+
+        answer = WellnessOutbox.SendResult(422, """{"error":"invalid_provider"}""")
+        now += 61_000
+        e.sync(false)
+        assertEquals(2, settingsPuts.size)
+        assertNull(state.load().pendingSettings)
+        assertEquals(1, settingsRefusedNotices)
     }
 
     @Test

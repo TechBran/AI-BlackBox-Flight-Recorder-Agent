@@ -138,4 +138,74 @@ class WellnessReplaceTest {
         assertEquals(WellnessRules.TroubleFix.NONE, card.fix)
         assertFalse(WellnessRules.localTroubles(facts.copy(replacePending = false)).contains(WellnessRules.REPLACE_PENDING_TROUBLE))
     }
+
+    // ── the new phone's setup choices wait for the approval ───────────────────────────────
+
+    private val setup = WellnessRules.Settings(
+        localOnly = WellnessCatalog.DEFAULT_LOCAL_ONLY + (WellnessCategory.SLEEP to true),
+        providersAllowed = setOf("anthropic"),
+        googlePaidKeyConfirmed = false,
+    )
+
+    private fun credentialedStatus(state: String = "active", providers: String = "[\"openai\",\"google\"]") =
+        WellnessStatusParser.parse("""{"state":"$state","enrolled":true,"troubles":[],"categories":{"sleep":"ask"},
+            "local_only":{"sleep":false,"heart":true,"activity":true,"blood_pressure":true},
+            "providers_allowed":$providers,"google_paid_key_confirmed":true}""")!!
+
+    @Test
+    fun `the setup choices are sent once this phone's own signed status is credentialed, and state the setup fields`() {
+        val pending = WellnessRules.pendingSettingsOf(setup)
+        assertEquals(listOf("anthropic"), pending.providersAllowed)
+        assertEquals(true, pending.localOnly["sleep"])
+        val body = Json.parseToJsonElement(WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, pending,
+            credentialedStatus())!!).jsonObject
+        assertEquals(setOf("operator", "local_only", "providers_allowed", "google_paid_key_confirmed"), body.keys)
+        assertEquals(WellnessFixtures.OPERATOR, body.getValue("operator").jsonPrimitive.content)
+        assertEquals(listOf("anthropic"), Json.parseToJsonElement(body.getValue("providers_allowed").toString())
+            .let { (it as kotlinx.serialization.json.JsonArray).map { e -> e.jsonPrimitive.content } })
+        // The setup's choices win over the old enrollment's, both ways.
+        assertTrue(body.getValue("local_only").jsonObject.getValue("sleep").jsonPrimitive.boolean)
+        assertFalse(body.getValue("local_only").jsonObject.getValue("heart").jsonPrimitive.boolean)
+        assertFalse(body.getValue("google_paid_key_confirmed").jsonPrimitive.boolean)
+        // "Only AI on my network" (no tick) is sent as an empty list, a narrowing like any other.
+        val onlyLocal = WellnessRules.pendingSettingsOf(WellnessRules.Settings())
+        val narrowed = Json.parseToJsonElement(WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, onlyLocal,
+            credentialedStatus())!!).jsonObject
+        assertEquals("[]", narrowed.getValue("providers_allowed").toString())
+    }
+
+    @Test
+    fun `nothing is sent while the replacement still waits or when nothing waits`() {
+        val pending = WellnessRules.pendingSettingsOf(setup)
+        val unsigned = WellnessStatusParser.parse("""{"state":"active","enrolled":true,"source_label":"Old phone","last_sync":null}""")
+        assertEquals(null, WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, pending, unsigned))
+        assertEquals(null, WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, pending, null))
+        assertEquals(null, WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, null, credentialedStatus()))
+        assertEquals(null, WellnessRules.pendingSettingsBody("", pending, credentialedStatus()))
+        assertEquals(null, WellnessRules.pendingSettingsBody(WellnessFixtures.OPERATOR, pending,
+            credentialedStatus(state = "replace_pending")))
+    }
+
+    @Test
+    fun `the box's answer to the waiting choices clears, keeps or reports them`() {
+        assertEquals(WellnessRules.PendingSettingsOutcome.SAVED, WellnessRules.pendingSettingsOutcome(200))
+        for (code in listOf(400, 403, 404, 409, 410, 422)) {
+            assertEquals("$code", WellnessRules.PendingSettingsOutcome.REFUSED, WellnessRules.pendingSettingsOutcome(code))
+        }
+        for (code in listOf(-1, 401, 408, 429, 500, 503)) {
+            assertEquals("$code", WellnessRules.PendingSettingsOutcome.RETRY, WellnessRules.pendingSettingsOutcome(code))
+        }
+    }
+
+    @Test
+    fun `the waiting choices survive the state file and an older file without them still loads`() {
+        val store = WellnessSyncStateStore(java.io.File(WellnessFixtures.tempDir("pending"), "sync_state.json"))
+        store.update { it.copy(state = "replace_pending", pendingSettings = WellnessRules.pendingSettingsOf(setup)) }
+        assertEquals(WellnessRules.pendingSettingsOf(setup), store.load().pendingSettings)
+        val old = WellnessSyncStateStore(java.io.File(WellnessFixtures.tempDir("pending-old"), "sync_state.json").also {
+            it.parentFile!!.mkdirs(); it.writeText("""{"state":"active","interval_min":30}""")
+        })
+        assertEquals(null, old.load().pendingSettings)
+        assertEquals(30, old.load().intervalMin)
+    }
 }

@@ -61,6 +61,14 @@ data class WellnessSyncState(
     @SerialName("sleep_latency_min") val sleepLatencyMin: List<Long> = emptyList(),
     /** When the box last nudged this phone (T-9: does a nudge reach a dozing phone?). */
     @SerialName("last_nudge_ms") val lastNudgeMs: Long = 0L,
+    /**
+     * The AI choices setup made on a phone whose enrollment waits for the old phone's approval
+     * ([WellnessRules.EnrollmentState.REPLACE_PENDING]). The box takes no settings from this
+     * phone until then, and the approval keeps the OLD enrollment's; so they wait here and go in
+     * one signed PUT once this phone's own signed status is the credentialed one
+     * ([WellnessRules.pendingSettingsBody]), then are cleared. Null when there are none.
+     */
+    @SerialName("pending_settings") val pendingSettings: PendingSetupSettings? = null,
 ) {
     fun consent(): Map<WellnessCategory, WellnessConsent> =
         WellnessCategory.entries.associateWith { WellnessConsent.fromWire(categories[it.wire]) }
@@ -70,6 +78,14 @@ data class WellnessSyncState(
     /** The origin heart rate is read from: the user's override, else the probe's auto pick. */
     fun heartRateOrigin(): String? = if (hrOriginChoice != "auto") hrOriginChoice else hrOriginAuto
 }
+
+/** The setup's AI choices waiting for a replacement's approval (wire ids; no health values). */
+@Serializable
+data class PendingSetupSettings(
+    @SerialName("local_only") val localOnly: Map<String, Boolean> = emptyMap(),
+    @SerialName("providers_allowed") val providersAllowed: List<String> = emptyList(),
+    @SerialName("google_paid_key_confirmed") val googlePaidKeyConfirmed: Boolean = false,
+)
 
 /** One periodic run: when, whether the screen was on, and how it ended (no data). */
 @Serializable

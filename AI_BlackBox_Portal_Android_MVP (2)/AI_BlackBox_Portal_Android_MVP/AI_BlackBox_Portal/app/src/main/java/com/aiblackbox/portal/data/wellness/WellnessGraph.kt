@@ -88,6 +88,14 @@ object WellnessGraph {
                         val r = client.status(operator, signer)
                         WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
                     },
+                    putSettings = { body, signer ->
+                        val r = client.putSettings(body, signer)
+                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
+                    },
+                    onSetupSettingsRefused = {
+                        BlackBoxNotificationManager(app).showWellnessNotice("Health AI choices",
+                            WellnessRules.PENDING_SETTINGS_REFUSED_MESSAGE, "wellness-setup-settings")
+                    },
                     onNotices = { notices -> postNotices(app, notices) },
                     onStopped = { status, error -> onStopped(app, status, error) },
                     onReconnectNeeded = {
