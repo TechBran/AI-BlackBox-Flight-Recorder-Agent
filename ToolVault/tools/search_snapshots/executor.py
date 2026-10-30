@@ -36,12 +36,17 @@ def execute(params: dict, ctx: ToolContext) -> ToolResult:
             format_snapshot_for_delivery,
             hybrid_retrieve,
         )
+        from Orchestrator.wellness import redact as wellness_redact
 
         # Fetch WHOLE snapshots (window_budget_chars=None); the reranked ranking
         # is identical for every caller. Formatting/bounding happens below.
         # No volume text: hybrid_retrieve never used it, and reading it cost a
         # whole-volume read + decode per search (audit O02-chat-routes-A-04).
-        results = hybrid_retrieve("", query, k=limit, operator=ctx.operator)
+        # M7 ledger rule: retrieval, the reranker's passages and the results
+        # all redact WELLNESS-tagged turns this call's turn may not see (never
+        # visible via the MCP gateway).
+        with wellness_redact.reading_for_tool(ctx):
+            results = hybrid_retrieve("", query, k=limit, operator=ctx.operator)
 
         if not results:
             return ToolResult(

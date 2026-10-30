@@ -1,0 +1,531 @@
+"""The ledger rule's mask (spec §3.7, W27, W28; check A2).
+
+No health value is ever minted: a turn a wellness result reached records its
+assistant text with every number of its delivered payloads (and every number
+next to a health unit) masked as [·], its [REASONING] block omitted, and the
+WELLNESS tag on its snapshot, while the user's own words stay verbatim. The
+delivered rows are the durable carry: a save after a restart still masks.
+Every other turn is recorded exactly as before.
+
+The property tests (A2) run over the fixture answers that carry the leak-scan
+sentinels (sleeping HR 47.3, 12,345 steps, 118/79) and over the replies
+recorded in every provider golden (Orchestrator/tests/golden/providers).
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import random
+import re
+import time
+from pathlib import Path
+
+import pytest
+
+from Orchestrator.tests.wellness_ledger_support import (ALL_ASK, FX, deliver, envelopes,
+                                                        ledger_box, snapshot_text)
+from Orchestrator.tests.wellness_support import OPERATOR, enrolled_fixture, roster
+from Orchestrator.wellness import mask, store, turn as turn_mod
+
+GOLDEN_DIR = Path(__file__).resolve().parent / "golden" / "providers"
+SENTINELS = FX.SENTINEL_STRINGS
+
+
+def _hits(text: str):
+    return [s for s in SENTINELS if s in text]
+
+
+def _gauge(body: str) -> str:
+    """The snapshot's WELLNESS gauge line ("" when untagged)."""
+    return next((line for line in body.splitlines() if line.startswith("WELLNESS: ")), "")
+
+
+@pytest.fixture(scope="module")
+def answers(tmp_path_factory):
+    """The fixture answers, computed once (no delivery written)."""
+    mp = pytest.MonkeyPatch()
+    try:
+        roster(mp, OPERATOR, "other-human")
+        enrolled_fixture(tmp_path_factory.mktemp("answers"), mp, categories=ALL_ASK)
+        yield envelopes()
+    finally:
+        mp.undo()
+
+
+def _golden_replies():
+    """Every assistant text a provider golden recorded (stream `content`/`done`
+    and `tool_result` frames, non-stream results)."""
+    out = []
+    for path in sorted(GOLDEN_DIR.glob("*.json")):
+        obs = json.loads(path.read_text())["observed"]
+        for block in (obs.get("sse") or "").split("\n\n"):
+            m = re.match(r"event: (done|tool_result|content)\ndata: (.*)", block, re.S)
+            if not m:
+                continue
+            data = json.loads(m.group(2))
+            text = data.get("content") if isinstance(data, dict) else data
+            if isinstance(text, str) and text.strip():
+                out.append(text)
+        result = obs.get("result")
+        if isinstance(result, list) and result and isinstance(result[0], str) and result[0]:
+            out.append(result[0])
+    return list(dict.fromkeys(out))
+
+
+# ------------------------------------------------------------------ the value set
+
+def test_the_sentinels_are_in_the_answers(answers):
+    blob = json.dumps(answers)
+    assert "47.3" in blob and "12345" in blob and '"min": 118.0' in blob and '"max": 79.0' in blob
+
+
+def test_value_set_holds_numbers_displays_words_durations_and_clocks(answers):
+    v = mask.value_set(answers.values())
+    for member in ("47.3", "47", "forty-seven", "forty seven point three", "12345", "12,345",
+                   "12 345", "12.3k", "118", "79", "forty-seven beats per minute",
+                   "6 h 47 min", "6:47", "6 h 47", "about seven hours", "seven hours",
+                   "23:34", "11:34 pm"):
+        assert member in v, member
+    # Counts and coverage are not values: "worn 4 of 7 nights" stays readable,
+    # and a series' coverage_pct (100) is not a reading.
+    assert "4" not in v and "7" not in v
+    assert "100" not in mask.value_set([answers["series"]])
+
+
+def test_dates_and_sync_times_are_not_masked(answers):
+    v = mask.value_set([answers["night"]])
+    text = "As of 2026-10-28 (synced 11:55), the night of 2026-10-22 was worn all night."
+    assert mask.mask_text(text, v) == text
+
+
+# ------------------------------------------------------------------ A2 property tests
+
+_PHRASES = (
+    "{label} was {display}.", "{label}: {spoken}.", "It came to {raw}.", "roughly {rounded}",
+    "{raw} {unit}", "{grouped} {unit} in total", "about {words} {unit}", "({raw})",
+    "**{display}**", "- {label}: {raw}", "| {label} | {display} |", "{words}",
+)
+
+
+def _facts(env):
+    out = []
+    for m in env.get("metrics") or []:
+        for key in ("value", "min", "max"):
+            v = m.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out.append((m["label"], v, m.get("display") or "", m.get("spoken") or "",
+                            m.get("unit") or ""))
+    cols, units = env.get("columns") or [], env.get("units") or {}
+    for row in env.get("rows") or []:
+        for col, cell in zip(cols, row):
+            if col in units and isinstance(cell, (int, float)) and not isinstance(cell, bool):
+                out.append((col, cell, f"{cell:g}", "", units[col]))
+    for s in env.get("sessions") or []:
+        for key in ("avg_hr", "max_hr", "duration_min", "distance_m"):
+            if isinstance(s.get(key), (int, float)):
+                out.append((key, s[key], s.get("duration") or "", "", "bpm"))
+    for p in env.get("points") or []:
+        if isinstance(p.get("value"), (int, float)):
+            out.append(("heart rate", p["value"], p.get("display") or "", "", "bpm"))
+    return out
+
+
+def _render(fact, rng):
+    label, v, display, spoken, unit = fact
+    from Orchestrator.wellness import catalog
+    r = int(round(v))
+    phrase = rng.choice(_PHRASES)
+    return phrase.format(label=label, display=display or f"{v:g}", spoken=spoken or str(r),
+                         raw=f"{v:g}", rounded=str(r), unit=unit, grouped=f"{r:,}",
+                         words=catalog.number_words(r))
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_no_sentinel_and_no_payload_number_survives_the_mask(answers, seed):
+    """A2: replies built from the fixture answers (their raw values, display
+    and spoken strings, rounded, grouped and in words), spliced into every
+    reply a provider golden recorded, come out of mask() with no sentinel and
+    no number of the payload left."""
+    rng = random.Random(seed)
+    goldens = _golden_replies()
+    assert goldens
+    envs = list(answers.values())
+    for _case in range(60):
+        chosen = rng.sample(envs, rng.randint(1, 3))
+        rows = [{"ref": e["ref"], "payload": e, "categories": ["heart"]} for e in chosen]
+        facts = [f for e in chosen for f in _facts(e)]
+        said = [_render(f, rng) for f in rng.sample(facts, min(len(facts), rng.randint(3, 12)))]
+        names = {name for name, env in answers.items() if env in chosen}
+        if "bp" in names:
+            said.append(rng.choice(("Your blood pressure was 118/79 this morning.", "118/79")))
+        if "night" in names:
+            said.append(rng.choice(("Sleeping heart rate 47.3", "47.3", "(47.3)")))
+        if "steps" in names:
+            said.append(rng.choice(("You walked 12,345 steps.", "12345", "12,345!")))
+        reply = f"{rng.choice(goldens)}\n\n" + " ".join(said) + f"\n\n{rng.choice(goldens)}"
+        snap = f"[REASONING]\nThe tool said 47.3 and 12345.\n\n[RESPONSE]\n{reply}"
+        out, cats, refs = mask.mask(snap, rows)
+        assert not _hits(out), (seed, out)
+        assert out.startswith(mask.REASONING_OMITTED)
+        assert refs == [e["ref"] for e in chosen] and cats == ["heart"]
+        for _label, v, _d, _s, _u in facts:
+            if abs(v) >= 10 or not float(v).is_integer():
+                for form in {f"{v:g}", str(int(round(v)))}:
+                    assert not re.search(rf"(?<![\d.,]){re.escape(form)}(?![\d])", out), \
+                        (form, out)
+
+
+def test_recorded_provider_replies_pass_through_unchanged():
+    """The masker has no false positives on ordinary replies: every golden
+    reply (tool results with ports, counts and ids included) is unchanged."""
+    for text in _golden_replies():
+        assert mask.mask_text(text, frozenset()) == text, text
+
+
+def test_the_unit_rule_masks_numbers_the_model_computed():
+    cases = {
+        "about 5% lower than usual": "about [·]% lower than usual",
+        "a 6.1 hour night of sleep": "a [·] hour night of sleep",
+        "you burned 2,345 kcal": "you burned [·] kcal",
+        "a resting HR of 61": "a resting HR of [·]",
+        "you slept 7 hours": "you slept [·] hours",
+        "around eleven thousand steps": "around [·] steps",
+        "it read 118/79 mmHg": "it read [·] mmHg",
+        "SpO2 was 97": "SpO2 was [·]",
+        "weight 81.4 kg": "weight [·] kg",
+    }
+    for text, expected in cases.items():
+        assert mask.mask_text(text, frozenset()) == expected, text
+    for keep in ("call me in 10 minutes", "3 meetings at 14:00", "version 2.0 of the app",
+                 "port 8765 on the box"):
+        assert mask.mask_text(keep, frozenset()) == keep
+
+
+def test_reasoning_block_is_omitted_in_both_layouts():
+    save = "[REASONING]\nsecret 47.3\n\n[RESPONSE]\nanswer"
+    assert mask.drop_reasoning(save) == f"{mask.REASONING_OMITTED}\n\n[RESPONSE]\nanswer"
+    worker = "answer\n\nKeywords: a, b\n\n[REASONING]\nthought 12345\nmore"
+    assert mask.drop_reasoning(worker) == f"answer\n\nKeywords: a, b\n\n{mask.REASONING_OMITTED}"
+    assert mask.drop_reasoning("no block here") == "no block here"
+
+
+def test_the_gauge_line_renders_only_when_present():
+    from Orchestrator.monitoring import render_snapshot_body_v71
+    info = {"tail_id": "SNAP-20261001-0001", "utc": "2026-10-01T00:00:00Z"}
+    gauges = {"drift": "green", "p": 1, "c": 2, "t": 3, "model": "m", "operator": "op",
+              "location": "1.0,2.0 · Town"}
+
+    def body(g):
+        return render_snapshot_body_v71(info, "SNAP-20261001-0002", "2026-10-01T00:00:01Z",
+                                        "TURNS", ["line"], gauges=g, provenance={"gm": True})
+
+    today = body(gauges)
+    assert body({**gauges, "wellness": ""}) == today and "WELLNESS" not in today
+    tagged = body({**gauges, "wellness": mask.gauge_text(
+        {"categories": ["sleep"], "labels": ["today"], "refs": ["w-1"]})})
+    assert tagged.index("LOCATION:") < tagged.index("WELLNESS: sleep · today · ref w-1 · "
+                                                    "values not recorded") < tagged.index("OPERATOR:")
+    assert tagged.replace("WELLNESS: sleep · today · ref w-1 · values not recorded\n", "") == today
+
+
+def test_merge_gauge_keeps_every_turn_once():
+    a = {"categories": ["sleep"], "labels": ["x"], "refs": ["w-1"]}
+    b = {"categories": ["heart", "sleep"], "labels": ["y"], "refs": ["w-2"]}
+    assert mask.merge_gauge(None, a) == a and mask.merge_gauge(a, None) == a
+    assert mask.merge_gauge(a, b) == {"categories": ["sleep", "heart"], "labels": ["x", "y"],
+                                      "refs": ["w-1", "w-2"]}
+
+
+# ------------------------------------------------------------------ the save path
+
+class _Req:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+@pytest.fixture
+def box(isolated_stores, monkeypatch, tmp_path):
+    """The enrolled fixture operator, a real ledger, and /chat/save minting
+    every turn through the real perform_mint."""
+    import Orchestrator.routes.chat_routes as cr
+    from Orchestrator.routes.chat import save as save_mod
+    roster(monkeypatch, OPERATOR, "other-human", "Flight Recorder")
+    rec, st, _data = enrolled_fixture(tmp_path, monkeypatch, categories=ALL_ASK)
+    lb = ledger_box(isolated_stores.root, monkeypatch)
+    for mod in (cr, save_mod):
+        monkeypatch.setattr(mod, "AUTO_ENABLE", True, raising=False)
+        monkeypatch.setattr(mod, "TURNS_THRESHOLD", 1, raising=False)
+        monkeypatch.setattr(mod, "DEBOUNCE_MS", 0, raising=False)
+        monkeypatch.setattr(mod, "should_create_checkpoint", lambda *a, **k: False, raising=False)
+    lb.rec, lb.st, lb.cr = rec, st, cr
+    lb.envs = envelopes()
+    return lb
+
+
+def _save(cr, **body):
+    payload = {"operator": OPERATOR, "user_message": "how did I sleep? my BP was 118/79",
+               "assistant_response": "ok", "model": "model-test",
+               "tokens": {"prompt": 1, "completion": 2}}
+    payload.update(body)
+    return asyncio.run(cr.chat_save(_Req(payload)))
+
+
+REPLY = ("Your sleeping heart rate was 47.3 bpm (47 bpm), forty-seven beats per minute. "
+         "You walked 12,345 steps; your blood pressure was 118/79.")
+
+
+def _last_turns(operator=OPERATOR):
+    from Orchestrator.state import get_state
+    log = get_state(operator).conversation_log
+    return log[-2], log[-1]
+
+
+def test_save_masks_tags_and_keeps_the_user_words(box, capsys):
+    refs = [deliver(box.st, box.envs[k], "wt_turn1") for k in ("night", "steps", "bp")]
+    res = _save(box.cr, assistant_response=REPLY, wellness_turn="wt_turn1",
+                reasoning="The tool returned 47.3 and 12345 and 118/79.")
+    assert res["minted"] is True
+    user, assistant = _last_turns()
+    assert user["text"] == "how did I sleep? my BP was 118/79"       # verbatim
+    assert not _hits(assistant["text"]) and not _hits(assistant["snap_text"])
+    assert assistant["snap_text"].startswith(f"{mask.REASONING_OMITTED}\n\n[RESPONSE]\n")
+    body = snapshot_text(box.vol, res["snap_id"])
+    gauge = next(line for line in body.splitlines() if line.startswith("WELLNESS: "))
+    assert gauge.startswith("WELLNESS: activity,blood_pressure,heart,sleep · ")
+    assert gauge.endswith(" · values not recorded")
+    assert all(r in gauge for r in refs)
+    assert "my BP was 118/79" in body                                  # the user's own words
+    assert not _hits(body.replace("my BP was 118/79", ""))
+    assert body.index("MODEL:") < body.index("WELLNESS:") < body.index("OPERATOR:")
+    assert all(row["masked_at"] for row in box.st.deliveries_for_turn("wt_turn1"))
+    printed = capsys.readouterr().out
+    assert "Response preview" not in printed and not _hits(printed)
+    assert "Wellness turn: preview skipped, 3 result(s) masked" in printed
+    # The active embedder (Gemini, cloud) is not on the owner's allowed list:
+    # the vector is built from the pointer line only.
+    assert box.embedded[-1] == gauge
+
+
+def test_a_save_with_no_key_masks_against_recent_unmasked_results(box, monkeypatch):
+    now = int(time.time() * 1000)
+    deliver(box.st, box.envs["night"], None, ts=now - 25 * 3600 * 1000)   # too old
+    deliver(box.st, box.envs["steps"], "wt_other")                        # unmatched, recent
+    res = _save(box.cr, assistant_response="You walked 12,345 steps on that day.")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "You walked [·] steps on that day."
+    assert "activity" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+    # Consumed: an hour later, an ordinary save is recorded as is.
+    monkeypatch.setattr(mask, "_now_ms", lambda: now + 3600 * 1000)
+    res2 = _save(box.cr, assistant_response="The meeting moved to 12:30.")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "The meeting moved to 12:30."
+    assert "WELLNESS" not in snapshot_text(box.vol, res2["snap_id"])
+
+
+def test_a_concurrent_turn_whose_save_lands_second_is_still_masked(box):
+    deliver(box.st, box.envs["night"], "wt_a")
+    _save(box.cr, assistant_response="Unrelated: the build passed.")     # B, no key, first
+    _save(box.cr, assistant_response="Your sleeping heart rate was 47.3.")  # A, no key, second
+    _user, assistant = _last_turns()
+    assert not _hits(assistant["text"])
+
+
+def test_a_non_wellness_turn_is_byte_identical(box, capsys):
+    """No delivered row for the echoed key (and none recent): the turn is
+    recorded and minted exactly as before, with its reasoning and preview."""
+    res = _save(box.cr, assistant_response="Sleep well! The 3 tasks are done.",
+                wellness_turn="wt_none", reasoning="Plain thinking.")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "Sleep well! The 3 tasks are done."
+    assert assistant["snap_text"] == ("[REASONING]\nPlain thinking.\n\n[RESPONSE]\n"
+                                      "Sleep well! The 3 tasks are done.")
+    body = snapshot_text(box.vol, res["snap_id"])
+    assert "WELLNESS" not in body and "[REASONING]\nPlain thinking." in body
+    assert "Response preview: Sleep well!" in capsys.readouterr().out
+    # An operator with no enrollment at all: the same.
+    _save(box.cr, operator="other-human", assistant_response="Ran 5 km? Nice.")
+    _user, assistant = _last_turns("other-human")
+    assert assistant["text"] == "Ran 5 km? Nice."
+
+
+def test_a_later_turn_that_repeats_a_result_is_masked_too(box):
+    """The chat history carries the earlier, unmasked bubble back to the
+    model, so a reply can repeat a result although no tool ran this turn: it
+    is masked and tagged. A reply with only a bare "47" or a clock is not."""
+    deliver(box.st, box.envs["night"], "wt_r1")
+    _save(box.cr, assistant_response="It was 47.3 bpm.", wellness_turn="wt_r1")
+    res = _save(box.cr, assistant_response="As I said, 47.3 is your number.",
+                wellness_turn="wt_r2")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "As I said, [·] is your number."
+    assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+    res = _save(box.cr, assistant_response="Done: 47 files moved at 23:34.",
+                wellness_turn="wt_r3")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "Done: 47 files moved at 23:34."
+    assert not _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+def test_the_tag_waits_for_the_mint_and_is_consumed(box, monkeypatch):
+    from Orchestrator.routes.chat import save as save_mod
+    monkeypatch.setattr(save_mod, "TURNS_THRESHOLD", 2)
+    deliver(box.st, box.envs["night"], "wt_t1")
+    first = _save(box.cr, assistant_response="It was 47.3.", wellness_turn="wt_t1")
+    assert first["minted"] is False
+    second = _save(box.cr, assistant_response="Done with the email.", wellness_turn="wt_t2")
+    body = snapshot_text(box.vol, second["snap_id"])
+    assert "sleep" in _gauge(body) and not _hits(body.replace("118/79", ""))
+    third = _save(box.cr, assistant_response="a", wellness_turn="wt_t3")
+    fourth = _save(box.cr, assistant_response="b", wellness_turn="wt_t4")
+    assert third["minted"] is False and fourth["minted"] is True
+    assert "WELLNESS" not in snapshot_text(box.vol, fourth["snap_id"])
+
+
+def test_restart_between_stream_and_save(box, monkeypatch):
+    """W28: the rows are on disk, not in memory. A fresh process state (the
+    mask module reloaded, the store's open-once cache and the operator state
+    gone) still masks the save that echoes the key."""
+    from collections import defaultdict
+
+    from Orchestrator import state
+    deliver(box.st, box.envs["night"], "wt_restart")
+    importlib.reload(mask)
+    store._INITIALIZED.clear()
+    monkeypatch.setattr(state, "state_by_op", defaultdict(state.OpState))
+    res = _save(box.cr, assistant_response="Your sleeping heart rate was 47.3 bpm.",
+                wellness_turn="wt_restart")
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "Your sleeping heart rate was [·] bpm."
+    assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+def test_artifacts_on_a_wellness_turn_carry_no_values(box, monkeypatch):
+    """W26: an artifact a wellness turn asks for is written from the masked text."""
+    from Orchestrator.routes.chat import save as save_mod
+    seen = []
+    monkeypatch.setattr(save_mod, "parse_and_process_artifacts_with_meta",
+                        lambda text, op: (seen.append(text) or text, []))
+    deliver(box.st, box.envs["steps"], "wt_art")
+    _save(box.cr, assistant_response="[ARTIFACT: steps.csv]\nday,steps\nsun,12345\n",
+          wellness_turn="wt_art")
+    assert seen and not _hits(seen[0])
+
+
+# ------------------------------------------------------------------ on-device and worker paths
+
+def test_local_turn_complete_masks_and_replaces_wellness_tool_lines(box):
+    from Orchestrator.routes.chat_routes import persist_local_turn_and_mint
+    deliver(box.st, box.envs["night"], None)
+    result = asyncio.run(persist_local_turn_and_mint(
+        OPERATOR, "how did I sleep?", "Your sleeping heart rate was 47.3 bpm.",
+        tool_transcript=[
+            {"name": "wellness_summary", "args": {"period": "last_night"},
+             "result": json.dumps(box.envs["night"])},
+            {"name": "web_search", "args": {"query": "is 47.3 bpm low"}, "result": "ok"},
+        ]))
+    body = snapshot_text(box.vol, result["snap_id"])
+    assert mask.TOOLS_LINE in body and "wellness_summary" not in body
+    assert "WELLNESS: " in body and not _hits(body)
+
+
+def test_local_turn_with_a_wellness_call_but_no_row_is_still_tagged(box):
+    from Orchestrator.routes.chat_routes import persist_local_turn_and_mint
+    result = asyncio.run(persist_local_turn_and_mint(
+        OPERATOR, "steps?", "You walked 9,876 steps.",
+        tool_transcript=[{"name": "wellness_series", "args": {}, "result": "9876"}]))
+    body = snapshot_text(box.vol, result["snap_id"])
+    assert "WELLNESS: activity,blood_pressure,heart,sleep · on-device · " in body
+    assert "9,876" not in body and "9876" not in body
+
+
+def test_worker_turn_records_masked_text_in_tasks_db_and_the_ledger(box, monkeypatch):
+    """The non-stream path (cron, /chat): result_data (tasks.db and the cron
+    rows that copy it) and the snapshot body are masked, the reasoning is
+    omitted, and the task is on the store's erase list."""
+    import Orchestrator.routes.chat_routes as cr
+    import Orchestrator.tasks as tasks
+    from Orchestrator.models import Task, TaskStatus, TaskType, task_db
+    from Orchestrator.volume import now_utc_iso
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
+    monkeypatch.setattr(tasks, "AUTO_ENABLE", True)
+    monkeypatch.setattr(tasks, "TURNS_THRESHOLD", 1)
+    monkeypatch.setattr(tasks, "DEBOUNCE_MS", 0)
+    monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
+    monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
+
+    def fake_call(messages, model, operator="x"):
+        deliver(box.st, box.envs["steps"], "wt_worker")      # the tool ran mid-turn
+        return (REPLY, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                "I read 12345 and 47.3.")
+
+    monkeypatch.setattr(cr, "call_anthropic", fake_call)
+    task = Task(task_id="wellness-worker-1", task_type=TaskType.CHAT, status=TaskStatus.PENDING,
+                created_at=now_utc_iso(), updated_at=now_utc_iso(), operator=OPERATOR,
+                result_data={"messages": [{"role": "user", "content": "steps?"}],
+                             "operator": OPERATOR, "provider": "anthropic", "model": "m"})
+    task_db.save_task(task)
+    token = turn_mod.stamp(turn_mod.WellnessTurn(OPERATOR, turn_mod.SURFACE_CRON, True,
+                                                 provider="anthropic", turn_key="wt_worker"))
+    try:
+        tasks.process_chat_task(task)
+    finally:
+        turn_mod.clear(token)
+    final = task_db.get_task("wellness-worker-1")
+    assert final.status == TaskStatus.COMPLETED
+    blob = json.dumps(final.result_data) + str(final.reasoning_text)
+    assert not _hits(blob) and "[·]" in final.result_data["reply"]
+    body = Path("Volumes/SNAPSHOT_VOLUME.txt").read_text(encoding="utf-8")
+    assert "activity" in _gauge(body) and mask.REASONING_OMITTED in body
+    assert not _hits(body)
+    assert "wellness-worker-1" in box.st.task_refs()
+    # The cron rows copy this reply (cron_job_history.result, the notification).
+    from Orchestrator.scheduler.executor import _extract_reply
+    assert not _hits(_extract_reply({"result_data": final.result_data}, "job"))
+
+
+# ------------------------------------------------------------------ the stream key
+
+def test_stream_start_names_the_turn_key_only_for_a_stamped_enrolled_turn(box, monkeypatch):
+    import Orchestrator.routes.chat_routes as cr
+
+    def fake_build(messages, operator, provider="openai", window_guard_tokens=None):
+        return [{"role": "system", "content": "sys"}] + list(messages), {}, {}
+
+    async def fake_stream(msgs, model, operator=None, **kw):
+        yield {"type": "content", "data": "ok"}
+
+    monkeypatch.setattr(cr, "build_streaming_context", fake_build)
+    monkeypatch.setattr(cr, "stream_openai_with_reasoning", fake_stream)
+
+    def start_event(operator, stamped):
+        body = {"messages": [{"role": "user", "content": "hi"}], "provider": "openai",
+                "model": "m", "operator": operator}
+        token = turn_mod.stamp(stamped) if stamped else None
+
+        async def go():
+            resp = await cr.chat_stream_post(_Req(body))
+            out = []
+            async for chunk in resp.body_iterator:
+                out.append(chunk if isinstance(chunk, str) else chunk.decode())
+            return "".join(out)
+        try:
+            sse = asyncio.run(go())
+        finally:
+            if token:
+                turn_mod.clear(token)
+        block = next(b for b in sse.split("\n\n") if b.startswith("event: stream_start"))
+        return json.loads(block.split("data: ", 1)[1])
+
+    stamped = turn_mod.WellnessTurn(OPERATOR, turn_mod.SURFACE_ANDROID, True, provider="openai",
+                                    turn_key="wt_stream_1")
+    assert start_event(OPERATOR, stamped)["wellness_turn"] == "wt_stream_1"
+    assert "wellness_turn" not in start_event(OPERATOR, None)
+    other = turn_mod.WellnessTurn("other-human", turn_mod.SURFACE_ANDROID, True,
+                                  provider="openai", turn_key="wt_stream_2")
+    assert start_event("other-human", other) == {"provider": "openai", "model": "m",
+                                                 "provenance": {}}

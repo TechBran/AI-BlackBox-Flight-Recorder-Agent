@@ -18,6 +18,10 @@ from Orchestrator import location as user_location
 from Orchestrator.state import get_state
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint
+from Orchestrator.utils.async_helpers import run_blocking
+from Orchestrator.wellness import catalog as wellness_catalog
+from Orchestrator.wellness import mask as wellness_mask
+from Orchestrator.wellness import turn as wellness_turn
 # The auto-mint knobs and hooks MintGate.of reads from this module on every
 # turn (a stub set on chat_routes lands here).
 from Orchestrator.checkpoint import perform_mint, should_create_checkpoint  # noqa: F401
@@ -76,6 +80,11 @@ async def persist_local_turn_and_mint(
     on-device 4B never authors snapshot content), then records it through the
     persist + mint tail every chat path shares. Returns {"snap_id": str|None,
     "minted": bool, "checkpoint_triggered": bool}.
+
+    A wellness turn (a delivered row for the stamped turn, else an unmasked
+    one from the last 24 h: the phone echoes no key; or a wellness_* call in
+    the transcript) is masked and tagged, and each wellness_* call is recorded
+    as "wellness: [numbers kept in the health store]" (spec §3.7).
     """
     try:
         # --- Compose the assistant response SERVER-SIDE -------------------
@@ -85,11 +94,23 @@ async def persist_local_turn_and_mint(
         # Phase 0 (0b-ii): defensive unwrap in case the on-device model leaked a
         # reply envelope onto its final text; store the clean reply, not raw JSON.
         final_response, _ = unwrap_reply_envelope(final_response)
+        wellness_calls = any(isinstance(c, dict) and wellness_mask.is_wellness_tool(c.get("name"))
+                             for c in tool_transcript or [])
+        stamped = wellness_turn.current()
+        # Off the loop: it reads the operator's health store.
+        carry = await run_blocking(
+            wellness_mask.carry_for, operator,
+            turn_key=stamped.turn_key if stamped and stamped.operator == operator else None,
+            fallback=True, extra_categories=wellness_catalog.CATEGORIES if wellness_calls else (),
+            recall_text=final_response)
         assistant_response = final_response
         if tool_transcript:
             lines = ["", "[TOOLS USED]"]
             for call in tool_transcript:
                 if not isinstance(call, dict):
+                    continue
+                if wellness_mask.is_wellness_tool(call.get("name")):
+                    lines.append(wellness_mask.TOOLS_LINE)
                     continue
                 name = str(call.get("name", "tool"))
                 args = call.get("args", {})
@@ -101,12 +122,17 @@ async def persist_local_turn_and_mint(
                     result_str = result_str[:200] + "..."
                 lines.append(f"- {name}({args_str}) -> {result_str}")
             assistant_response = final_response + "\n" + "\n".join(lines)
+        if carry is not None:
+            assistant_response = await run_blocking(carry.mask, assistant_response)
 
         # Token counts are 0 for an on-device turn; the model is the on-device provider.
         turn = await persist_turn_and_maybe_mint(
             get_state(operator), operator, prompt, assistant_response, gate=_mint_gate(),
             model="local", provenance=provenance, tag="[LOCAL-SAVE]",
+            wellness=carry.gauge() if carry is not None else None,
         )
+        if carry is not None:
+            await run_blocking(carry.mark)
         print(f"[LOCAL-SAVE] Saved on-device turn for {operator} (minted={turn.minted})")
         return {"snap_id": turn.snap_id, "minted": turn.minted,
                 "checkpoint_triggered": turn.checkpoint_triggered}
@@ -130,8 +156,16 @@ async def chat_save(request: Request):
         tokens: { prompt: int, completion: int } (optional),
         carry_location: bool (optional, default true) - false for a background
             snapshot (the worker's CU / CLI results), which must not take the
-            location a phone's /chat/stream carried for its own save
+            location a phone's /chat/stream carried for its own save,
+        wellness_turn: string (optional) - the turn key /chat/stream sent in
+            stream_start; without it the save is masked against every
+            unmasked health result of the last 24 h (spec §3.7)
     }
+
+    A wellness turn (one a health result reached) records masked text: its
+    numbers become [·], its reasoning is omitted, the snapshot carries the
+    WELLNESS tag, and the response preview is not logged. The user's own
+    words stay verbatim. Every other turn is recorded exactly as before.
     """
     try:
         body = await request.json()
@@ -154,9 +188,28 @@ async def chat_save(request: Request):
         if not assistant_response:
             return JSONResponse(status_code=400, content={"error": "assistant_response required"})
 
+        # M7 ledger rule (durable carry): the delivered rows of this turn live
+        # in the operator's health store, so a save after a restart still
+        # finds them. A client that echoes the turn key is matched exactly;
+        # one that does not is masked against every recent unmasked result;
+        # a reply that repeats an earlier result (from the chat history) is
+        # masked too.
+        # Off the loop: it reads the operator's health store.
+        turn_key = body.get("wellness_turn")
+        carry = await run_blocking(
+            wellness_mask.carry_for, operator,
+            turn_key=turn_key if isinstance(turn_key, str) else None,
+            fallback=not turn_key, recall_text=assistant_response)
+
         # Debug: log incoming response
         print(f"[CHAT/SAVE] Received response ({len(assistant_response)} chars)")
-        print(f"[CHAT/SAVE] Response preview: {assistant_response[:500]}...")
+        if carry is None:
+            print(f"[CHAT/SAVE] Response preview: {assistant_response[:500]}...")
+        else:
+            # Never a health value in the journal: no preview on a wellness turn.
+            print(f"[CHAT/SAVE] Wellness turn: preview skipped, {len(carry.refs)} result(s) masked")
+            assistant_response = await run_blocking(carry.mask, assistant_response)
+            reasoning = ""
 
         # Get operator state
         s = get_state(operator)
@@ -184,7 +237,9 @@ async def chat_save(request: Request):
 
         # Build snap_text with reasoning (if provided) + response
         # This goes into the snapshot's Raw Session Log
-        if reasoning:
+        if carry is not None:
+            snap_text = carry.snap_text(assistant_response_unwrapped, body.get("reasoning"))
+        elif reasoning:
             snap_text = f"[REASONING]\n{reasoning}\n\n[RESPONSE]\n{assistant_response_unwrapped}"
         else:
             snap_text = assistant_response_unwrapped
@@ -221,7 +276,10 @@ async def chat_save(request: Request):
             completion_tokens=tokens.get("completion", 0), model=model,
             location_gauge=user_location.format_location_gauge(turn_location),
             provenance=provenance, tag="[CHAT/SAVE]",
+            wellness=carry.gauge() if carry is not None else None,
         )
+        if carry is not None:
+            await run_blocking(carry.mark)
 
         response = {
             "success": True,

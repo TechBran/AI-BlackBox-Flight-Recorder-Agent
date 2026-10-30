@@ -402,9 +402,15 @@ def resume_if_interrupted() -> "asyncio.Task | None":
 
 # ── shared volume-slice helper (engine + Task 9 watcher gap-heal) ────────────
 
-def slice_snapshot_text(snap_id: str, index: dict, vol_bytes) -> "str | None":
-    """Snapshot body text sliced from the volume by index byte offsets.
+def slice_snapshot_text(snap_id: str, index: dict, vol_bytes,
+                        embed_slug: "str | None" = None) -> "str | None":
+    """Snapshot body text sliced from the volume by index byte offsets, as the
+    embedding model `embed_slug` (default: the active one) may receive it.
     `vol_bytes` is the volume's bytes or a ledger view of them (ledger.view).
+
+    M7 ledger rule: a WELLNESS-tagged snapshot whose owner did not allow that
+    embedder is its pointer line only (the mint's rule, wellness/redact.py),
+    so a re-embed or gap-heal never sends what the mint withheld.
 
     None when the recorded range is invalid for this volume (stale index
     entry, truncated volume) — callers quarantine/skip those ids.
@@ -414,7 +420,9 @@ def slice_snapshot_text(snap_id: str, index: dict, vol_bytes) -> "str | None":
     be = entry.get("byte_end", 0)
     if bs >= len(vol_bytes) or be > len(vol_bytes) or be <= bs:
         return None
-    return vol_bytes[bs:be].decode("utf-8", errors="replace")
+    from Orchestrator.wellness import redact as wellness_redact
+    return wellness_redact.embed_text(vol_bytes[bs:be].decode("utf-8", errors="replace"),
+                                      embed_slug)
 
 
 # ── chunk batching helpers (rebuild engine + watcher v2 gap-heal) ────────────
@@ -616,7 +624,7 @@ async def _run_engine(target_slug: str) -> dict:
                 batch_ids = missing[i:i + BATCH_SIZE]
                 texts, good_ids = [], []
                 for sid in batch_ids:
-                    text = slice_snapshot_text(sid, index, vol_bytes)
+                    text = slice_snapshot_text(sid, index, vol_bytes, target_slug)
                     if text is None:
                         print(
                             f"[MIGRATE] {sid}: invalid byte range for "
@@ -849,7 +857,7 @@ async def _catch_up_fill(target_slug: str) -> int:
     vol_bytes = await asyncio.to_thread(ledger.view, Path(config.VOL_PATH))
     ids_texts = []
     for sid in missing:
-        text = slice_snapshot_text(sid, index, vol_bytes)
+        text = slice_snapshot_text(sid, index, vol_bytes, target_slug)
         if text is not None:
             ids_texts.append((sid, text))
     if not ids_texts:
@@ -996,7 +1004,7 @@ async def _run_rebuild_engine(target_slug: str, content_mode: str = "full",
             )
             ids_texts, bad_ids = [], []
             for sid in missing:
-                text = slice_snapshot_text(sid, index, vol_bytes)
+                text = slice_snapshot_text(sid, index, vol_bytes, target_slug)
                 if text is None:
                     print(
                         f"[MIGRATE] rebuild {target_slug}: {sid}: invalid byte "

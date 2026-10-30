@@ -173,6 +173,7 @@ async def _recent_snapshots(session, args: Dict, log_prefix: str) -> str:
     print(f"{log_prefix} Getting {count} recent snapshots for {operator} (see_all={see_all})")
     try:
         from Orchestrator.fossils import load_snapshot_index, read_volume_bytes
+        from Orchestrator.wellness import redact as wellness_redact
         # The index parse and the whole-volume read block: off the event loop.
         index = await run_blocking(load_snapshot_index)
 
@@ -212,8 +213,11 @@ async def _recent_snapshots(session, args: Dict, log_prefix: str) -> str:
             start = meta.get("byte_start", 0)
             end = meta.get("byte_end", start + 5000)
             snap_bytes = vol_bytes[start:end]
-            snap_text = snap_bytes.decode('utf-8', errors='replace')
             operator_name = meta.get("operator", "unknown")
+            # M7 ledger rule: live voice gets no wellness data in v1, so a
+            # WELLNESS-tagged turn is read to it as the placeholder.
+            snap_text = wellness_redact.redact(snap_bytes.decode('utf-8', errors='replace'),
+                                               operator_name, session.operator, None)
 
             # WI-10 (M7): deliver recent snapshots WHOLE — no delivery truncation
             result_parts.append(f"--- {snap_id} (operator: {operator_name}) ---\n{snap_text}")

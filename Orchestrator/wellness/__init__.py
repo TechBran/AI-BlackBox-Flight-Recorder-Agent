@@ -26,6 +26,8 @@ from the MCP server's lean venv):
   gate          the six checks, in order, with their refusal codes
   api           the deterministic answers behind the wellness_* tools
   erase         stop & erase, and the operator-delete hook
+  mask          the ledger rule's mask, the durable carry and the history scrub
+  redact        tagged turns hidden from every ledger reader that may not see them
 
 Nothing here writes under Portal/, Volumes/, Archive/, Manifest/ or a tracked
 path, and nothing logs a health value: counts only.

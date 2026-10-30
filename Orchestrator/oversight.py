@@ -390,6 +390,8 @@ Produce a FLIGHT REPORT with these sections:
 
 Be factual and specific. Distinguish what the record shows from what you infer. If a section is empty, state that explicitly ("No failures observed.").
 
+Reports may not infer anyone's health or mood. Some turns appear only as "[wellness conversation · not shared]": they are private; mention at most that a private conversation took place, never what it might have been about.
+
 {snapshots}
 
 {digest}"""
@@ -466,12 +468,17 @@ def create_flight_report_async(manual: bool = False) -> Optional[str]:
     from Orchestrator.monitoring import render_snapshot_body_v71
     from Orchestrator.state import mint_lock
     from Orchestrator.checkpoint import _embed_for_index
+    from Orchestrator.wellness import redact as wellness_redact
     try:
         # Widened gate: as the FR, this returns the most recent snapshots
         # across EVERY operator (their byte ranges only; no volume text).
-        recent = get_recent_fossils_for_operator(
-            "", FLIGHT_RECORDER_OPERATOR,
-            count=FR_REPORT_SOURCE_COUNT, cap_chars_each=10000)
+        # M7 ledger rule (W25): the FR is never a tagged turn's owner, so it
+        # reads WELLNESS-tagged turns as "[wellness conversation · not shared]".
+        with wellness_redact.reading_as(
+                wellness_redact.background_reader(FLIGHT_RECORDER_OPERATOR)):
+            recent = get_recent_fossils_for_operator(
+                "", FLIGHT_RECORDER_OPERATOR,
+                count=FR_REPORT_SOURCE_COUNT, cap_chars_each=10000)
 
         # Min-activity skip: how many snapshots are NEW since the last report?
         index = load_snapshot_index()
@@ -631,6 +638,7 @@ def get_recent_flight_reports(count: int = 1) -> List[str]:
     if count <= 0:
         return []
     from Orchestrator.fossils import VolumeRanges, load_snapshot_index
+    from Orchestrator.wellness import redact as wellness_redact
     index = load_snapshot_index()
     matching = [(sid, meta) for sid, meta in index.items()
                 if meta.get("operator") == FLIGHT_RECORDER_OPERATOR
@@ -644,8 +652,11 @@ def get_recent_flight_reports(count: int = 1) -> List[str]:
     with VolumeRanges() as vol:
         for sid, meta in matching[-count:]:
             try:
-                out.append(vol.read(meta["byte_start"], meta["byte_end"]).decode(
-                    "utf-8", errors="replace"))
+                # A flight report is never tagged (its sources were redacted);
+                # the reader rule still applies to whatever the ledger holds.
+                out.append(wellness_redact.for_reader(
+                    vol.read(meta["byte_start"], meta["byte_end"]).decode("utf-8", errors="replace"),
+                    snapshot_operator=FLIGHT_RECORDER_OPERATOR))
             except Exception:
                 continue
     return out

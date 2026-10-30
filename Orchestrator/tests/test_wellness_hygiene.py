@@ -1,16 +1,25 @@
-"""Hygiene (spec W26, W32, A11, A11b): after a full simulated phone run the
+"""Hygiene (spec W26, W27, W32, A11, A11b): after a full simulated phone run the
 wellness files are 0700/0600 (and re-secured at boot), nothing was written
 under Portal/, Volumes/, Archive/ or Manifest/, no sentinel health value
 appears in any other store or in anything logged or printed, the device key
 never reaches a log, and the redaction backstop masks the new secret shapes.
-Writes into the checkout itself are refused by the root conftest's write
-guard for every test, these included."""
+
+Then the ledger rule's half (wave 2): a streamed chat turn quoting the
+sentinels is saved through POST /chat/save and minted, and a non-stream
+worker turn (the cron and /chat path) is recorded in tasks.db and minted;
+afterwards no sentinel is in data/ (outside data/wellness/), Manifest/,
+Volumes/, Archive/, Orchestrator/*.db, Portal/, the embedder's input, the
+journal or anything printed. Writes into the checkout itself are refused by
+the root conftest's write guard for every test, these included."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import logging
 import os
 import stat
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -100,13 +109,86 @@ def ran(tmp_path_factory):
                         api.series(OPERATOR, "steps", "last_7_days", now_ms=now, delivery=d)]
                 SIM.status(t, state)
                 key = state.load()["key"]
-            after = _tree(root)
+                after = _tree(root)
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    turns = _chat_turns(mp, root, client, now)
         yield {"root": root, "records": records, "before": before, "after": after,
-               "key": key, "envs": envs}
+               "key": key, "envs": envs, "printed": printed.getvalue(), **turns}
     finally:
         logging.getLogger().removeHandler(handler)
         logging.getLogger().setLevel(old_level)
         mp.undo()
+
+
+REPLY = ("Your sleeping heart rate was 47.3 bpm (47 bpm), forty-seven beats per minute. "
+         "You walked 12,345 steps (12345); your blood pressure was 118/79.")
+
+
+def _chat_turns(mp, root: Path, client, now: int) -> dict:
+    """A streamed turn saved through POST /chat/save (it echoes the turn key
+    of the deliveries above) and a non-stream worker turn whose tool delivers
+    mid-turn, both minting into a real ledger under `root`."""
+    import hashlib
+
+    import Orchestrator.routes.chat_routes as cr
+    import Orchestrator.tasks as tasks
+    from Orchestrator import fossils, state
+    from Orchestrator.embeddings import search as search_mod
+    from Orchestrator.models import Task, TaskStatus, TaskType, task_db
+    from Orchestrator.routes.chat import save as save_mod
+    from Orchestrator.volume import now_utc_iso
+    from Orchestrator.wellness import enroll, turn as turn_mod
+    gm = root / "GoldMaster"
+    gm.mkdir(exist_ok=True)
+    (gm / "v7.0.txt").write_bytes(b"gold")
+    (gm / "v7.0.sha256").write_text(hashlib.sha256(b"gold").hexdigest())
+    if not (root / "Manifest" / "manifest.json").exists():
+        (root / "Manifest" / "manifest.json").write_text(json.dumps({"archive": []}))
+    mp.setattr(fossils, "_index_cache", None)
+    mp.setattr(fossils, "_index_cache_mtime", 0.0)
+    mp.setattr(state, "state_by_op", defaultdict(state.OpState))
+    mp.setattr(tasks, "collect_pending_media_artifacts", lambda *a, **k: [])
+    mp.setenv("BLACKBOX_SKIP_FR_SEED", "1")
+    embedded = []
+    mp.setattr(search_mod, "embed_snapshot_for_index", lambda text: embedded.append(text) or {})
+    for mod in (save_mod, tasks):
+        mp.setattr(mod, "AUTO_ENABLE", True)
+        mp.setattr(mod, "TURNS_THRESHOLD", 1)
+        mp.setattr(mod, "DEBOUNCE_MS", 0)
+        mp.setattr(mod, "should_create_checkpoint", lambda *a, **k: False)
+
+    saved = client.post("/chat/save", json={
+        "operator": OPERATOR, "user_message": "how did I sleep last night?",
+        "assistant_response": REPLY, "reasoning": "The tool said 47.3 and 12345 and 118/79.",
+        "model": "model-test", "wellness_turn": "wt_hyg"}).json()
+
+    st = enroll.store_for(enroll.get_enrollment(OPERATOR), create=False)
+    mp.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
+    mp.setattr(tasks, "TOOLVAULT_ENABLED", False)
+
+    def fake_call(messages, model, operator="x"):
+        env = api.summary(OPERATOR, "custom", start=FX.day_of(-5), end=FX.day_of(-5), now_ms=now,
+                          delivery=api.Delivery("wt_hyg_worker", "cron", "anthropic"))
+        assert env["ok"]
+        return REPLY, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, \
+            "Thinking about 47.3 and 12345."
+
+    mp.setattr(cr, "call_anthropic", fake_call)
+    task = Task(task_id="hygiene-worker-1", task_type=TaskType.CHAT, status=TaskStatus.PENDING,
+                created_at=now_utc_iso(), updated_at=now_utc_iso(), operator=OPERATOR,
+                result_data={"messages": [{"role": "user", "content": "morning check-in"}],
+                             "operator": OPERATOR, "provider": "anthropic", "model": "m"})
+    task_db.save_task(task)
+    token = turn_mod.stamp(turn_mod.WellnessTurn(OPERATOR, turn_mod.SURFACE_CRON, True,
+                                                 provider="anthropic", turn_key="wt_hyg_worker"))
+    try:
+        tasks.process_chat_task(task)
+    finally:
+        turn_mod.clear(token)
+    return {"saved": saved, "embedded": embedded, "worker": task_db.get_task(task.task_id),
+            "store": st}
 
 
 def test_modes_are_private(ran):
@@ -150,6 +232,31 @@ def test_no_sentinel_or_key_in_the_logs(ran):
 def test_no_sentinel_in_anything_printed(ran, capsys):
     out, err = capsys.readouterr()
     assert not _hits(out + err)
+    assert "[CHAT/SAVE] Wellness turn: preview skipped" in ran["printed"]
+    assert not _hits(ran["printed"])
+
+
+def test_the_chat_turns_were_wellness_turns_and_minted(ran):
+    """The scan below would catch a leak: both turns really reached the ledger,
+    tagged, with their rows stamped masked."""
+    assert ran["saved"]["minted"] is True
+    body = (ran["root"] / "Volumes" / "SNAPSHOT_VOLUME.txt").read_text(encoding="utf-8")
+    assert body.count("WELLNESS: ") >= 2 and body.count(" · values not recorded") >= 2
+    assert "[REASONING omitted: wellness turn]" in body
+    assert "how did I sleep last night?" in body                       # the user's own words
+    worker = ran["worker"]
+    assert worker.status.value == "completed" and "[·]" in worker.result_data["reply"]
+    assert "hygiene-worker-1" in ran["store"].task_refs()
+    assert all(r["masked_at"] for r in ran["store"].deliveries_for_turn("wt_hyg"))
+
+
+def test_no_sentinel_in_what_the_embedder_received(ran):
+    assert ran["embedded"] and not any(_hits(text) for text in ran["embedded"])
+
+
+def test_no_sentinel_in_the_worker_task_row(ran):
+    worker = ran["worker"]
+    assert not _hits(json.dumps(worker.result_data) + str(worker.reasoning_text))
 
 
 def test_boot_hook_resecures(ran):

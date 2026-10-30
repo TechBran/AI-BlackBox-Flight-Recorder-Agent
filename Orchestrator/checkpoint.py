@@ -45,6 +45,10 @@ def _embed_for_index(snap_id: str, body: str) -> Dict[str, Any]:
     a logged soft failure, never a broken mint.
     """
     try:
+        # M7 ledger rule: a WELLNESS-tagged snapshot whose owner did not allow
+        # the active embedder is embedded as its pointer line only.
+        from Orchestrator.wellness import redact as wellness_redact
+        body = wellness_redact.embed_text(body)
         # Lazy import (monitoring.py's delegate pattern): checkpoint is
         # imported very early at startup, before the embeddings stack.
         from Orchestrator.embeddings.search import embed_snapshot_for_index
@@ -231,7 +235,12 @@ def _create_checkpoint(operator: str, manual: bool) -> Dict[str, Any]:
     # Get recent snapshots for this operator (configured in [checkpoint] section),
     # their byte ranges only: the helper reads the volume itself when there is
     # no index, and never used the whole decoded volume this used to pass it.
-    recent_snapshots = get_recent_fossils_for_operator("", operator, count=CHECKPOINT_TURNS_TO_COMPRESS, cap_chars_each=10000)
+    # M7 ledger rule: the compressor is a background reader, so a WELLNESS-
+    # tagged turn reaches it (and the summary everyone reads later) only as
+    # "[wellness conversation · not shared]".
+    from Orchestrator.wellness import redact as wellness_redact
+    with wellness_redact.reading_as(wellness_redact.background_reader(operator)):
+        recent_snapshots = get_recent_fossils_for_operator("", operator, count=CHECKPOINT_TURNS_TO_COMPRESS, cap_chars_each=10000)
 
     if len(recent_snapshots) < CHECKPOINT_MIN_SNAPSHOTS:
         print(f"[CHECKPOINT] Not enough snapshots for {operator} to create checkpoint ({len(recent_snapshots)}/{CHECKPOINT_TURNS_TO_COMPRESS})")
@@ -386,6 +395,13 @@ def should_create_checkpoint(operator: str) -> bool:
 # -----------------------------------------------------------------------------
 # Mint
 # -----------------------------------------------------------------------------
+def _with_wellness(gauges: Dict[str, Any], wellness_gauge: str) -> Dict[str, Any]:
+    """The mint's gauges, plus the WELLNESS tag when its turns carry one."""
+    if wellness_gauge:
+        gauges["wellness"] = wellness_gauge
+    return gauges
+
+
 # The ledger append is the commit point. Under mint_lock a mint only reads the
 # tail, renders, appends, advances the operator's mint cursor, writes the
 # index entry and records the ledger's prefix hash; the embed (bounded by the
@@ -426,6 +442,13 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         # locationless turn is byte-identical to before.
         loc_field = f"location={location_gauge} " if location_gauge else ""
 
+        # M7 ledger rule: the turns since the last mint include one a wellness
+        # result reached (its text was masked when it was recorded); the
+        # snapshot carries the WELLNESS tag every ledger reader redacts by.
+        # "" for every other snapshot: no gauge key, byte-identical.
+        from Orchestrator.wellness.mask import gauge_text
+        wellness_gauge = gauge_text(s.last_context_meta.get("wellness"))
+
         def _render_log_line(it: dict) -> str:
             if it.get("role") == "user":
                 t = it.get("text", "")
@@ -453,8 +476,8 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
 
         body = render_snapshot_body_v71(
             info1, snap_id, utc, reason, log_lines,
-            gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator,
-                    "location": location_gauge},
+            gauges=_with_wellness({"drift": drift, "p": p, "c": c, "t": t, "model": model_name,
+                                   "operator": operator, "location": location_gauge}, wellness_gauge),
             provenance={"gm": gm_flag, "recent": recent_ids, "relevant": relevant_ids},
         )
 
@@ -464,8 +487,8 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
             snap_id = next_snap_id_from_tail(info1["tail_id"])
             body = render_snapshot_body_v71(
                 info1, snap_id, utc, reason, log_lines,
-                gauges={"drift": drift, "p": p, "c": c, "t": t, "model": model_name, "operator": operator,
-                        "location": location_gauge},
+                gauges=_with_wellness({"drift": drift, "p": p, "c": c, "t": t, "model": model_name,
+                                       "operator": operator, "location": location_gauge}, wellness_gauge),
                 provenance={"gm": gm_flag, "recent": recent_ids, "relevant": relevant_ids},
             )
 
@@ -484,6 +507,8 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         # later mint on a route that never stamps one (cron /chat, CU, on-device)
         # can never inherit a stale fix.
         s.last_context_meta["location"] = ""
+        # The WELLNESS tag belonged to the turns just minted, the same way.
+        s.last_context_meta.pop("wellness", None)
         s.conv_turns_since  = 0
         s.conv_tokens_since = 0
         s.ctx_tokens_since  = 0

@@ -295,6 +295,11 @@ def render_snapshot_body_v71(info: dict, snap_id: str, utc: str, reason: str,
     # Absent/blank -> NO gauge line at all (a locationless turn's snapshot is
     # byte-identical to what it was before this field existed).
     location = str(gauges.get("location") or "").strip()
+    # M7 ledger rule: a turn a wellness result reached carries the WELLNESS
+    # tag ("sleep,heart · night of ... · ref w-... · values not recorded",
+    # wellness/redact.format_gauge); its numbers were masked before the mint.
+    # Absent -> no line, byte-identical to before.
+    wellness = " ".join(str(gauges.get("wellness") or "").split())
 
     gm = "yes" if provenance.get("gm", True) else "no"
     recent = provenance.get("recent", [])
@@ -310,7 +315,8 @@ def render_snapshot_body_v71(info: dict, snap_id: str, utc: str, reason: str,
     if show_tokens: gauges_lines.append(f"TOKENS (since last mint): prompt={p}, completion={c}, total={t}")
     if inc_model and model: gauges_lines.append(f"MODEL: {model}")
     if location: gauges_lines.append(f"LOCATION: {location}")
-    gauges_lines += [f"OPERATOR: {op_line}", "MODE: Normal"]
+    if wellness: gauges_lines.append(f"WELLNESS: {wellness}")
+    gauges_lines +=[f"OPERATOR: {op_line}", "MODE: Normal"]
 
     prov_lines = []
     if show_prov:

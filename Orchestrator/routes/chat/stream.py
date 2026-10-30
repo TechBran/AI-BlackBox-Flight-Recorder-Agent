@@ -22,6 +22,7 @@ from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.onboarding import custom_servers
 from Orchestrator import config as _config
 from Orchestrator.wellness import access as wellness_access, turn as wellness_turn
+from Orchestrator.wellness import mask as wellness_mask
 
 from Orchestrator.routes.chat.context import (
     _checked_operator,
@@ -253,6 +254,30 @@ def _resolve_stream_request(body: dict, signed=None):
                          location=turn_location)
 
 
+def _wellness_prepare(req: StreamRequest, context_messages: list):
+    """(messages for the provider, the turn key for stream_start), the M7
+    ledger rule's two stream-side steps, in one worker-thread hop (both read
+    the operator's health store).
+
+    The history scrub (A3b): the history and the provider are the client's,
+    so earlier health bubbles never reach a provider the operator did not
+    allow (a mid-chat model switch); the same list when nothing changes. The
+    durable carry: for an operator with a health store, stream_start names the
+    turn key (`wellness_turn`) the client echoes to /chat/save, so the save
+    masks exactly this turn's health results, even after a restart."""
+    messages = wellness_mask.scrub_history(context_messages, req.operator, req.provider, req.model)
+    return messages, wellness_mask.stream_turn_key(req.operator)
+
+
+def _stream_start_payload(req: StreamRequest, provenance, wellness_key=None) -> dict:
+    """The stream_start event (`wellness_turn` only for a stamped turn of an
+    operator with a health store: byte-identical for everyone else)."""
+    payload = {'provider': req.provider, 'model': req.model, 'provenance': provenance}
+    if wellness_key:
+        payload["wellness_turn"] = wellness_key
+    return payload
+
+
 def _open_provider_stream(req: StreamRequest, context_messages: list):
     """The provider event stream for one /chat/stream turn (dispatched_provider's rule)."""
     provider, model, operator = dispatched_provider(req.provider), req.model, req.operator
@@ -331,7 +356,12 @@ async def chat_stream_post(request: Request):
             # byte-identical; only what the model reads changes.
             context_messages = user_location.apply_location_to_messages(context_messages, req.location)
 
-            yield f"event: stream_start\ndata: {json.dumps({'provider': req.provider, 'model': req.model, 'provenance': provenance})}\n\n"
+            # M7 ledger rule: the history scrub and the durable-carry key
+            # (see _wellness_prepare), off the loop.
+            context_messages, wellness_key = await asyncio.to_thread(
+                _wellness_prepare, req, context_messages)
+
+            yield f"event: stream_start\ndata: {json.dumps(_stream_start_payload(req, provenance, wellness_key))}\n\n"
 
             # The Signal (Task 1.3): burst the honest retrieval telemetry as
             # UI-only `system_activity` SSE frames, immediately after stream_start

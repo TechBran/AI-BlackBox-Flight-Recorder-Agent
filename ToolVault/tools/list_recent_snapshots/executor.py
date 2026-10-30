@@ -8,10 +8,14 @@ def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     try:
         from Orchestrator.fossils import get_recent_fossils_for_operator
+        from Orchestrator.wellness import redact as wellness_redact
 
         # Get recent snapshots (cap each at 10000 chars for readability). Only
-        # their byte ranges are read; no whole-volume text is needed.
-        snapshots = get_recent_fossils_for_operator("", ctx.operator, count, cap_chars_each=10000)
+        # their byte ranges are read; no whole-volume text is needed. M7: a
+        # WELLNESS-tagged turn is the placeholder unless this call's turn may
+        # see it (never via the MCP gateway).
+        with wellness_redact.reading_for_tool(ctx):
+            snapshots = get_recent_fossils_for_operator("", ctx.operator, count, cap_chars_each=10000)
 
         if not snapshots:
             return ToolResult(

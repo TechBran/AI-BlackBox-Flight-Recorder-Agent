@@ -2439,6 +2439,13 @@ def process_chat_task(task: Task):
         if _wt is not None:
             wellness_turn.stamp(_wt.with_route(provider, selected_model))
 
+        # M7 history scrub (A3b), as on /chat/stream: the client's earlier
+        # health bubbles never reach a provider the operator did not allow.
+        from Orchestrator.wellness import mask as wellness_mask  # lazy: worker path
+        _history = wellness_mask.scrub_history(inp.messages, active_operator, provider, selected_model)
+        if _history is not inp.messages:
+            msg_list = msg_list[:len(msg_list) - len(inp.messages)] + _history
+
         with state_lock:
             # The turn's provenance and usage are recorded with the turn
             # (persist_turn_and_maybe_mint below).
@@ -2646,6 +2653,22 @@ def process_chat_task(task: Task):
         user_message_content = next((m.get("content") for m in inp.messages if m.get("role") == "user"), None)
         log_text = (user_text if user_text else "[media content]") if user_message_content else ""
 
+        # M7 ledger rule: a turn a wellness result reached (a delivered row
+        # for the turn key stamped for this task) is recorded masked: the reply
+        # in result_data (tasks.db, and the cron rows that copy it) and in the
+        # snapshot body, the keyword digest built from the masked text, the
+        # reasoning omitted, the WELLNESS tag on the mint. The user's own words
+        # (log_text) stay verbatim.
+        from Orchestrator.wellness import turn as wellness_turn  # lazy: worker path
+        _stamped = wellness_turn.current()
+        wellness_carry = wellness_mask.carry_for(
+            active_operator,
+            turn_key=_stamped.turn_key if _stamped and _stamped.operator == active_operator else None,
+            recall_text=reply_alias)
+        if wellness_carry is not None:
+            ui_reply = wellness_carry.mask(ui_reply)
+            reply_alias = wellness_carry.mask(reply_alias)
+
         # snap_text is the searchable snapshot body for this assistant turn.
         # Post-cutover the snapshot IS the actual response (no perspective-only
         # body, no sentinel). We append a deterministic server-side Keywords digest
@@ -2668,7 +2691,8 @@ def process_chat_task(task: Task):
         else:
             snap_text = clean
         if reasoning and reasoning.strip():
-            snap_text = snap_text + "\n\n[REASONING]\n" + reasoning.strip()
+            snap_text = snap_text + ("\n\n" + wellness_mask.REASONING_OMITTED if wellness_carry is not None
+                                     else "\n\n[REASONING]\n" + reasoning.strip())
 
         update_task(task.task_id, progress=90)
 
@@ -2682,7 +2706,11 @@ def process_chat_task(task: Task):
             snap_text=snap_text, prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0), total_tokens=total_tok,
             provenance=provenance, count_context=True, tag="[CHECKPOINT]",
+            wellness=wellness_carry.gauge() if wellness_carry is not None else None,
         ).checkpoint_triggered
+        if wellness_carry is not None:
+            wellness_carry.mark()
+            wellness_carry.note_task(task.task_id)   # Stop & erase scrubs this row
 
         result_data = {
             "ui_reply": ui_reply, "reply": reply_alias, "text": reply_alias,

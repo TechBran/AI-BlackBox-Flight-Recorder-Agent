@@ -1059,13 +1059,19 @@ def recall():
     starts_before = list(START_RX.finditer(vol, 0, end_m.start()))
     start_m = next((m for m in reversed(starts_before) if m.group("snap") == snap_id), None)
     if not start_m: raise HTTPException(500, "PARTIAL-SNAPSHOT")
-    return {"prior": vol[start_m.start(): end_m.end()]}
+    # M7 ledger rule: an HTTP caller is no proven reader; a WELLNESS-tagged
+    # turn comes back as the placeholder.
+    from Orchestrator.wellness import redact as wellness_redact
+    return {"prior": wellness_redact.for_reader(vol[start_m.start(): end_m.end()])}
 
 @app.get("/assert")
 def assert_volume():
     if not VOL_PATH.exists(): return {"bytes": 0, "sha256": "", "volume": ""}
     b = VOL_PATH.read_bytes()
-    vol_text = b.decode('utf-8', errors='replace')
+    # The digest is of the bytes as stored; the text shows every WELLNESS-
+    # tagged turn as the placeholder (M7 ledger rule).
+    from Orchestrator.wellness import redact as wellness_redact
+    vol_text = wellness_redact.redact_volume(b.decode('utf-8', errors='replace'))
     return {"bytes": len(b), "sha256": sha256_bytes(b), "volume": vol_text}
 
 @app.get("/debug/context")

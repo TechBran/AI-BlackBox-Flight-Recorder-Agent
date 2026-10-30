@@ -1689,7 +1689,11 @@ def _last_response_for(operator: str):
         # read of byte_end - byte_start CHARACTERS ran past the snapshot on
         # any multi-byte text (audit rank 77).
         from Orchestrator import ledger
+        from Orchestrator.wellness import redact as wellness_redact
         snapshot_text = ledger.view(VOL_PATH).text(byte_start, byte_end)
+        # M7 ledger rule: the text goes to a TTS provider, never an allowed
+        # destination, so a WELLNESS-tagged turn is spoken as the placeholder.
+        snapshot_text = wellness_redact.redact(snapshot_text, operator, operator, None)
 
         # Parse the Raw Session Log section to extract conversation turns
         # Format: - [N] YYYY-MM-DDTHH:MM:SS.sssZ operator=Name role: message

@@ -11,8 +11,12 @@ def execute(params: dict, ctx: ToolContext) -> ToolResult:
 
     try:
         from Orchestrator.fossils import get_snapshot_by_id
+        from Orchestrator.wellness import redact as wellness_redact
 
-        result = get_snapshot_by_id(snap_id)
+        # M7 ledger rule: a WELLNESS-tagged turn comes back as the placeholder
+        # unless this tool call's turn may see it (never via the MCP gateway).
+        with wellness_redact.reading_for_tool(ctx):
+            result = get_snapshot_by_id(snap_id)
 
         if not result:
             return ToolResult(False, f"Snapshot not found: {snap_id}")

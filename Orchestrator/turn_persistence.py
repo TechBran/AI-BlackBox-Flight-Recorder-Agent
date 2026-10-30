@@ -20,7 +20,8 @@ previous turn's).
 
 What stays with each caller: the turn's text and snapshot body (the worker's
 keyword digest, /chat/save's [REASONING] block, the on-device [TOOLS USED]
-block), and the knobs it is configured with. Those arrive as a MintGate built
+block, each masked first on a wellness turn: wellness/mask.py), and the knobs
+it is configured with. Those arrive as a MintGate built
 from the CALLER's module namespace on every call, so a stub on
 chat_routes.perform_mint or tasks.AUTO_ENABLE reaches the gate as it reached
 the inline copies.
@@ -106,7 +107,7 @@ def _record_turn(state, operator: str, user_text: str, assistant_text: str, *,
                  gate: MintGate, snap_text: Optional[str], prompt_tokens: int,
                  completion_tokens: int, total_tokens: Optional[int], model: Optional[str],
                  location_gauge: str, provenance: Optional[dict], count_context: bool,
-                 tag: str) -> Optional[str]:
+                 tag: str, wellness: Optional[dict] = None) -> Optional[str]:
     """Everything before the mint; returns the mint reason (None: no mint now)."""
     utc_now = now_utc_iso()
     if user_text:
@@ -130,6 +131,12 @@ def _record_turn(state, operator: str, user_text: str, assistant_text: str, *,
         meta["model"] = model
     # The snapshot's LOCATION gauge (perform_mint reads it into `gauges`).
     meta["location"] = location_gauge
+    # The WELLNESS tag of a turn a wellness result reached (its text arrives
+    # masked). Merged, not replaced: the next mint covers every turn since the
+    # last one, and perform_mint consumes it. Absent for every other turn.
+    if wellness:
+        from Orchestrator.wellness.mask import merge_gauge
+        meta["wellness"] = merge_gauge(meta.get("wellness"), wellness)
     meta["usage_last"] = {"prompt_tokens": prompt_tokens,
                           "completion_tokens": completion_tokens,
                           "total_tokens": total_tokens}
@@ -186,6 +193,7 @@ async def persist_turn_and_maybe_mint(
     provenance: Optional[dict] = None,
     count_context: bool = False,
     tag: str = "[TURN]",
+    wellness: Optional[dict] = None,
 ) -> TurnResult:
     """Record one finished turn in ``state`` and mint / checkpoint as configured.
 
@@ -194,13 +202,15 @@ async def persist_turn_and_maybe_mint(
     passed as is). ``model`` None leaves the recorded model as it is (the worker
     sets it before the provider call); ``location_gauge`` "" is a turn without
     a location; no ``provenance`` records none. ``count_context`` also adds the
-    tokens to context_used (the worker's gauge).
+    tokens to context_used (the worker's gauge). ``wellness`` is the WELLNESS
+    tag of a turn whose text the caller masked (mask.Carry.gauge()); None for
+    every other turn.
     """
     reason = _record_turn(state, operator, user_text, assistant_text, gate=gate,
                           snap_text=snap_text, prompt_tokens=prompt_tokens,
                           completion_tokens=completion_tokens, total_tokens=total_tokens,
                           model=model, location_gauge=location_gauge, provenance=provenance,
-                          count_context=count_context, tag=tag)
+                          count_context=count_context, tag=tag, wellness=wellness)
     # On the event loop: the mint (ledger append + embedding) runs in a thread.
     minted = await run_blocking(gate.perform_mint, operator, reason) if reason else None
     return _finish_turn(state, operator, reason, minted, gate=gate, tag=tag)
@@ -218,6 +228,7 @@ def persist_turn_and_maybe_mint_blocking(
     provenance: Optional[dict] = None,
     count_context: bool = False,
     tag: str = "[TURN]",
+    wellness: Optional[dict] = None,
 ) -> TurnResult:
     """persist_turn_and_maybe_mint for a caller on a worker thread (the /chat
     worker): the same arguments, and the mint runs inline."""
@@ -225,7 +236,7 @@ def persist_turn_and_maybe_mint_blocking(
                           snap_text=snap_text, prompt_tokens=prompt_tokens,
                           completion_tokens=completion_tokens, total_tokens=total_tokens,
                           model=model, location_gauge=location_gauge, provenance=provenance,
-                          count_context=count_context, tag=tag)
+                          count_context=count_context, tag=tag, wellness=wellness)
     # On a worker thread (the /chat worker): the mint runs inline.
     minted = gate.perform_mint(operator, reason) if reason else None
     return _finish_turn(state, operator, reason, minted, gate=gate, tag=tag)

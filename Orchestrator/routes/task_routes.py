@@ -28,6 +28,7 @@ from Orchestrator.models import TaskType, TaskStatus
 from Orchestrator.retrieval import retrieve
 from Orchestrator.tasks import create_task, update_task
 from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
+from Orchestrator.wellness import redact as wellness_redact
 
 # The most rows one /tasks/list call returns when the caller sets ?limit=.
 TASKS_LIST_MAX_LIMIT = 1000
@@ -269,6 +270,9 @@ def api_snapshots_recent(limit: int = 30, operator: str = "", before: str = ""):
                         end = meta.get("byte_end", start + 4000)
                         # Read up to 4KB to reach past headers into Raw Session Log
                         chunk = vol.read(start, min(end, start + 4000)).decode('utf-8', errors='replace')
+                        # M7: a WELLNESS-tagged turn previews as the
+                        # placeholder unless this reader may see it.
+                        chunk = wellness_redact.for_reader(chunk, snapshot_operator=meta.get("operator"))
                         snippet = _snapshot_snippet(chunk)
                     except Exception:
                         pass
@@ -346,7 +350,9 @@ def fossil_hybrid_search(q: str, operator: str = "", limit: int = 10):
                 snippet = ""
                 if start < vol.size and end <= vol.size:
                     snap_bytes = vol.read(start, end)
-                    snap_text = snap_bytes.decode('utf-8', errors='replace')
+                    snap_text = wellness_redact.for_reader(
+                        snap_bytes.decode('utf-8', errors='replace'),
+                        snapshot_operator=meta.get("operator"))
                     # M15.3: the 500-char preview is the BODY head (Raw Session Log
                     # onward), not the START/BEACON envelope head. The MCP
                     # search_snapshots / get_context client (and Portal lists) then

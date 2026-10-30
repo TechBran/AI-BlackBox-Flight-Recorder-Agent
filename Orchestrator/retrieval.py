@@ -35,6 +35,7 @@ from Orchestrator.fossils import (
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
 )
+from Orchestrator.wellness import redact as wellness_redact
 
 
 # ── pure ranking primitives ───────────────────────────────────────────────────
@@ -216,7 +217,12 @@ def _decode_snapshot_text(meta) -> "str | None":
     (Orchestrator/ledger.py), NOT the ~35MB whole-volume read the no-index
     keyword fallback pays, and no open per passage (a reranked search used to
     open the file 40 times). None on any failure (missing offsets, short
-    file, IO error) — never raises."""
+    file, IO error) — never raises.
+
+    M7 ledger rule: the passage goes to the RERANKER, so a WELLNESS-tagged
+    turn is scored on its text only when the reader may see it and the
+    reranker is a destination its owner allowed; a cloud reranker the owner
+    did not tick scores "[wellness conversation · not shared]"."""
     try:
         start, end = int(meta["byte_start"]), int(meta["byte_end"])
         if end <= start:
@@ -224,7 +230,12 @@ def _decode_snapshot_text(meta) -> "str | None":
         view = ledger.view(VOL_PATH)
         if end > view.size:
             return None  # offsets beyond EOF (index/volume drift)
-        return view.text(start, end)
+        text = view.text(start, end)
+        if wellness_redact.is_tagged(text):
+            provider, model = wellness_redact.rerank_destination()
+            text = wellness_redact.for_reader(text, snapshot_operator=meta.get("operator"),
+                                              provider=provider, model=model)
+        return text
     except Exception:  # noqa: BLE001 - rerank is best-effort, never raises
         return None
 

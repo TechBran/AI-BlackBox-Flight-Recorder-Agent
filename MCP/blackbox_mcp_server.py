@@ -650,7 +650,12 @@ def seek_snapshot_by_offset(snap_id: str) -> Optional[str]:
         f.seek(byte_start)
         raw_bytes = f.read(byte_end - byte_start)
 
-    return raw_bytes.decode('utf-8', errors='replace')
+    # M7 ledger rule: an MCP client's model is unknown, so it is never an
+    # allowed destination; a WELLNESS-tagged turn reads as the placeholder
+    # (stdlib-only module, safe in this venv).
+    from Orchestrator.wellness import redact as wellness_redact
+    return wellness_redact.redact(raw_bytes.decode('utf-8', errors='replace'),
+                                  entry.get("operator"), None, None)
 
 
 def get_snapshot_metadata(snap_id: str) -> Optional[Dict]:

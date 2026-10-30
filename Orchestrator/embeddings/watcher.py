@@ -400,7 +400,7 @@ async def _gap_heal(active: str) -> int:
         vol_bytes = await asyncio.to_thread(ledger.view, Path(config.VOL_PATH))
         good_ids, texts = [], []
         for sid in missing:
-            text = slice_snapshot_text(sid, index, vol_bytes)
+            text = slice_snapshot_text(sid, index, vol_bytes, active)
             if text is None:
                 print(f"[WATCHER] gap-heal: {sid} has an invalid byte range - skipping")
                 continue
