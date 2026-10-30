@@ -68,6 +68,11 @@ HC_MERGED = "hc_merged"
 # reads 01:xx both times); a zone that changes at another hour reads up to an
 # hour off between that hour and 02:00, and travel is approximate the same way.
 ZONE_SWITCH_MIN = 120
+# A day can run this many hours past its 24th (a fall-back day is 25; flying
+# west across zones a little more). A replace never reaches further than
+# that past the day's end, and ingest drops a group's rows beyond it.
+MAX_DAY_STRETCH_H = 3
+MAX_DAY_STRETCH_MS = MAX_DAY_STRETCH_H * 3_600_000
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT) STRICT;
@@ -518,10 +523,13 @@ class Store:
         [t, sum] for activity, [t, avg, min, max, n] for heart rate. The day
         runs from its midnight at `offset_s` to the next one at
         `next_offset_s` (23 or 25 hours across a DST change), and at least to
-        the last row the phone put in it."""
+        the last row the phone put in it, but never more than
+        MAX_DAY_STRETCH_H past its end: a stray row must not widen the delete
+        into the days after it (ingest drops such rows before they get here)."""
         start, end = day_bounds(day, offset_s, next_offset_s)
         if rows:
-            end = max(end, max(int(r[0]) for r in rows) + 1)
+            last = max(int(r[0]) for r in rows) + 1
+            end = max(end, min(last, end + MAX_DAY_STRETCH_MS))
         conn.execute("DELETE FROM bucket WHERE metric=? AND grain=? AND origin_id=? AND epoch=? "
                      "AND ts>=? AND ts<?", (metric, grain, origin_id, epoch, start, end))
         return self.upsert_buckets(conn, metric, grain, origin_id, epoch, rows, flags)

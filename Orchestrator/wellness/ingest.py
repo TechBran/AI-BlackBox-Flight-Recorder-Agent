@@ -10,7 +10,8 @@ before any decompression.
 Values: a structurally valid batch is never refused for one implausible value.
 Such a row is stored FLAGGED (excluded from every rollup) and counted; a row
 this build cannot use (an unknown metric, a grain that does not fit, a time in
-the future) is dropped and counted. Both counts go to the ingest log, never
+the future, a row outside the day its replace_day group names) is dropped and
+counted. Both counts go to the ingest log, never
 the values.
 
 Consent, in depth: the phone should not read a category that is off, and a
@@ -47,7 +48,8 @@ from pydantic import ValidationError
 
 from Orchestrator.wellness import catalog, rollups, schema
 from Orchestrator.wellness import store as store_mod
-from Orchestrator.wellness.store import HC_MERGED, Store, add_days, day_range, local_day
+from Orchestrator.wellness.store import (HC_MERGED, MAX_DAY_STRETCH_H, MAX_DAY_STRETCH_MS,
+                                         Store, add_days, day_range, local_day)
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +81,6 @@ READING_CATEGORY = {"resting_hr": "heart", "hrv": "heart", "spo2": "heart",
 SESSION_CATEGORY = {"sleep": "sleep", "exercise": "activity"}
 # Heart rate a workout carries in its attrs (heart, not activity).
 SESSION_HEART_ATTRS = ("avg_hr", "max_hr")
-# A day can run this many hours past 24 (a fall-back day is 25; flying west
-# across zones a little more); rows further out than that infer nothing.
-MAX_DAY_STRETCH_H = 3
 
 
 class IngestError(Exception):
@@ -346,6 +345,17 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             flags.append(_bucket_flag(g.metric, g.grain, row))
                         if g.replace_day:
                             note_day(g.replace_day, g.offset_s)
+                            # A replace_day group holds that day's rows. One before
+                            # the day's start, or further past its end than a day
+                            # can stretch, is a client bug: dropped and counted, so
+                            # it can neither widen the replace nor infer a zone.
+                            start, end = offsets.bounds(g.replace_day)
+                            inside = [i for i, r in enumerate(rows)
+                                      if start <= r[0] < end + MAX_DAY_STRETCH_MS]
+                            if len(inside) < len(rows):
+                                drop("outside_day", len(rows) - len(inside))
+                                rows = [rows[i] for i in inside]
+                                flags = [flags[i] for i in inside]
                             note_long_day(g.replace_day, g.grain, rows)
                             st.replace_bucket_day(
                                 conn, g.metric, g.grain, oid, epoch, g.replace_day,

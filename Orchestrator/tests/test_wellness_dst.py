@@ -159,6 +159,122 @@ def test_resending_a_25_hour_day_replaces_its_last_hour(tmp_path, monkeypatch):
     assert left == 0
 
 
+# ------------------------------------------------------------------ a replace stays in its day
+
+ROW_OFF = -4 * 3600
+ROW_DAYS = ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"]
+ROW_NOW = store_mod.day_bounds("2026-10-20", ROW_OFF)[0]
+
+
+def _hr_group(day, rows):
+    return {"metric": "heart_rate", "grain": "5min", "origin": "o1", "replace_day": day,
+            "offset_s": ROW_OFF, "rows": rows}
+
+
+def _hr_rows(day):
+    s, _ = store_mod.day_bounds(day, ROW_OFF)
+    return [[s + k * 3_600_000, 70.0, 65.0, 75.0, 5] for k in range(24)]
+
+
+def _hr_batch(bid, groups):
+    return {"schema": "bbx.wellness.ingest/1", "batch_id": bid, "origins": [FX.WATCH],
+            "buckets": groups}
+
+
+def _per_day(st):
+    offs = st.offsets()
+    out = {}
+    with st.read() as conn:
+        for (ts,) in conn.execute("SELECT ts FROM bucket"):
+            out[offs.day_of(ts)] = out.get(offs.day_of(ts), 0) + 1
+    return out
+
+
+def _dropped(st, batch_id):
+    import json
+    with st.read() as conn:
+        row = conn.execute("SELECT dropped FROM ingest_log WHERE batch_id=?",
+                           (batch_id,)).fetchone()
+    return json.loads(row[0]) if row and row[0] else {}
+
+
+def test_a_stray_row_cannot_delete_the_days_after_its_own(tmp_path, monkeypatch):
+    """A re-sent day with one row stamped days later (a client bug) replaces
+    that day only; the stray row is dropped and counted."""
+    st = fresh_store(tmp_path, monkeypatch)
+    ingest_batches(st, [_hr_batch("b1", [_hr_group(d, _hr_rows(d)) for d in ROW_DAYS])],
+                   now_ms=ROW_NOW)
+    before = _per_day(st)
+    assert all(before[d] == 24 for d in ROW_DAYS), before
+    stray = store_mod.day_bounds(ROW_DAYS[3], ROW_OFF)[0] + 12 * H
+    res = ingest_batches(st, [_hr_batch("b2", [_hr_group(
+        ROW_DAYS[0], _hr_rows(ROW_DAYS[0]) + [[stray, 71.0, 66.0, 76.0, 5]])])],
+        now_ms=ROW_NOW)[0]
+    assert _per_day(st) == before
+    assert res.dropped == 1 and _dropped(st, "b2") == {"outside_day": 1}
+    assert ROW_DAYS[3] not in res.dirty_days
+
+
+def test_a_backfilled_day_with_a_recent_row_leaves_the_history_alone(tmp_path, monkeypatch):
+    st = fresh_store(tmp_path, monkeypatch)
+    days = store_mod.day_range("2026-08-20", "2026-10-18")
+    ingest_batches(st, [_hr_batch("h1", [_hr_group(d, _hr_rows(d)) for d in days])],
+                   now_ms=ROW_NOW)
+    before = _per_day(st)
+    rolled = st.rollups("day", days[0], days[-1])
+    res = ingest_batches(st, [_hr_batch("h2", [_hr_group(
+        days[0], _hr_rows(days[0]) + [[ROW_NOW - H, 70.0, 65.0, 75.0, 5]])])],
+        now_ms=ROW_NOW)[0]
+    assert _per_day(st) == before
+    assert res.dropped == 1 and set(res.dirty_days) <= {days[0], days[1]}
+    assert [{k: v for k, v in r.items() if k != "computed_at"} for r in
+            st.rollups("day", days[0], days[-1])] == \
+        [{k: v for k, v in r.items() if k != "computed_at"} for r in rolled]
+
+
+def test_a_row_before_the_days_start_is_dropped(tmp_path, monkeypatch):
+    st = fresh_store(tmp_path, monkeypatch)
+    ingest_batches(st, [_hr_batch("b1", [_hr_group(d, _hr_rows(d)) for d in ROW_DAYS])],
+                   now_ms=ROW_NOW)
+    before = _per_day(st)
+    early = store_mod.day_bounds(ROW_DAYS[2], ROW_OFF)[0] - 30 * 60_000
+    res = ingest_batches(st, [_hr_batch("b2", [_hr_group(
+        ROW_DAYS[2], _hr_rows(ROW_DAYS[2]) + [[early, 99.0, 98.0, 99.0, 5]])])],
+        now_ms=ROW_NOW)[0]
+    assert res.dropped == 1 and _dropped(st, "b2") == {"outside_day": 1}
+    assert _per_day(st) == before
+    with st.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM bucket WHERE ts=?", (early,)).fetchone()[0] == 0
+
+
+def test_rows_a_few_hours_past_the_day_are_kept_and_no_further(tmp_path, monkeypatch):
+    """The next day's offset says 24 hours, but the phone's day ran longer (a
+    zone change the box has not heard of): rows up to the longest stretch a
+    day can have are kept and replace that stretch, and one further out is
+    dropped. The next day's rows past the stretch are never touched."""
+    st = fresh_store(tmp_path, monkeypatch)
+    ingest_batches(st, [_hr_batch("b1", [_hr_group(d, _hr_rows(d)) for d in ROW_DAYS])],
+                   now_ms=ROW_NOW)
+    end = st.offsets().bounds(ROW_DAYS[1])[1]
+    limit = end + store_mod.MAX_DAY_STRETCH_H * H
+    near, far = end + 2 * H + 5 * 60_000, limit + 5 * 60_000
+
+    def next_day():
+        with st.read() as conn:
+            return sorted(ts for (ts,) in conn.execute(
+                "SELECT ts FROM bucket WHERE ts>=? AND ts<?",
+                st.offsets().bounds(ROW_DAYS[2])))
+    later = [t for t in next_day() if t >= near + 1]
+    for bid in ("b2", "b2-again"):
+        res = ingest_batches(st, [_hr_batch(bid, [_hr_group(
+            ROW_DAYS[1], _hr_rows(ROW_DAYS[1]) + [[near, 80.0, 79.0, 81.0, 5],
+                                                  [far, 80.0, 79.0, 81.0, 5]])])],
+            now_ms=ROW_NOW)[0]
+        assert res.dropped == 1 and _dropped(st, bid) == {"outside_day": 1}
+        assert next_day() == [near] + later
+    assert len(later) == 21
+
+
 def _one_day(variant, day, now_ms):
     """Every bucket group, session and reading of one local day (the hourly
     worker's push), as a batch."""
