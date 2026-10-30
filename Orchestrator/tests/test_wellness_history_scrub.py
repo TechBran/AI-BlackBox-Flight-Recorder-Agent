@@ -216,7 +216,7 @@ def test_a_provider_string_the_dispatcher_sends_to_gemini_is_judged_as_gemini(
     from Orchestrator.routes.chat import stream as stream_mod
     from Orchestrator.tests.wellness_support import write_record
     write_record(providers_allowed=ticked, last_push_at=op["rec"]["last_push_at"])
-    assert stream_mod._dispatch_provider(alias) == "google"
+    assert stream_mod.dispatched_provider(alias) == "google"
     upstream = _stream(_spec("google"), monkeypatch, tmp_path, _history(), provider=alias)
     assert upstream and all("gemini" in (u.get("url") or "") for u in upstream)
     blob = json.dumps([u["json"] for u in upstream], ensure_ascii=False)
@@ -224,8 +224,8 @@ def test_a_provider_string_the_dispatcher_sends_to_gemini_is_judged_as_gemini(
         assert s not in blob, (alias, s)
 
 
-def test_dispatch_provider_names_what_open_provider_stream_calls(monkeypatch):
-    """_dispatch_provider and _open_provider_stream agree on every name."""
+def test_dispatched_provider_names_what_open_provider_stream_calls(monkeypatch):
+    """dispatched_provider and _open_provider_stream agree on every name."""
     from types import SimpleNamespace
 
     from Orchestrator.routes.chat import stream as stream_mod
@@ -238,8 +238,8 @@ def test_dispatch_provider_names_what_open_provider_stream_calls(monkeypatch):
               "grok", "on_device", "", "OPENAI"):
         req = SimpleNamespace(provider=p, model="m", operator=OPERATOR, cu_session_id=None,
                               cu_device_id="blackbox")
-        assert stream_mod._open_provider_stream(req, []) == stream_mod._dispatch_provider(p), p
-    assert stream_mod._dispatch_provider("computer-use") == "computer-use"
+        assert stream_mod._open_provider_stream(req, []) == stream_mod.dispatched_provider(p), p
+    assert stream_mod.dispatched_provider("computer-use") == "computer-use"
 
 
 def test_a_computer_use_turn_gets_no_health_numbers(op):

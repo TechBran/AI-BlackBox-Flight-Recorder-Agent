@@ -2543,8 +2543,7 @@ def process_chat_task(task: Task):
         # (log_text) stay verbatim. A heuristic carry (a reply quoting an
         # earlier result) masks the ledger's copy only, below: the reply the
         # user gets is never changed on a guess.
-        from Orchestrator.wellness import turn as _wellness_turn  # lazy: worker path
-        _stamped = _wellness_turn.current()
+        _stamped = wellness_turn.current()
         wellness_carry = _wellness_mask.carry_for(
             active_operator,
             turn_key=_stamped.turn_key if _stamped and _stamped.operator == active_operator else None,

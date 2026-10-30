@@ -266,22 +266,12 @@ def _wellness_prepare(req: StreamRequest, context_messages: list):
     turn key (`wellness_turn`) the client echoes to /chat/save, so the save
     masks exactly this turn's health results, even after a restart.
 
-    The scrub judges the provider the turn is DISPATCHED to (_dispatch_provider):
+    The scrub judges the provider the turn is DISPATCHED to (dispatched_provider):
     the client's string can be an alias the allow-list knows ("claude",
     "local") that _open_provider_stream sends to Gemini."""
     messages = wellness_mask.scrub_history(context_messages, req.operator,
-                                           _dispatch_provider(req.provider), req.model)
+                                           dispatched_provider(req.provider), req.model)
     return messages, wellness_mask.stream_turn_key(req.operator)
-
-
-# The providers _open_provider_stream dispatches by name; every other string
-# falls through to Gemini there.
-_DISPATCHED = frozenset({"openai", "anthropic", "xai", "custom", "computer-use"})
-
-
-def _dispatch_provider(provider) -> str:
-    """The provider _open_provider_stream really calls for `provider`."""
-    return provider if provider in _DISPATCHED else "google"
 
 
 def _stream_start_payload(req: StreamRequest, provenance, wellness_key=None) -> dict:
