@@ -85,6 +85,16 @@ _PERIOD_COUNTS = re.compile(
     r"(?P<unit>days?|nights?|weeks?|months?|years?|occasions?|times|instances?|"
     r"d[ií]as?|noches?|semanas?|mes(?:es)?|años?|ocasiones|ocasión|ocasion|veces)\b",
     re.I)
+# A count of sessions is a tally too: "two 30-minute walks", "3 runs", "one
+# workout". The duration or distance that follows stays a candidate.
+_SESSION_COUNTS = re.compile(
+    rf"\b(?P<n>\d+|{_NUMBER_WORD_RX}(?:[- ]{_NUMBER_WORD_RX})*)\s+"
+    r"(?=(?:\d+(?:[.,]\d+)?[- ]?(?:min|mins|minute|minutes|h|hr|hrs|hour|hours|km|mi|"
+    r"mile|miles|k)\w*\s+)?(?:brisk\s+|short\s+|long\s+|easy\s+|hard\s+)?"
+    r"(?:walks?|runs?|jogs?|rides?|swims?|hikes?|workouts?|sessions?|naps?|exercises?|"
+    r"cycles?|classes|class|caminatas?|carreras?|paseos?|entrenamientos?|sesiones?|"
+    r"siestas?|nadadas?)\b)",
+    re.I)
 # The mask's wake words (a Spanish one is any form of despertar), so A1 and
 # the mask agree on what a count of awakenings is.
 _WAKE_RX = ("(?:" + "|".join(sorted(mask._WAKE_WORDS, key=len, reverse=True))
@@ -306,6 +316,7 @@ def _neutralize(reply: str) -> str:
     text = _MEDIA.sub(" AVERAGE ", text)
     text = _DATES.sub(" DATE ", text)
     text = _PERIOD_COUNTS.sub(_period, text)
+    text = _SESSION_COUNTS.sub(lambda m: "COUNT" + m.group(0)[m.end("n") - m.start():], text)
     text = _LIST_MARKER.sub(r"\1-", text)
     return _neutral_steps(text)
 
@@ -474,6 +485,29 @@ _ALARM = re.compile(
     r"\b(?:abnormal(?:ly)?|dangerous(?:ly)?|alarming(?:ly)?|critical(?:ly)?|warning|"
     r"high[- ]risk|anormal(?:es|mente)?|peligros[oa]s?|alarmantes?|cr[ií]tic[oa]s?|"
     r"advertencia|alto riesgo)\b", re.I)
+# An alarm word negated in its own clause ("no warning signs", "nothing
+# alarming", "not dangerous") is calm wording; one that names a notice the
+# system showed ('the app shows a "watch probably not worn" warning', "a sync
+# warning card") describes the software, not the person.
+_ALARM_NEGATED = re.compile(r"(?:\bno\b|\bnot\b|n't\b|\bwithout\b|\bnothing\b|\bnever\b|"
+                            r"\bnada\b|\bsin\b|\bningún\b|\bninguna\b)[^.!?\n;:,]{0,30}$", re.I)
+_NOTICE_BEFORE = re.compile(
+    r"(?:\b(?:shows?|showing|showed|displays?|displaying|displayed|flags?|flagging|flagged|"
+    r"raised?|raising|gives?|giving|gave)\s+(?:a|an|the|this|that|its|your)?\s*(?:\"[^\"\n]{0,80}\"\s*)?"
+    r"(?:sync\s+|system\s+|app\s+|watch\s+|phone\s+|box\s+|data\s+|coverage\s+)?"
+    r"|\b(?:system|app|box|watch|phone|dashboard|card|notice|banner|status)\s+(?:\w+\s+){0,2})$",
+    re.I)
+_NOTICE_AFTER = re.compile(r"\s+(?:card|notice|notices|banner|message|label|icon|badge|"
+                           r"chip|flag|status)\b", re.I)
+
+
+def _quoted(text: str, a: int, b: int) -> bool:
+    """Is text[a:b] inside a pair of double quotes within its sentence?"""
+    start = max(text.rfind(".", 0, a), text.rfind("\n", 0, a)) + 1
+    end = min(x for x in (text.find(".", b), text.find("\n", b), len(text)) if x >= 0)
+    return text.count('"', start, a) % 2 == 1 and '"' in text[b:end]
+
+
 _MEDS = (r"(?:medication|medications|medicine|medicines|meds|pill|pills|dose|dosage|"
          r"prescription|treatment|statin|statins|insulin|antidepressants?|beta[- ]blockers?|"
          r"inhaler|cpap)")
@@ -529,6 +563,15 @@ def diagnosis_lexicon(reply: str) -> List[str]:
                 continue
             hits.append("diagnosis:" + " ".join(m.group(0).lower().split()))
     for m in _ALARM.finditer(text):
+        raw = text[max(0, m.start() - 80):m.start()]
+        before = _CLAUSE_BREAK.split(raw)[-1]
+        after = text[m.end():m.end() + 24]
+        # A quoted phrase right before the word is the notice it labels
+        # ('shows a "watch probably not worn, wear it to bed" warning').
+        if _ALARM_NEGATED.search(before + " ") or _NOTICE_BEFORE.search(before + " ") \
+                or _NOTICE_BEFORE.search(raw + " ") or raw.rstrip().endswith('"') \
+                or _NOTICE_AFTER.match(after) or _quoted(text, m.start(), m.end()):
+            continue
         hits.append("alarm:" + m.group(0).lower())
     for rx in _MEDICATION:
         for m in rx.finditer(text):
@@ -1305,10 +1348,14 @@ _INDEX_BEFORE = re.compile(r"(?i:(?:\b(?:turns?|attempts?|tries|try|rounds?|line
                            r"steps?|chunks?|batch(?:es)?|tasks?|jobs?|versions?|v|top|first|"
                            r"last|next|port|pid|row|rows|item|items|index|idx|no|number)\s*"
                            r"[:=#]?|#)\s*$)")
+# What a number measures when it is a size, a timing or a tally, never a
+# reading: "2,362 chars", "1,181 floor-tokens", "52 ms", "3 result(s)".
+_SIZE_WORDS = (r"(?:ms|s|sec|secs|seconds?|chars?|characters|bytes?|kb|mb|gb|(?:floor-)?tokens?|"
+               r"results?|result\(s\)|items?|rows?|snapshots?|deliveries|refs?|calls?|turns?|"
+               r"tools?|lines?|%)")
+_SIZE_AFTER = re.compile(rf"\s*{_SIZE_WORDS}\b")
 _LINE_NUMBER = re.compile(r"(?<![\w.,:/=-])(?P<n>\d{2,}(?:[.,]\d+)?)(?![\w]|[.,:/-]\d)"
-                          r"(?!\s*(?:ms|s|sec|secs|seconds?|chars?|characters|bytes?|kb|mb|"
-                          r"gb|tokens?|results?|result\(s\)|items?|rows?|snapshots?|"
-                          r"deliveries|refs?|calls?|turns?|tools?|lines?|%)\b)")
+                          rf"(?!\s*{_SIZE_WORDS}\b)")
 _NOT_READING_KEYS = frozenset({"score", "limit", "top", "top_k", "k", "n", "id", "port", "pid",
                                "status", "code", "attempt", "try", "version", "v", "len",
                                "length", "size", "count", "offset", "page", "max_tokens"})
@@ -1419,7 +1466,11 @@ def leak_counts(text: str, values: frozenset, sentinels: Sequence[str] = ()) -> 
         for line in text.splitlines():
             if not prefilter.search(line):
                 continue
-            found = [m.group(0) for m in exact_rx.finditer(line)] if exact_rx else []
+            # An exact reading's digits followed by a size word measure the
+            # line, not the person ("2,362 chars", "78,643 tokens": the
+            # stream's context-delivery log, 112 hits of the first clean run).
+            found = [m.group(0) for m in exact_rx.finditer(line)
+                     if not _SIZE_AFTER.match(line, m.end())] if exact_rx else []
             found += _unit_adjacent(line, values)
             found += _context_hits(line, values)
             for tok in dict.fromkeys(found):
