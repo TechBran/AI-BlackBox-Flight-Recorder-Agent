@@ -557,7 +557,14 @@ ORDINARY = ("I'll check back in one hour.", "The build takes 30 minutes.",
             "The deploy took 20 min.", "CPU sits at 95% for 120 ms bursts.",
             "Raised the timeout to 500 ms; tests pass at 100%.",
             "Heading out now, home in 30 minutes.", "Step 12 of the plan is done.",
-            "The meeting moved to 12:30.")
+            "The meeting moved to 12:30.",
+            # Round numbers: V holds 12,345 steps rounded ("12,300", "12,000",
+            # "10,000"), but only a payload's exact forms are distinctive.
+            "The team raised 10,000 dollars and hired 1,000 people.",
+            "The invoice total is 1,200 euros.", "We shipped 12,000 units this quarter.")
+
+
+_EARLIER = ("night", "steps", "bp", "week", "sleeps", "workouts")
 
 
 def _answered_earlier_today(box, hours=3):
@@ -565,10 +572,9 @@ def _answered_earlier_today(box, hours=3):
     (rows masked): sleep stages and workouts put plain durations in V."""
     now = int(time.time() * 1000)
     refs = [deliver(box.st, box.envs[k], f"wt_{k}_earlier", ts=now - hours * 3600 * 1000)
-            for k in ("night", "steps", "bp", "week", "sleeps", "workouts")]
+            for k in _EARLIER]
     box.st.mark_masked(refs, now - hours * 3600 * 1000)
-    return mask.value_set(box.envs[k] for k in ("night", "steps", "bp", "week", "sleeps",
-                                                 "workouts"))
+    return mask.value_set(box.envs[k] for k in _EARLIER)
 
 
 def test_the_recall_rule_needs_a_distinctive_quote(box):
@@ -576,14 +582,37 @@ def test_the_recall_rule_needs_a_distinctive_quote(box):
     number with a reading's own unit; never on a duration, a percent, a
     millisecond count or a clock time, though V holds "30 min" and "one hour"."""
     v = _answered_earlier_today(box)
+    # The exact forms, as carry_for draws the distinctive quotes from them.
+    exact = mask.value_set((box.envs[k] for k in _EARLIER), rounded=False)
     assert {"30 min", "one hour"} & v or {"45 minutes", "20 min", "two hours"} & v
     for text in ORDINARY:
-        assert not mask.quotes_results(text, v), text
+        assert not mask.quotes_results(text, v, exact=exact), text
     for text in ("As I said, 47.3 is your number.", "You did 12,345 that day.",
                  "It was 118/79.", "Your sleeping heart rate was 47 bpm.",
                  "you logged 12345 steps", "Tu pulso fue 47,3."):
-        assert mask.quotes_results(text, v), text
-    assert not mask.quotes_results("Step 47 of the runbook.", v)      # steps are thousands
+        assert mask.quotes_results(text, v, exact=exact), text
+    assert not mask.quotes_results("Step 47 of the runbook.", v, exact=exact)  # thousands
+
+
+def test_only_a_payload_s_exact_numbers_are_distinctive():
+    """V keeps a big number's rounded and abbreviated forms for masking (a
+    reply says "about 12,300 steps"), but the recall rule's unit-free quote
+    is drawn from the exact forms only, and never from a round thousand:
+    "12,000" or "10,000" is every other invoice."""
+    payload = [{"metrics": [{"metric": "steps", "unit": "steps", "value": 12345.0},
+                            {"metric": "distance", "unit": "m", "value": 1176.1}]}]
+    v = mask.value_set(payload)
+    exact = mask.value_set(payload, rounded=False)
+    assert {"12,300", "12,000", "1,200", "1,000", "12.3k"} <= v
+    assert not {"12,300", "12,000", "1,200", "1,000", "12.3k"} & exact
+    assert {"12,345", "12345", "1,176", "1176.1"} <= exact <= v
+    assert {"12,345", "1,176", "1176.1"} <= mask._distinctive(exact)
+    assert not {"1,000", "12,000", "10,000", "1 000", "12.000"} & mask._distinctive(v)
+    for text in ("We shipped 12,000 units.", "The invoice total is 1,200 euros.",
+                 "About 12,300 people came."):
+        assert not mask.quotes_results(text, v, exact=exact), text
+    assert mask.quotes_results("You did 12,345 that day.", v, exact=exact)
+    assert mask.quotes_results("About 12,300 steps.", v, exact=exact)   # by its unit
 
 
 def test_ordinary_saves_after_a_health_answer_are_byte_identical(box, capsys):

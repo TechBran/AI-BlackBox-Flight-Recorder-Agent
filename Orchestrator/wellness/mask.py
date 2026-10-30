@@ -102,7 +102,9 @@ def _words(n: int) -> Set[str]:
 _SCI = re.compile(r"\d[eE][+-]?\d")
 
 
-def _number_forms(x: float) -> Set[str]:
+def _number_forms(x: float, rounded: bool = True) -> Set[str]:
+    """x as a reply writes it. `rounded` adds a big number's rounded and
+    abbreviated forms ("12,300", "12,000", "12.3k" for 12,345)."""
     out: Set[str] = set()
     if not isinstance(x, (int, float)) or isinstance(x, bool) or not math.isfinite(x):
         return out
@@ -123,6 +125,8 @@ def _number_forms(x: float) -> Set[str]:
         out |= {f"{w} point {catalog.number_words(tenth)}" for w in _words(whole)}
     if abs(x) >= 1000:
         out |= _grouped(r)
+        if not rounded:
+            return {v for v in out if v and not _SCI.search(v)}
         for nd in (-1, -2, -3):
             rr = int(round(x, nd))
             out |= {str(rr)} | _grouped(rr)
@@ -224,8 +228,11 @@ def _display_forms(text: str) -> Set[str]:
     return out
 
 
-def value_set(payloads: Iterable) -> frozenset:
-    """V for a turn: every value-bearing string the delivered payloads hold."""
+def value_set(payloads: Iterable, *, rounded: bool = True) -> frozenset:
+    """V for a turn: every value-bearing string the delivered payloads hold.
+    With rounded=False, a big number's rounded and abbreviated forms stay
+    out: the exact forms the recall rule draws its distinctive quotes from
+    (quotes_results)."""
     values: Set[str] = set()
 
     def unit_of(key, unit):
@@ -262,7 +269,7 @@ def value_set(payloads: Iterable) -> frozenset:
         if isinstance(node, bool) or node is None:
             return
         if isinstance(node, (int, float)):
-            values.update(_number_forms(node))
+            values.update(_number_forms(node, rounded))
             if unit == "min":
                 values.update(_duration_forms(node))
             elif unit == "m":
@@ -617,23 +624,29 @@ diastólica diastolica respiraciones
 # A step count is in the thousands: "step 12 of the plan" quotes nothing.
 _RECALL_MIN = {"step": 1000, "steps": 1000, "paso": 1000, "pasos": 1000}
 _DISTINCTIVE = re.compile(r"\d{2,}[.,]\d+|\d{1,3}(?:[,. ]\d{3})+|\d{2,3}/\d{2,3}")
+_ROUND_THOUSANDS = re.compile(r"\d{1,3}(?:[,. ]000)+")
 
 
 def _distinctive(values: frozenset) -> frozenset:
     """The members of V specific enough to say a text quotes a health result
     on their own: a decimal, grouped thousands or a pair ("47.3", "12,345",
-    "118/79"). A bare "47", a duration or a clock time is not."""
-    return frozenset(v for v in values if _DISTINCTIVE.fullmatch(v))
+    "118/79"). A bare "47", a duration, a clock time or a round thousand
+    ("12,000": every other invoice) is not."""
+    return frozenset(v for v in values
+                     if _DISTINCTIVE.fullmatch(v) and not _ROUND_THOUSANDS.fullmatch(v))
 
 
-def quotes_results(text: str, values: frozenset) -> bool:
+def quotes_results(text: str, values: frozenset, *, exact: Optional[frozenset] = None) -> bool:
     """Does `text` repeat a delivered health result? A distinctive member of
-    V, two of V's numbers as a pair ("118/79"), or a number of V right by
-    one of a reading's own units ("47 bpm", "12345 steps"); never a
-    duration, a percent or a clock time on its own."""
+    `exact` (V without its rounded forms, value_set(rounded=False); V itself
+    when not given), two of V's numbers as a pair ("118/79"), or a number of
+    V right by one of a reading's own units ("47 bpm", "12345 steps", "about
+    12,300 steps"); never a duration, a percent or a clock time on its own.
+    A rounded "12,300" or "1,200" is no quote without its unit: an ordinary
+    "1,200 euros" stays an ordinary turn."""
     if not text or not values:
         return False
-    rx = _value_regex(_distinctive(values), tails=False)
+    rx = _value_regex(_distinctive(values if exact is None else exact), tails=False)
     if rx is not None and rx.search(text):
         return True
     toks = [(m.lastgroup, m.group(0).lower()) for m in _TOKEN_RE.finditer(text)]
@@ -661,6 +674,7 @@ def quotes_results(text: str, values: frozenset) -> bool:
 
 def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
               extra_categories: Sequence[str] = (), recall_text: Optional[str] = None,
+              recall_window_ms: int = HISTORY_WINDOW_MS,
               now_ms: Optional[int] = None) -> Optional[Carry]:
     """The turn's carry, or None for a turn no wellness result reached.
 
@@ -675,8 +689,8 @@ def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
     history, and two chats at once can have one turn's save stamp the other's
     rows, so a reply can repeat a result with no row of its own. When it
     quotes one of the operator's results of the last 72 hours
-    (quotes_results), the turn's ledger copy is masked and tagged against all
-    of them: a heuristic carry (exact False).
+    (`recall_window_ms`; quotes_results), the turn's ledger copy is masked
+    and tagged against all of them: a heuristic carry (exact False).
 
     A health store that cannot be read is no reason to lose the turn: it is
     recorded, its ledger copy masked by the unit rule and tagged."""
@@ -699,9 +713,10 @@ def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
             if rows:
                 values = value_set(r.get("payload") for r in rows)
             elif recall_text:
-                recent = _recent_history_rows(st, now_ms)
+                recent = _recent_history_rows(st, now_ms, recall_window_ms)
                 recent_values = value_set(r.get("payload") for r in recent)
-                if quotes_results(recall_text, recent_values):
+                exact_values = value_set((r.get("payload") for r in recent), rounded=False)
+                if quotes_results(recall_text, recent_values, exact=exact_values):
                     rows, values, exact = recent, recent_values, False
     except store_mod.StoreGone:
         rows = []
@@ -846,8 +861,8 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
                 for m in messages]
 
 
-def _recent_history_rows(st, now_ms: int) -> List[dict]:
+def _recent_history_rows(st, now_ms: int, window_ms: int = HISTORY_WINDOW_MS) -> List[dict]:
     with st.read() as conn:
         rows = conn.execute("SELECT * FROM delivered WHERE ts>=? ORDER BY ts",
-                            (now_ms - HISTORY_WINDOW_MS,)).fetchall()
+                            (now_ms - window_ms,)).fetchall()
     return [st._delivery(r) for r in rows]
