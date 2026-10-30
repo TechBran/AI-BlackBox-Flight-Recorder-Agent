@@ -60,12 +60,13 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 DAY_MS = 86_400_000
-HOUR_MS = 3_600_000
 HC_MERGED = "hc_merged"
 # Inside a day whose two offsets differ (a DST change, or travel), a
 # wall-clock time before 02:00 reads on the day's first offset and a later
-# one on the second: the US and central-European changes happen at 02:00
-# local, and nothing BlackBox computes sits between 01:00 and 03:00.
+# one on the second. That is exact for the US and central-European changes
+# (both at 02:00 local, so the repeated 01:00-02:00 of a fall-back night
+# reads 01:xx both times); a zone that changes at another hour reads up to an
+# hour off between that hour and 02:00, and travel is approximate the same way.
 ZONE_SWITCH_MIN = 120
 
 DDL = """
