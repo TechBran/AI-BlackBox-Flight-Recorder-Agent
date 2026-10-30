@@ -125,25 +125,36 @@ object WellnessStatusParser {
     /**
      * The `PUT /wellness/settings` body: the operator plus ONLY the fields that changed from
      * [old] to [new] (the contract makes every field optional), so a narrowing edit can never
-     * carry a widening one along by accident.
+     * carry a widening one along by accident. [include] names fields to send even when
+     * unchanged (right after enrollment the phone does not know the box's defaults, so setup
+     * states its choices).
      */
-    fun settingsBody(operator: String, old: WellnessRules.Settings, new: WellnessRules.Settings): String = buildJsonObject {
+    fun settingsBody(
+        operator: String,
+        old: WellnessRules.Settings,
+        new: WellnessRules.Settings,
+        include: Set<String> = emptySet(),
+    ): String = buildJsonObject {
+        fun send(field: String, changed: Boolean) = changed || field in include
         put("operator", JsonPrimitive(operator))
-        if (new.categories != old.categories) put("categories", buildJsonObject {
+        if (send("categories", new.categories != old.categories)) put("categories", buildJsonObject {
             for (cat in WellnessCategory.entries) put(cat.wire, JsonPrimitive((new.categories[cat] ?: WellnessConsent.OFF).wire))
         })
-        if (new.localOnly != old.localOnly) put("local_only", buildJsonObject {
+        if (send("local_only", new.localOnly != old.localOnly)) put("local_only", buildJsonObject {
             for (cat in WellnessCategory.entries) put(cat.wire, JsonPrimitive(new.localOnly[cat] ?: true))
         })
-        if (new.providersAllowed != old.providersAllowed) put("providers_allowed", buildJsonArray {
+        if (send("providers_allowed", new.providersAllowed != old.providersAllowed)) put("providers_allowed", buildJsonArray {
             new.providersAllowed.sorted().forEach { add(JsonPrimitive(it)) }
         })
-        if (new.googlePaidKeyConfirmed != old.googlePaidKeyConfirmed)
+        if (send("google_paid_key_confirmed", new.googlePaidKeyConfirmed != old.googlePaidKeyConfirmed))
             put("google_paid_key_confirmed", JsonPrimitive(new.googlePaidKeyConfirmed))
-        if (new.surfacesMode != old.surfacesMode) put("surfaces_mode", JsonPrimitive(new.surfacesMode))
-        if (new.instinctPrompt != old.instinctPrompt) put("instinct_prompt",
+        if (send("surfaces_mode", new.surfacesMode != old.surfacesMode)) put("surfaces_mode", JsonPrimitive(new.surfacesMode))
+        if (send("instinct_prompt", new.instinctPrompt != old.instinctPrompt)) put("instinct_prompt",
             new.instinctPrompt?.let { JsonPrimitive(WellnessRules.sanitizeInstinctPrompt(it)) } ?: JsonNull)
     }.toString()
+
+    /** What setup states explicitly after enrolling (consent itself travels in the enroll call). */
+    val SETUP_FIELDS: Set<String> = setOf("local_only", "providers_allowed", "google_paid_key_confirmed")
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.contentOrNull
 

@@ -87,6 +87,24 @@ class IngestClientTest {
     }
 
     @Test
+    fun `a drifted phone clock is corrected from the box's Date header`() = runBlocking {
+        // The box's clock is 10 minutes ahead of this phone's.
+        val httpDate = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", java.util.Locale.US)
+            .apply { timeZone = java.util.TimeZone.getTimeZone("GMT") }
+            .format(java.util.Date((1_793_000_000L + 600) * 1000))
+        server.enqueue(MockResponse.Builder().code(200).setHeader("Date", httpDate).body("{}").build())
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        client.status(WellnessFixtures.OPERATOR, signer)
+        taken()
+        assertEquals(600L, client.clockSkewS)
+        client.status(WellnessFixtures.OPERATOR, signer)
+        val ts = taken().headers[OriginSigner.HEADER]!!.split(';').first { it.startsWith("ts=") }.removePrefix("ts=")
+        assertEquals("1793000600", ts)
+        assertEquals(0L, IngestClient.skewFor(100, 80))
+        assertEquals(-45L, IngestClient.skewFor(100, 145))
+    }
+
+    @Test
     fun `no answer is status -1, never an exception`() = runBlocking {
         val dead = IngestClient("http://127.0.0.1:1")
         val r = dead.ingest(ByteArray(0), signer)

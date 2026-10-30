@@ -45,7 +45,16 @@ object WellnessGraph {
         .getString(Constants.KEY_ORIGIN, "").orEmpty()
         .takeIf { it.isNotBlank() }?.let { normalizeApiOrigin(it) }
 
-    fun client(context: Context): IngestClient? = boxOrigin(context)?.let { IngestClient(it) }
+    @Volatile private var client: Pair<String, IngestClient>? = null
+
+    /** One client per box origin, so the clock-skew correction it learns is shared. */
+    fun client(context: Context): IngestClient? {
+        val origin = boxOrigin(context) ?: return null
+        client?.takeIf { it.first == origin }?.let { return it.second }
+        return synchronized(lock) {
+            client?.takeIf { it.first == origin }?.second ?: IngestClient(origin).also { client = origin to it }
+        }
+    }
 
     fun engine(context: Context): WellnessSyncEngine? {
         val origin = boxOrigin(context) ?: return null
@@ -54,7 +63,7 @@ object WellnessGraph {
             engine?.takeIf { engineOrigin == origin } ?: run {
                 val app = context.applicationContext
                 val f = files(app)
-                val client = IngestClient(origin)
+                val client = client(app) ?: IngestClient(origin)
                 WellnessSyncEngine(
                     gateway = gateway(app),
                     binding = binding(app),

@@ -84,6 +84,10 @@ class WellnessBinding(
             k = request.k,
             boundAtMs = clock(),
         )
+        val previous = readRecord()
+        if (previous == null || previous.enrollmentId != record.enrollmentId || previous.epoch != record.epoch) {
+            resetCollectedLocked()
+        }
         WellnessAtomic.writeText(files.binding, JSON.encodeToString(record))
         files.intent.delete()
         Log.i(TAG, "health source bound (epoch=${record.epoch})")
@@ -99,6 +103,22 @@ class WellnessBinding(
             if (f.name != files.installId.name) f.deleteRecursively()
         }
         Unit
+    }
+
+    /**
+     * A new enrollment or epoch starts collection over: the Changes tokens, the id index and
+     * the backfill cursor belong to the old one, and batches still in the outbox carry the old
+     * epoch (Health Connect still holds that data; the new backfill reads it again). Consent,
+     * the interval and the heart-rate origin choice are the person's settings and stay.
+     */
+    private fun resetCollectedLocked() {
+        files.tokens.delete()
+        files.dayIndex.delete()
+        files.outbox.deleteRecursively()
+        WellnessSyncStateStore(files.syncState).update {
+            it.copy(backfill = BackfillCursor(), needsReconnect = false, backoffUntilMs = 0L, quotaAttempt = 0,
+                lastPushMs = 0L, lastReconcileMs = 0L)
+        }
     }
 
     /** A signer for the live binding, or null when not bound. */

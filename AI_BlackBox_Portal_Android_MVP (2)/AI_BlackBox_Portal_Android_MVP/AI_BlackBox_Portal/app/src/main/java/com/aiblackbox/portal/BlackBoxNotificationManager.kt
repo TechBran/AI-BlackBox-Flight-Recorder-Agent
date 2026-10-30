@@ -475,6 +475,8 @@ class BlackBoxNotificationManager(private val context: Context) : NavigationNoti
             } else {
                 Log.w(TAG, "Notification permission NOT granted, wellness notice not shown")
             }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "wellness notice refused: notification permission revoked")
         } catch (e: Exception) {
             Log.e(TAG, "Error showing wellness notice (${e.javaClass.simpleName})")
         }

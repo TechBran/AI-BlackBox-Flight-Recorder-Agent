@@ -3,7 +3,7 @@ package com.aiblackbox.portal.ui.wellness
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import androidx.core.net.toUri
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -177,7 +177,7 @@ internal object HealthIntents {
 
     fun getHealthConnect(context: Context) = start(
         context,
-        Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=${WellnessCatalog.HEALTH_CONNECT_PACKAGE}")),
+        Intent(Intent.ACTION_VIEW, "market://details?id=${WellnessCatalog.HEALTH_CONNECT_PACKAGE}".toUri()),
         "Install or update Health Connect from your app store.",
     )
 

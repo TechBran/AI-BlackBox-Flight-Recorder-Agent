@@ -53,6 +53,7 @@ class WellnessSyncEngine(
 
     suspend fun sync(inForeground: Boolean): SyncReport = RUN_LOCK.withLock {
         val record = binding.current() ?: return@withLock SyncReport("not_enrolled")
+        dayIndex.reload()
         val now = clock()
         val st = state.load()
         val sdk = gateway.sdkStatus()
@@ -113,12 +114,14 @@ class WellnessSyncEngine(
         val reReadFrom = linkedMapOf<HcType, Long>()
         var windowFrom = now
 
+        var newlySeen = false
         for (type in readable) {
             val entry = tokens.get(type)
             if (entry == null) {
                 // First sight of this type (consent or a grant just widened): take a token now
                 // and let the backfill cover what came before it.
                 tokens.seed(type, gateway.changesToken(type), now)
+                newlySeen = true
                 continue
             }
             windowFrom = minOf(windowFrom, entry.syncedUntilMs)
@@ -201,6 +204,10 @@ class WellnessSyncEngine(
                 lastReconcileMs = if (reconcile || it.lastReconcileMs == 0L) now else it.lastReconcileMs,
                 deletionsSeen = it.deletionsSeen + deletions.size,
                 sleepLatencyMin = (it.sleepLatencyMin + sleepLatencies).takeLast(MAX_LATENCIES),
+                // A type seen for the first time after the history import finished (a category
+                // turned on, a grant added) has no history yet: run the import again. What is
+                // already on the box is replaced, never doubled (replace_day, hc_id upserts).
+                backfill = if (newlySeen && it.backfill.done) BackfillCursor() else it.backfill,
             )
         }
         return batches.size to batches.sumOf { it.rowCount }
@@ -215,6 +222,7 @@ class WellnessSyncEngine(
      */
     suspend fun backfillPage(): BackfillStep = RUN_LOCK.withLock {
         val record = binding.current() ?: return@withLock BackfillStep.Skipped("not_enrolled")
+        dayIndex.reload()
         val now = clock()
         val z = zone()
         val st = state.load()
@@ -267,6 +275,11 @@ class WellnessSyncEngine(
             else BackfillStep.Progress(next.backfill.pagesDone, total, batches.sumOf { it.rowCount })
         } catch (e: HcQuotaException) {
             BackfillStep.QuotaBackoff(backOff())
+        } catch (e: OutboxFullException) {
+            // The cursor did not move; the page is read again once the outbox drains.
+            BackfillStep.Skipped("outbox_full")
+        } catch (e: HcPermissionException) {
+            BackfillStep.Skipped("permission_revoked")
         }
     }
 

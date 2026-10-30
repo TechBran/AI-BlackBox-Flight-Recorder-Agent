@@ -127,6 +127,11 @@ class WellnessSyncWorker(context: Context, params: WorkerParameters) : Coroutine
                 }
             }
             runCatching { WellnessGraph.pushCapabilities(app) }
+            // A history import that is due (first run, or a category just turned on) needs a
+            // visible foreground worker, which Android allows only while the app is open.
+            if (!WellnessGraph.state(app).load().backfill.done && AppForegroundState.isForeground()) {
+                WellnessScheduler.startBackfill(app)
+            }
             Result.success()
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

@@ -92,6 +92,12 @@ class WellnessStatusParserTest {
             old.copy(providersAllowed = setOf("openai", "anthropic")))).jsonObject
         assertEquals(listOf("anthropic", "openai"), providers.getValue("providers_allowed").jsonArray.map { it.jsonPrimitive.content })
 
+        // Setup states its provider and local-only choices even when they equal the defaults.
+        val setup = Json.parseToJsonElement(WellnessStatusParser.settingsBody(WellnessFixtures.OPERATOR, old, old,
+            WellnessStatusParser.SETUP_FIELDS)).jsonObject
+        assertEquals(setOf("operator", "local_only", "providers_allowed", "google_paid_key_confirmed"), setup.keys)
+        assertTrue(setup.getValue("providers_allowed").jsonArray.isEmpty())
+
         val reset = WellnessStatusParser.settingsBody(WellnessFixtures.OPERATOR, old.copy(instinctPrompt = "x"), old)
         assertTrue(reset.contains("\"instinct_prompt\":null"))
         assertEquals("""{"operator":"wellness-fixture"}""", WellnessStatusParser.settingsBody(WellnessFixtures.OPERATOR, old, old))

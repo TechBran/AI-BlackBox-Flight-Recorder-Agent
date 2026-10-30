@@ -32,6 +32,15 @@ class IngestClient(
 
     private val jsonType = "application/json; charset=utf-8".toMediaType()
 
+    /**
+     * Seconds to add to this phone's clock when signing. The box refuses a signature more than
+     * 120 s from its own clock (and says only "bad_signature"), so a phone whose clock drifted
+     * would look like it needs reconnecting. Every reply's `Date` header keeps this current;
+     * only a drift of more than [SKEW_TOLERANCE_S] is corrected.
+     */
+    @Volatile var clockSkewS: Long = 0L
+        private set
+
     /** POST /wellness/ingest with a gzip body (already compressed, from the outbox). */
     suspend fun ingest(gzipBody: ByteArray, signer: OriginSigner): WellnessHttp =
         send("POST", INGEST, gzipBody, signer, gzip = true)
@@ -67,11 +76,14 @@ class IngestClient(
             val builder = Request.Builder()
                 .url(baseUrl.trimEnd('/') + pathWithQuery)
                 .header("X-BlackBox-Client", "native-android/1.0")
-            if (signer != null) builder.header(OriginSigner.HEADER, signer.header(method, pathWithQuery, body, nowSec()))
+            if (signer != null) {
+                builder.header(OriginSigner.HEADER, signer.header(method, pathWithQuery, body, nowSec() + clockSkewS))
+            }
             if (gzip) builder.header("Content-Encoding", "gzip")
             val requestBody = body?.toRequestBody(jsonType)
             builder.method(method, if (method == "GET") null else (requestBody ?: ByteArray(0).toRequestBody(jsonType)))
             client.newCall(builder.build()).execute().use { response ->
+                response.headers.getDate("Date")?.let { boxDate -> clockSkewS = skewFor(boxDate.time / 1000, nowSec()) }
                 WellnessHttp(
                     status = response.code,
                     body = response.body?.string().orEmpty().take(MAX_REPLY_CHARS),
@@ -99,6 +111,15 @@ class IngestClient(
         const val DISCLOSURES = "/wellness/disclosures"
         const val PRIVACY_POLICY = "/wellness/privacy-policy"
         private const val MAX_REPLY_CHARS = 1_000_000
+
+        /** Drift under this is left alone (the box allows 120 s; HTTP dates have 1 s grain). */
+        const val SKEW_TOLERANCE_S = 30L
+
+        /** The correction to apply given the box's clock and ours (0 inside the tolerance). PURE. */
+        fun skewFor(boxSec: Long, phoneSec: Long): Long {
+            val drift = boxSec - phoneSec
+            return if (kotlin.math.abs(drift) > SKEW_TOLERANCE_S) drift else 0L
+        }
 
         private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
     }

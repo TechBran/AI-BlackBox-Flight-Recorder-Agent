@@ -294,6 +294,36 @@ class WellnessSyncEngineTest {
     }
 
     @Test
+    fun `a category turned on after the import finished runs the import again`() = runBlocking {
+        enroll()
+        state.update { it.copy(categories = it.categories + ("blood_pressure" to "off")) }
+        while (engine.backfillPage() is WellnessSyncEngine.BackfillStep.Progress) Unit
+        assertTrue(state.load().backfill.done)
+        engine.sync(false)
+        assertTrue(state.load().backfill.done)
+        // Blood pressure turned on: its type is seen for the first time, so history is due.
+        state.update { it.copy(categories = it.categories + ("blood_pressure" to "ask")) }
+        engine.sync(false)
+        assertFalse(state.load().backfill.done)
+        assertNotNull(tokens.get(HcType.BLOOD_PRESSURE))
+    }
+
+    @Test
+    fun `a full outbox holds the backfill cursor`() = runBlocking {
+        val tiny = WellnessOutbox(files.outbox, files.quarantine, maxBatches = 1)
+        val e = WellnessSyncEngine(gw, binding, tokens, DayIndex(files.dayIndex), tiny, state,
+            send = { _, _ -> WellnessOutbox.SendResult(-1) }, clock = { now }, zone = { ZONE })
+        enroll()
+        gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
+        // Older history, so the import has more than one page.
+        gw.upsert(WellnessFixtures.sleepNight("sleep-old", 3).copy(startMs = at(10, 23, month = 10), endMs = at(11, 6, month = 10)))
+        assertTrue(e.backfillPage() is WellnessSyncEngine.BackfillStep.Progress)
+        val cursor = state.load().backfill.cursorMs
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("outbox_full"), e.backfillPage())
+        assertEquals(cursor, state.load().backfill.cursorMs)
+    }
+
+    @Test
     fun `paused enrollments neither sync nor backfill`() = runBlocking {
         enroll()
         state.update { it.copy(state = "paused") }

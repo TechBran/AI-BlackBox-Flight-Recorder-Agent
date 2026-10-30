@@ -324,9 +324,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 categories = s.setup.consent, localOnly = s.setup.localOnly,
                 providersAllowed = s.setup.providersAllowed, googlePaidKeyConfirmed = s.setup.googlePaidKeyConfirmed,
             )
-            val base = WellnessRules.Settings(categories = s.setup.consent)
-            val body = WellnessStatusParser.settingsBody(s.operator, base, wanted)
-            binding.signer()?.let { client.putSettings(body, it) }
+            val body = WellnessStatusParser.settingsBody(s.operator, wanted, wanted, WellnessStatusParser.SETUP_FIELDS)
+            val put = binding.signer()?.let { client.putSettings(body, it) }
+            if (put?.ok != true) say("Health is set up, but your AI choices didn't save. Set them again in Health settings.")
             WellnessScheduler.onEnrolled(app)
         }
         setupUpdate {
@@ -346,6 +346,13 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val s = state.value
         val record = binding.current() ?: run { say("Set up Health on this phone first."); return@launch }
         val client = client() ?: return@launch
+        // Edit only from the box's own view of the settings: a diff against the phone's defaults
+        // could carry a change (even a widening one) the person never made.
+        if (s.box?.credentialed != true) {
+            say("Couldn't read your Health settings from the box. Try again in a moment.")
+            refresh()
+            return@launch
+        }
         val old = s.settings
         val new = change(old)
         if (new == old) return@launch

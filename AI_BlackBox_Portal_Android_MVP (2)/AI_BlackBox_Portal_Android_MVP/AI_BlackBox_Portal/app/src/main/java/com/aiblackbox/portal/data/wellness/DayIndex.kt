@@ -80,6 +80,16 @@ class DayIndex(private val file: File) {
         dirty = false
     }
 
+    /**
+     * Forget the in-memory copy so the next read comes from disk. The sync engine calls this at
+     * the start of every run: an unbind or re-enrollment may have deleted the file since, and
+     * a stale copy must never be written back. (Every run saves before it ends.)
+     */
+    fun reload() = synchronized(lock) {
+        entries = null
+        dirty = false
+    }
+
     fun clear() = synchronized(lock) {
         entries = LinkedHashMap()
         dirty = false
