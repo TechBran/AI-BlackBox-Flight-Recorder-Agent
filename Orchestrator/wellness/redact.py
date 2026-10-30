@@ -30,7 +30,8 @@ SAME object, so an untagged snapshot is byte-identical through every reader.
 The reader is ambient. for_reader() reads the turn stamped for this request
 (turn.current(), set at the chat entry points) unless a caller named one with
 reading_as() (the Flight Recorder, checkpoint compression, a tool called from
-the MCP gateway). redact() is the explicit form for a caller that knows the
+the MCP gateway, a ledger read signed by the enrolled phone: display_reader()).
+redact() is the explicit form for a caller that knows the
 reader operator and the provider and nothing else (no surface proof): voice
 sessions, the TTS replay, the MCP server's direct reads.
 
@@ -210,6 +211,20 @@ def current_reader() -> Optional[turn_mod.WellnessTurn]:
 def background_reader(operator: str) -> turn_mod.WellnessTurn:
     """A background summarizer working on `operator`'s ledger."""
     return turn_mod.WellnessTurn(operator=operator or "", surface=BACKGROUND_SURFACE)
+
+
+def display_reader(operator: str, enrollment_id: Optional[str]) -> turn_mod.WellnessTurn:
+    """The person's own screen reading their own ledger: a ledger read signed
+    by `operator`'s enrolled phone (GET /fossil/snapshot/{id} with a valid
+    X-BlackBox-Origin, from the native app or the Portal inside it). No model
+    receives the text, so the destination is the box's own (LOCAL_SERVICE);
+    the gate still judges the kill switch, the enrollment and each category's
+    consent. A tagged turn of this operator then reads as minted (masked, its
+    WELLNESS gauge and refs intact, so "Show numbers" works on a reloaded
+    turn); anyone else's stays hidden."""
+    return turn_mod.WellnessTurn(operator=operator, surface=turn_mod.SURFACE_ANDROID,
+                                 credential_ok=True, surface_id=enrollment_id,
+                                 provider=LOCAL_SERVICE, model=None)
 
 
 @contextlib.contextmanager

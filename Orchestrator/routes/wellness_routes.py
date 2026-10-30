@@ -25,7 +25,10 @@ Phone -> box (JSON; every error is {"error": <code>, ...}):
   GET  /wellness/disclosures     signed: who saw the data, newest first
 
 "Signed" = the X-BlackBox-Origin proof keyed with the phone's device key
-(Orchestrator/wellness/origin_proof.py). The kill switch ([wellness] enabled,
+(Orchestrator/wellness/origin_proof.py). GET /fossil/snapshot/{id}
+(routes/task_routes.py) takes the same optional proof as GET /wellness/status
+(optional_proof): the enrolled phone then reads its own wellness turns as
+minted. The kill switch ([wellness] enabled,
 read fresh) stops collection and every answer that carries health
 information; pause, disconnect, erase and narrowing settings still work.
 The operator is always the one the proof or the body names for THIS
@@ -132,6 +135,23 @@ def _signed(request: Request, raw: RawBody, required: bool = True):
                                             raw.data or b""), None
     except enroll.EnrollError as e:
         return None, _refuse(e)
+
+
+# The body a route with an optional proof reads (the signature covers it).
+small_body = _capped(SMALL_BODY)
+
+
+def optional_proof(request: Request, raw: RawBody):
+    """(Signed or None, refusal response or None) where the proof is OPTIONAL:
+    GET /wellness/status and the signed ledger read (GET /fossil/snapshot/{id},
+    routes/task_routes.py). No header is no proof. A present one is checked
+    the way every signed route checks it (_signed: enroll.verify_signed_request)
+    and a bad one is refused (401 bad_signature, 409 owner_changed, 410 revoked
+    or source_moved), never downgraded to an unsigned answer. With the kill
+    switch off nothing is verified (the status's four fields, a hidden turn)."""
+    if not _enabled():
+        return None, None
+    return _signed(request, raw, required=False)
 
 
 def _disabled() -> Optional[JSONResponse]:
@@ -248,14 +268,14 @@ def _store_view(st, now_ms: int, wear: dict, sync: dict) -> None:
 
 @router.get("/status")
 def wellness_status(request: Request, operator: str = "",
-                    raw: RawBody = Depends(_capped(SMALL_BODY))):
+                    raw: RawBody = Depends(small_body)):
     try:
         schema.OperatorBody(operator=operator)
     except ValidationError:
         return _json(400, {"error": "invalid_operator"})
     if not _enabled():
         return _minimal_status(operator)
-    signed, refusal = _signed(request, raw, required=False)
+    signed, refusal = optional_proof(request, raw)
     if refusal is not None:
         return refusal
     # Only the operator's ACTIVE phone reads the settings view: a replacement

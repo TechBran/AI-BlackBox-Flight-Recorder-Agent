@@ -189,6 +189,30 @@ def test_a_local_only_category_never_reaches_a_cloud_reader(ledger):
         assert redact.for_reader(text) is text
 
 
+def test_the_display_reader_is_the_owner_s_own_screen(ledger):
+    """A ledger read signed by the enrolled phone (GET /fossil/snapshot/{id})
+    reads as the person's own screen: the box's own destination, so even a
+    local-only category shows; still only their own turns, and still the
+    gate's consent."""
+    me = redact.display_reader(OPERATOR, ledger.rec["enrollment_id"])
+    assert (me.operator, me.surface, me.credential_ok, me.surface_id, me.provider, me.model) == \
+        (OPERATOR, turn_mod.SURFACE_ANDROID, True, ledger.rec["enrollment_id"],
+         redact.LOCAL_SERVICE, None)
+    assert _visible(ledger, me)
+    assert not _visible(ledger, redact.display_reader("other-human", "en_00000022"))
+    bp = mint_turn(OPERATOR, "bp?", "It was [·].", wellness={
+        "categories": ["blood_pressure"], "labels": ["2026-10-26"], "refs": ["w-2"]})
+    write_record(providers_allowed=[], last_push_at=ledger.rec["last_push_at"],
+                 categories=ALL_ASK)
+    text = snapshot_text(ledger.vol, bp)
+    with _as(me):
+        assert redact.for_reader(text) is text
+    write_record(providers_allowed=[], last_push_at=ledger.rec["last_push_at"],
+                 categories={**ALL_ASK, "blood_pressure": "off"})
+    with _as(me):
+        assert redact.for_reader(text) != text
+
+
 def test_the_explicit_form_vouches_for_no_surface_and_needs_a_provider(ledger):
     body = snapshot_text(ledger.vol, ledger.tagged)
     assert redact.redact(body, OPERATOR, OPERATOR, "anthropic") is body

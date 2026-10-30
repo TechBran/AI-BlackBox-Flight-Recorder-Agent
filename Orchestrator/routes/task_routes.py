@@ -12,7 +12,8 @@ import os
 import re
 
 # External library imports
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import requests
 
@@ -28,6 +29,7 @@ from Orchestrator.models import TaskType, TaskStatus
 from Orchestrator.retrieval import retrieve
 from Orchestrator.tasks import create_task, update_task
 from Orchestrator.utils.paths import AUDIO_EXTS, UploadPathError, resolve_upload_path
+from Orchestrator.routes import wellness_routes as _wellness_routes
 from Orchestrator.wellness import redact as wellness_redact
 
 # The most rows one /tasks/list call returns when the caller sets ?limit=.
@@ -293,15 +295,52 @@ def api_snapshots_recent(limit: int = 30, operator: str = "", before: str = ""):
 # -----------------------------------------------------------------------------
 # Single Snapshot Fetch (for Android Timeline detail view)
 # -----------------------------------------------------------------------------
+def _fossil_reader(request: Optional[Request], raw):
+    """(the ledger reader of a snapshot read, None) or (None, the refusal).
+
+    M7: the read takes the enrolled phone's OPTIONAL X-BlackBox-Origin proof,
+    checked exactly as GET /wellness/status checks it (one verification path:
+    wellness_routes.optional_proof). A present but bad proof is refused with
+    the status's codes and bodies (401 bad_signature, 409 owner_changed, 410
+    revoked / source_moved), never read unsigned. A valid one from the
+    operator's ACTIVE phone reads as that person's own screen
+    (redact.display_reader): their tagged turns come back as minted (masked,
+    the WELLNESS gauge and its refs intact). An `operator` query, when given
+    (the in-app bridge names it on every GET), must be the proof's: 400
+    operator_mismatch otherwise. Everything else (no proof, a replacement
+    still awaiting approval, the kill switch off) reads as nobody: every
+    tagged turn hidden. Nothing here logs or records a disclosure."""
+    if request is None:
+        return None, None
+    body = raw if isinstance(raw, _wellness_routes.RawBody) else _wellness_routes.RawBody(b"")
+    signed, refusal = _wellness_routes.optional_proof(request, body)
+    if refusal is not None:
+        return None, refusal
+    if signed is None:
+        return None, None
+    named = request.query_params.getlist("operator")
+    if any(name != signed.operator for name in named):
+        return None, JSONResponse(status_code=400, content={"error": "operator_mismatch"})
+    if signed.which != "active":
+        return None, None
+    return wellness_redact.display_reader(signed.operator, signed.enrollment_id), None
+
+
 @app.get("/fossil/snapshot/{snap_id}")
-def fossil_get_snapshot(snap_id: str):
+def fossil_get_snapshot(snap_id: str, request: Request = None,
+                        raw: _wellness_routes.RawBody = Depends(_wellness_routes.small_body)):
     """Fetch full content of a single snapshot by ID. A short SNAP-<n> (as
     models cite them) resolves to the newest snapshot with that number; the
-    response's snap_id is the full id."""
+    response's snap_id is the full id. A wellness turn reads hidden unless the
+    request carries the owner's phone's proof (_fossil_reader)."""
+    reader, refusal = _fossil_reader(request, raw)
+    if refusal is not None:
+        return refusal
     try:
         from Orchestrator.fossils import get_snapshot_by_id, resolve_snapshot_id
         resolved = resolve_snapshot_id(snap_id)
-        result = get_snapshot_by_id(resolved) if resolved else None
+        with wellness_redact.reading_as(reader):
+            result = get_snapshot_by_id(resolved) if resolved else None
         if result is None:
             raise HTTPException(status_code=404, detail=f"Snapshot {snap_id} not found")
         return result
