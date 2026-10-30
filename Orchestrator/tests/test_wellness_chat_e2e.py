@@ -248,6 +248,77 @@ def test_post_chat_hands_a_verified_request_to_its_worker_as_a_grant(enrolled_ph
     assert turn.surface == "portal" and not turn.credential_ok
 
 
+def test_a_signed_post_chat_turn_tells_its_client_it_used_health_data(enrolled_phone,
+                                                                      monkeypatch):
+    """POST /chat (the Portal with streaming off) signed by the phone: the
+    worker runs the turn under the grant, wellness_summary delivers, and
+    result_data names the turn's refs and the frame a stream would have sent
+    for that delivery, with the reply masked. The same body unsigned delivers
+    nothing and its result_data has none of the three keys."""
+    import asyncio
+
+    import Orchestrator.routes.chat_routes as cr
+    import Orchestrator.tasks as tasks
+    from Orchestrator.models import Task, TaskStatus, TaskType, task_db
+    from Orchestrator.providers import tool_dispatch as td
+    from Orchestrator.routes.chat.providers import _tool_context
+    from Orchestrator.volume import now_utc_iso
+    created, frames = [], []
+
+    class _Task:
+        task_id, status = "task-queued", "pending"
+
+    def fake_create_task(task_type, operator=None, result_data=None, **kw):
+        created.append(copy.deepcopy(result_data))
+        return _Task()
+
+    def fake_call_custom(messages, model, operator="?"):
+        out = asyncio.run(td.dispatch_tool(
+            "wellness_summary", {"period": "custom", "start": DAY, "end": DAY},
+            _tool_context(OPERATOR, "stream_custom")))
+        frames.extend(e["data"] for e in out.events if e.get("type") == "wellness_used")
+        m = DISPLAY_RE.search(out.result or "")
+        text = f"Your sleeping heart rate was {m.group(1)}." if m else "No answer."
+        return text, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, "", []
+
+    monkeypatch.setattr(cr, "create_task", fake_create_task)
+    monkeypatch.setattr(cr, "call_custom", fake_call_custom)
+    monkeypatch.setattr(tasks, "AUTO_ENABLE", False)
+    monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
+    monkeypatch.setattr(tasks, "perform_mint", lambda *a, **k: {"snap_id": "SNAP-TEST"})
+    monkeypatch.setattr(tasks, "save_operator_state", lambda *a, **k: None)
+    client, state = enrolled_phone["client"], enrolled_phone["state"].load()
+    body = json.dumps({"messages": [{"role": "user", "content": QUESTION}], "provider": "custom",
+                       "model": LAN_MODEL, "operator": OPERATOR}).encode()
+    signed = SIM.origin_header(state["key"], state["enrollment_id"], "POST", "/chat", body)
+    for headers in ({"X-BlackBox-Origin": signed}, {}):
+        r = client.post("/chat", content=body, headers={"Content-Type": "application/json",
+                                                        **headers})
+        assert r.status_code == 200
+
+    def run(inp):
+        task = Task(task_id=f"wns-{len(frames)}-{now_utc_iso()}", task_type=TaskType.CHAT,
+                    status=TaskStatus.PENDING, created_at=now_utc_iso(),
+                    updated_at=now_utc_iso(), operator=OPERATOR, result_data=inp)
+        task_db.save_task(task)
+        tasks.process_chat_task(task)
+        final = task_db.get_task(task.task_id)
+        assert final.status == TaskStatus.COMPLETED, final.result_data
+        return final.result_data
+
+    granted, unsigned = created
+    data = run(granted)
+    [row] = _store().disclosures()
+    assert data["wellness_refs"] == [row["ref"]] and data["wellness_ref"] == row["ref"]
+    assert data["wellness_used"] == frames[-1] and frames[-1]["ref"] == row["ref"]
+    assert data["wellness_used"]["provider_label"] == "lan-box"
+    assert data["ui_reply"] == "Your sleeping heart rate was [·]."
+    assert not sentinel_hits(json.dumps(data))
+    data = run(unsigned)
+    assert not {"wellness_used", "wellness_refs", "wellness_ref"} & set(data)
+    assert len(_store().disclosures()) == 1 and len(frames) == 1
+
+
 def test_the_gate_never_runs_on_the_event_loop(enrolled_phone, monkeypatch):
     """The gate reads the switch, the enrollment and the model-server registry,
     and resolves a model server's host name; the executor's refusal check and

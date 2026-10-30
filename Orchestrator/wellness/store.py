@@ -909,8 +909,10 @@ class Store:
         return self._delivery(row) if row else None
 
     def deliveries_for_turn(self, turn_key: str) -> List[dict]:
+        """The turn's rows, oldest first (two in one millisecond in the order
+        they were written)."""
         with self.read() as conn:
-            rows = conn.execute("SELECT * FROM delivered WHERE turn_key=? ORDER BY ts",
+            rows = conn.execute("SELECT * FROM delivered WHERE turn_key=? ORDER BY ts, rowid",
                                 (turn_key,)).fetchall()
         return [self._delivery(r) for r in rows]
 

@@ -2744,6 +2744,16 @@ def process_chat_task(task: Task):
             # the scheduler's evidence for a failed/partial run. [] when none.
             "tool_outcomes": list(_tool_log),
         }
+        # M7: a turn this task's own key delivered health data on (an exact
+        # carry) tells the client so, as the stream's wellness_used frame does:
+        # wellness_used (that frame's data for the newest delivery),
+        # wellness_refs and wellness_ref, so the footer and Show numbers render
+        # alike on both paths. Refs, category names and a time only, never a
+        # value; the scheduler copies only the reply text and tool_outcomes
+        # out of result_data, so a cron row gains nothing. Absent otherwise:
+        # every other turn's result_data is byte-identical.
+        if wellness_carry is not None and wellness_carry.exact:
+            result_data.update(wellness_access.used_fields(wellness_carry.rows, _stamped))
 
         update_task(task.task_id,
                    status=TaskStatus.COMPLETED,

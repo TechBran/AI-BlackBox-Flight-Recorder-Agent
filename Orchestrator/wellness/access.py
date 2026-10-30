@@ -29,6 +29,12 @@ WELLNESS RULES and the operator's instinct prompt when a wellness tool is
 offered, the one "not shared with this AI" line when only the provider stands
 in the way, nothing otherwise.
 
+The Signal frame. used_frame() builds the UI-only wellness_used data (ref,
+categories, as_of, destination); a stream sends it per answering tool call
+(signal_event), the non-stream worker puts the turn's newest one in
+result_data with the turn's refs (used_fields), so both clients render the
+same footer. Never a value, never a prompt, never the ledger.
+
 Stamping. request_turn() / task_turn() build the WellnessTurn an entry point
 stamps; origin_from_request() verifies an X-BlackBox-Origin header (the
 enrolled phone's device key); issue_grant() / redeem_grant() carry a verified
@@ -583,15 +589,17 @@ def _result(ok: bool, env: dict, text: Optional[str] = None):
 
 # ------------------------------------------------------------------ the Signal frame
 
-def signal_event(tool_result) -> Optional[dict]:
-    """The UI-only {"type": "wellness_used"} event for a wellness tool that
-    answered on a stream: ref, categories, as_of and who it was shared with.
-    It never reaches a prompt or the ledger (the system_activity precedent)."""
-    env = getattr(tool_result, "data", None)
-    if not getattr(tool_result, "success", False) or not isinstance(env, dict) \
-            or not env.get("ok") or not env.get("ref"):
-        return None
-    t = turn_mod.current()
+MAX_TURN_REFS = 8                           # refs a non-stream result names (used_fields)
+
+
+def used_frame(env: dict, t: Optional[turn_mod.WellnessTurn]) -> dict:
+    """The data of the UI-only wellness_used frame for one delivered answer
+    `env` on turn `t`: {ref, categories, as_of, provider, provider_label}
+    ("Health data used · sleep, heart · as of 07:10 · shared with
+    Anthropic"). No value: a ref, category names, a time, a destination.
+    The stream sends it as an SSE event (signal_event), the non-stream
+    worker puts it in result_data (used_fields): one builder, so the two
+    clients render the same footer."""
     provider = t.provider if t is not None else None
     label = None
     try:
@@ -600,11 +608,54 @@ def signal_event(tool_result) -> Optional[dict]:
         provider, label = dest.id or provider, dest.label
     except Exception:  # noqa: BLE001 - the frame is decoration
         pass
-    return {"type": "wellness_used",
-            "data": {"ref": env.get("ref"),
-                     "categories": [c for c in env.get("categories") or [] if isinstance(c, str)],
-                     "as_of": env.get("as_of"), "provider": provider,
-                     "provider_label": label}}
+    return {"ref": env.get("ref"),
+            "categories": [c for c in env.get("categories") or [] if isinstance(c, str)],
+            "as_of": env.get("as_of"), "provider": provider, "provider_label": label}
+
+
+def signal_event(tool_result) -> Optional[dict]:
+    """The UI-only {"type": "wellness_used"} event for a wellness tool that
+    answered on a stream: ref, categories, as_of and who it was shared with.
+    It never reaches a prompt or the ledger (the system_activity precedent)."""
+    env = getattr(tool_result, "data", None)
+    if not getattr(tool_result, "success", False) or not isinstance(env, dict) \
+            or not env.get("ok") or not env.get("ref"):
+        return None
+    return {"type": "wellness_used", "data": used_frame(env, turn_mod.current())}
+
+
+def _delivered_env(row: dict) -> dict:
+    """A delivered row as the answer the tool returned: its stored payload
+    (recorded before access.finish names the categories, unless the api did)
+    with the categories the row recorded, in catalog order."""
+    env = dict(row.get("payload") or {}) if isinstance(row.get("payload"), dict) else {}
+    env["ref"] = row.get("ref")
+    cats = env.get("categories")
+    if not (isinstance(cats, list) and all(isinstance(c, str) for c in cats)):
+        recorded = set(row.get("categories") or [])
+        env["categories"] = [c for c in catalog.CATEGORIES if c in recorded]
+    return env
+
+
+def used_fields(rows: Sequence[dict], t: Optional[turn_mod.WellnessTurn]) -> dict:
+    """What a non-stream turn's result_data gains when the turn delivered
+    (`rows`: its delivered rows, oldest first, store.deliveries_for_turn):
+    `wellness_used`, the frame of its newest delivery (used_frame, the same
+    object the stream's wellness_used event carries), `wellness_refs`, every
+    ref of the turn (oldest first, at most MAX_TURN_REFS) and `wellness_ref`,
+    the first. {} for a turn nothing was delivered on, so its result_data is
+    byte-identical to before. Never raises (the turn is already recorded)."""
+    try:
+        rows = [r for r in rows or () if isinstance(r, dict) and isinstance(r.get("ref"), str)
+                and r["ref"]]
+        if not rows:
+            return {}
+        refs = list(dict.fromkeys(r["ref"] for r in rows))[:MAX_TURN_REFS]
+        return {"wellness_used": used_frame(_delivered_env(rows[-1]), t),
+                "wellness_refs": refs, "wellness_ref": refs[0]}
+    except Exception as e:  # noqa: BLE001 - the footer is decoration; the class only
+        print(f"[WELLNESS] used fields failed ({type(e).__name__})")
+        return {}
 
 
 # ------------------------------------------------------------------ rendering
