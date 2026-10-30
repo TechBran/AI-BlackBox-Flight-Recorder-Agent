@@ -27,9 +27,11 @@ import okhttp3.OkHttpClient
  * holds its slot for the whole turn (SSEClient reads it inside onResponse), and an open
  * WebSocket holds one of [MAX_REQUESTS] (not of the per-host limit) while it is open.
  *
- * (M7) [base] carries the Health chat-signing interceptor ([WellnessChatSigning]), so every
- * derived client signs the allow-listed chat and health-read requests of the enrolled phone
- * (spec §6.1 "Chat") and leaves every other request exactly as it was.
+ * (M7) [base] carries the Health chat-signing interceptor ([WellnessChatSigning]). It signs
+ * only a request that opts in (the native chat's turns and Show numbers' read, spec §6.1
+ * "Chat"), on an allow-listed path, to the paired box, from the enrolled phone; every other
+ * request of every derived client (the WebView's downloads, the overlay) goes out exactly as
+ * it was.
  */
 object HttpClients {
     /** Concurrent async calls to one host (the box) across the whole app. */

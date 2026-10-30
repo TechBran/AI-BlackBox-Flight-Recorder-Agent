@@ -139,7 +139,7 @@ class WellnessRefSheetTest {
             val k = OriginSigner.encodeKey(ByteArray(32) { 9 })
             val facts = WellnessSigningInterceptor.Facts(
                 WellnessBindingRecord(WellnessFixtures.OPERATOR, "en_0f1c0f1c", 1, k),
-                WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire))
+                WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire), server.url("").toString())
             val client = OkHttpClient.Builder().addInterceptor(WellnessSigningInterceptor({ facts })).build()
             val api = BlackBoxApi(server.url("").toString().trimEnd('/'), client)
 

@@ -1,7 +1,10 @@
 package com.aiblackbox.portal.data.wellness
 
+import com.aiblackbox.portal.PortalWebGuard
 import com.aiblackbox.portal.data.api.BlackBoxApi
 import com.aiblackbox.portal.data.api.HttpClients
+import com.aiblackbox.portal.data.api.SSEClient
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -30,9 +33,10 @@ import java.util.concurrent.TimeUnit
 
 /**
  * The chat-signing interceptor over a real HTTP hop to a stand-in box: an allow-listed
- * request of the enrolled operator carries X-BlackBox-Origin computed over the exact bytes the
- * box receives (the box's own golden vectors reproduce when ts and nonce are pinned);
- * everything else arrives exactly as a client without the interceptor sends it.
+ * request of the enrolled operator that opts in, to the paired box, carries X-BlackBox-Origin
+ * computed over the exact bytes the box receives (the box's own golden vectors reproduce when
+ * ts and nonce are pinned); everything else (no opt-in, another host, the WebView's download
+ * client, the overlay's /chat) arrives exactly as a client without the interceptor sends it.
  */
 class WellnessSigningInterceptorTest {
 
@@ -46,10 +50,10 @@ class WellnessSigningInterceptorTest {
 
     private fun facts(enr: String, k: String, state: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.ACTIVE) =
         WellnessSigningInterceptor.Facts(WellnessBindingRecord(operator = op, enrollmentId = enr, epoch = 1, k = k),
-            WellnessSyncState(state = state.wire))
+            WellnessSyncState(state = state.wire), server.url("").toString())
 
     private val k = OriginSigner.encodeKey(ByteArray(32) { (it * 7 + 3).toByte() })
-    private val enrolled = facts("en_0f1c0f1c", k)
+    private val enrolled by lazy { facts("en_0f1c0f1c", k) }
 
     private fun client(
         f: WellnessSigningInterceptor.Facts? = enrolled,
@@ -66,11 +70,14 @@ class WellnessSigningInterceptorTest {
         return server.takeRequest(5, TimeUnit.SECONDS)!!
     }
 
-    private fun post(path: String, body: String) =
+    /** A request as the native chat builds it: opted in to the credential. */
+    private fun post(path: String, body: String, optIn: Boolean = true) =
         Request.Builder().url(server.url(path)).header("X-BlackBox-Client", "native-android/1.0")
+            .let { if (optIn) WellnessSigningInterceptor.optIn(it) else it }
             .post(body.toRequestBody(json)).build()
 
-    private fun get(pathWithQuery: String) = Request.Builder().url(server.url(pathWithQuery)).get().build()
+    private fun get(pathWithQuery: String, optIn: Boolean = true) = Request.Builder().url(server.url(pathWithQuery))
+        .let { if (optIn) WellnessSigningInterceptor.optIn(it) else it }.get().build()
 
     private fun fields(header: String): Map<String, String> =
         header.removePrefix("v1;").split(';').associate { it.substringBefore('=') to it.substringAfter('=') }
@@ -162,10 +169,10 @@ class WellnessSigningInterceptorTest {
         val r = post("/chat/stream", chatBody())
         val today = plain(r)
         assertUntouched(send(client(f = null), r), today)
-        assertUntouched(send(client(f = WellnessSigningInterceptor.Facts(null, WellnessSyncState())), r), today)
+        assertUntouched(send(client(f = WellnessSigningInterceptor.Facts(null, WellnessSyncState(), server.url("").toString())), r), today)
         assertUntouched(send(client(f = facts("en_0f1c0f1c", k, WellnessRules.EnrollmentState.REVOKED)), r), today)
         assertUntouched(send(client(f = facts("en_0f1c0f1c", k, WellnessRules.EnrollmentState.NOT_SET_UP)), r), today)
-        val refused = WellnessSigningInterceptor.Facts(enrolled.binding, enrolled.state!!.copy(needsReconnect = true))
+        val refused = WellnessSigningInterceptor.Facts(enrolled.binding, enrolled.state!!.copy(needsReconnect = true), enrolled.boxOrigin)
         assertUntouched(send(client(f = refused), r), today)
     }
 
@@ -203,6 +210,52 @@ class WellnessSigningInterceptorTest {
         assertTrue(chunked.body!!.toByteArray().contentEquals(bytes))
     }
 
+    // ── only the surfaces that opt in, and only to the paired box ─────────────────────────
+
+    @Test
+    fun `a request that does not opt in goes out unsigned and byte-identical, the overlay's chat among them`() {
+        for (r in listOf(post("/chat", chatBody(), optIn = false), post("/chat/stream", chatBody(), optIn = false),
+                get(WellnessChatRules.refPath("w-20261028-ab12", op), optIn = false),
+                get("/wellness/status?operator=$op", optIn = false))) {
+            assertUntouched(send(client(), r), plain(r))
+        }
+    }
+
+    @Test
+    fun `an opted-in request to a host other than the paired box is never signed`() {
+        val other = MockWebServer().also { it.start() }
+        try {
+            val f = WellnessSigningInterceptor.Facts(enrolled.binding, enrolled.state, other.url("").toString())
+            val r = post("/chat/stream", chatBody())
+            assertUntouched(send(client(f = f), r), plain(r))
+            val unpaired = WellnessSigningInterceptor.Facts(enrolled.binding, enrolled.state, null)
+            assertUntouched(send(client(f = unpaired), r), plain(r))
+            assertTrue(WellnessChatRules.sameOrigin("http://box.invalid:9091/chat", "http://box.invalid:9091/"))
+            assertTrue(!WellnessChatRules.sameOrigin("http://box.invalid:9092/chat", "http://box.invalid:9091"))
+            assertTrue(!WellnessChatRules.sameOrigin("https://box.invalid:9091/chat", "http://box.invalid:9091"))
+            assertTrue(!WellnessChatRules.sameOrigin("http://box.invalid.evil:9091/chat", "http://box.invalid:9091"))
+            assertTrue(!WellnessChatRules.sameOrigin("not a url", "http://box.invalid:9091"))
+        } finally {
+            other.close()
+        }
+    }
+
+    @Test
+    fun `the WebView's download client never signs a health read the page picks`() {
+        WellnessChatSigning.installForTest { enrolled }
+        try {
+            val origin = server.url("").toString().trimEnd('/')
+            val download = PortalWebGuard.pairedOnlyDownloadClient(PortalWebGuard.originOf(origin))
+            assertTrue("it is derived from the base", WellnessChatSigning.interceptor in download.interceptors)
+            for (path in listOf(WellnessChatRules.refPath("w-20261028-ab12", op), "/wellness/status?operator=$op",
+                    "/wellness/disclosures?operator=$op")) {
+                assertNull(path, send(download, Request.Builder().url(origin + path).build()).headers[OriginSigner.HEADER])
+            }
+        } finally {
+            WellnessChatSigning.installForTest(null)
+        }
+    }
+
     // ── the app's clients ──────────────────────────────────────────────────────────────────
 
     @Test
@@ -215,11 +268,29 @@ class WellnessSigningInterceptorTest {
     }
 
     @Test
-    fun `a BlackBoxApi call goes through the interceptor end to end`() = runBlocking {
-        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+    fun `a BlackBoxApi call that opts in goes through the interceptor end to end, one that does not stays plain`() = runBlocking {
         val api = BlackBoxApi(server.url("").toString().trimEnd('/'), client())
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        api.post("/chat", chatBody(), signHealth = true)
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER]!!
+            .startsWith("v1;enr=en_0f1c0f1c;ts=1793000000;"))
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
         api.post("/chat", chatBody())
-        val req = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertTrue(req.headers[OriginSigner.HEADER]!!.startsWith("v1;enr=en_0f1c0f1c;ts=1793000000;"))
+        assertNull(server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER])
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        api.get(WellnessChatRules.refPath("w-20261028-ab12", op))
+        assertNull(server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER])
+    }
+
+    @Test
+    fun `the native chat's stream asks for the credential, a bare SSE stream does not`() = runBlocking {
+        val api = BlackBoxApi(server.url("").toString().trimEnd('/'), client())
+        val done = "event: done\ndata: {}\n\n"
+        server.enqueue(MockResponse.Builder().code(200).body(done).build())
+        com.aiblackbox.portal.data.repository.ChatRepository(api).sendStream("How did I sleep last night?", emptyList(), op).toList()
+        assertTrue(server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER] != null)
+        server.enqueue(MockResponse.Builder().code(200).body(done).build())
+        SSEClient(api).stream("/chat/stream", chatBody()).toList()
+        assertNull(server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER])
     }
 }

@@ -34,10 +34,13 @@ class WellnessSigningLogTest {
     private val server = MockWebServer()
     private val op = WellnessFixtures.OPERATOR
     private val k = OriginSigner.encodeKey(ByteArray(32) { (it * 11 + 5).toByte() })
-    private val facts = WellnessSigningInterceptor.Facts(
-        WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = k),
-        WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire),
-    )
+    private val facts by lazy {
+        WellnessSigningInterceptor.Facts(
+            WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = k),
+            WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire),
+            server.url("").toString(),
+        )
+    }
     private val client = OkHttpClient.Builder().addInterceptor(WellnessSigningInterceptor({ facts })).build()
 
     @Before fun setUp() {
@@ -60,7 +63,7 @@ class WellnessSigningLogTest {
             .build())
         val api = BlackBoxApi(server.url("").toString().trimEnd('/'), client)
         val events = SSEClient(api).stream("/chat/stream",
-            """{"messages":[{"role":"user","content":"$prompt"}],"operator":"$op"}""").toList()
+            """{"messages":[{"role":"user","content":"$prompt"}],"operator":"$op"}""", signHealth = true).toList()
         assertTrue(events.any { it.event == "wellness_used" })
         val header = server.takeRequest(5, TimeUnit.SECONDS)!!.headers[OriginSigner.HEADER]!!
         val sig = header.substringAfter("sig=")

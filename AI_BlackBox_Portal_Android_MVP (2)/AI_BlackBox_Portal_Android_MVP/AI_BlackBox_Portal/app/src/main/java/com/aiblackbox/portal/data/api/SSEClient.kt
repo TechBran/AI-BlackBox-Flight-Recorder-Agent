@@ -114,12 +114,13 @@ class SSEClient(private val api: BlackBoxApi) {
         }
     }
 
-    fun stream(path: String, body: String): Flow<SSEEvent> = callbackFlow {
+    /** [signHealth]: ask for the Health origin proof (the native chat's /chat/stream; see BlackBoxApi.streamPost). */
+    fun stream(path: String, body: String, signHealth: Boolean = false): Flow<SSEEvent> = callbackFlow {
         Log.d(TAG, "Starting SSE stream POST to $path")
         // Lengths only (M7): the body is the person's prompt and the stream their reply, which
         // can quote their health numbers; logcat keeps neither.
         Log.d(TAG, "Request body: ${body.length} chars")
-        val call = api.streamPost(path, body)
+        val call = api.streamPost(path, body, signHealth)
         call.enqueue(sseCallback(this::trySend, this::close))
         awaitClose {
             Log.d(TAG, "SSE flow cancelled, cancelling HTTP call")

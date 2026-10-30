@@ -19,6 +19,12 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 
+/**
+ * The native chat's calls to the box. Its turns (/chat/stream, /chat) ask for the Health origin
+ * proof (signHealth): on the enrolled phone, for the enrolled operator, they are a credentialed
+ * surface (spec §6.1 "Chat"), and this chat shows a health turn as one (the footer, Show
+ * numbers). The interceptor decides; for every other phone and operator nothing changes.
+ */
 class ChatRepository(private val api: BlackBoxApi) {
 
     private val sseClient = SSEClient(api)
@@ -55,7 +61,7 @@ class ChatRepository(private val api: BlackBoxApi) {
             location = location
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
-        return sseClient.stream("/chat/stream", body)
+        return sseClient.stream("/chat/stream", body, signHealth = true)
     }
 
     /**
@@ -90,7 +96,7 @@ class ChatRepository(private val api: BlackBoxApi) {
             location = location
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
-        return sseClient.stream("/chat/stream", body)
+        return sseClient.stream("/chat/stream", body, signHealth = true)
     }
 
     /**
@@ -114,7 +120,7 @@ class ChatRepository(private val api: BlackBoxApi) {
             model = model
         )
         val body = api.json.encodeToString(StreamRequest.serializer(), request)
-        val response = api.post("/chat", body)
+        val response = api.post("/chat", body, signHealth = true)
         return api.json.decodeFromString(TaskResponse.serializer(), response)
     }
 

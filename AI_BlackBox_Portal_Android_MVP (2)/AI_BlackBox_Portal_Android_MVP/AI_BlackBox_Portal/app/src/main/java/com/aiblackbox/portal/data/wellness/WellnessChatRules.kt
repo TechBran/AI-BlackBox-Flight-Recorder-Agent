@@ -111,6 +111,17 @@ object WellnessChatRules {
         else -> SigningDecision.Sign(binding.enrollmentId, binding.k)
     }
 
+    /**
+     * Is [url] on the box at [boxOrigin] (same scheme, host and port)? False when either does
+     * not parse or [boxOrigin] is null (unpaired): a request to any other host never carries a
+     * proof, which would be live for 120 s at the box that enrolled this phone.
+     */
+    fun sameOrigin(url: String?, boxOrigin: String?): Boolean {
+        val a = url?.toHttpUrlOrNull() ?: return false
+        val b = boxOrigin?.toHttpUrlOrNull() ?: return false
+        return a.scheme == b.scheme && a.host == b.host && a.port == b.port
+    }
+
     private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**

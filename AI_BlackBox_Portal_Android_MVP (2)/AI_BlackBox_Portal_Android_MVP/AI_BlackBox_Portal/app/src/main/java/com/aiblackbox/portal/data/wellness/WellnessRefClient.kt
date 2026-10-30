@@ -6,8 +6,8 @@ import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Show numbers' one network step: `GET /wellness/ref/{ref}?operator=<op>` for each ref of a
- * masked turn, through [api] (its client derives from HttpClients.base, whose
- * [WellnessSigningInterceptor] signs the call when this phone is [operator]'s enrolled source;
+ * masked turn, through [api], opted in to [WellnessSigningInterceptor] (its client derives
+ * from HttpClients.base), which signs the call when this phone is [operator]'s enrolled source;
  * unsigned, the box answers 401 and the sheet says "Not available").
  *
  * The answers go straight into [ShowNumbersResult] and nowhere else: nothing is logged,
@@ -20,7 +20,7 @@ object WellnessRefClient {
         if (wanted.isEmpty() || operator.isBlank()) return ShowNumbersResult.NotAvailable
         val replies = wanted.map { ref ->
             try {
-                200 to api.get(WellnessChatRules.refPath(ref, operator))
+                200 to api.get(WellnessChatRules.refPath(ref, operator), signHealth = true)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: ApiHttpException) {

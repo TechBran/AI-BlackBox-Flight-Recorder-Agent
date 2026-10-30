@@ -21,7 +21,8 @@ class WellnessBridgeSignTest {
 
     private fun install(state: WellnessRules.EnrollmentState = WellnessRules.EnrollmentState.ACTIVE) =
         WellnessChatSigning.installForTest {
-            WellnessSigningInterceptor.Facts(WellnessBindingRecord(op, "en_0f1c0f1c", 1, k), WellnessSyncState(state = state.wire))
+            WellnessSigningInterceptor.Facts(WellnessBindingRecord(op, "en_0f1c0f1c", 1, k), WellnessSyncState(state = state.wire),
+                "http://box.invalid:9091")
         }
 
     @After fun tearDown() = WellnessChatSigning.installForTest(null)

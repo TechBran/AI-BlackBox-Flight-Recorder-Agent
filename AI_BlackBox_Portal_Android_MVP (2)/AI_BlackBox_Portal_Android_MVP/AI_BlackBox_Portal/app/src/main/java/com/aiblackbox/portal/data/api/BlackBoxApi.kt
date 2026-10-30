@@ -1,6 +1,7 @@
 package com.aiblackbox.portal.data.api
 
 import android.util.Log
+import com.aiblackbox.portal.data.wellness.WellnessSigningInterceptor
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -111,10 +112,16 @@ class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    private fun buildRequest(path: String): Request.Builder =
+    /**
+     * [signHealth] (M7): the request asks for the Health origin proof, which the base client's
+     * WellnessSigningInterceptor adds only for the enrolled phone's allow-listed chat and
+     * health reads (the native chat and Show numbers pass it; nothing else does).
+     */
+    private fun buildRequest(path: String, signHealth: Boolean = false): Request.Builder =
         Request.Builder()
             .url("$baseUrl$path")
             .header("X-BlackBox-Client", "native-android/1.0")
+            .let { if (signHealth) WellnessSigningInterceptor.optIn(it) else it }
 
     /**
      * Build an [IOException] for a non-2xx response, preferring the backend's
@@ -151,16 +158,16 @@ class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.
         return ApiHttpException(detail?.takeIf { it.isNotBlank() } ?: fallback, response.code)
     }
 
-    suspend fun get(path: String): String {
-        val request = buildRequest(path).get().build()
+    suspend fun get(path: String, signHealth: Boolean = false): String {
+        val request = buildRequest(path, signHealth).get().build()
         return client.newCall(request).await().use { response ->
             if (!response.isSuccessful) throw errorFor(response)
             response.body?.string() ?: ""
         }
     }
 
-    suspend fun post(path: String, body: String): String {
-        val request = buildRequest(path)
+    suspend fun post(path: String, body: String, signHealth: Boolean = false): String {
+        val request = buildRequest(path, signHealth)
             .post(body.toRequestBody(jsonMediaType))
             .build()
         return client.newCall(request).await().use { response ->
@@ -245,9 +252,9 @@ class BlackBoxApi(private val baseUrl: String, base: OkHttpClient = HttpClients.
         }
     }
 
-    fun streamPost(path: String, body: String): Call {
+    fun streamPost(path: String, body: String, signHealth: Boolean = false): Call {
         Log.d(TAG, "streamPost: ${baseUrl}${path}")
-        val request = buildRequest(path)
+        val request = buildRequest(path, signHealth)
             .post(body.toRequestBody(jsonMediaType))
             .build()
         return streamClient.newCall(request)

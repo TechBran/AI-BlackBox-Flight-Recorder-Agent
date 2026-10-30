@@ -108,6 +108,7 @@ class WellnessChatTurnTest {
     private fun enrolled() = WellnessSigningInterceptor.Facts(
         WellnessBindingRecord(operator = op, enrollmentId = "en_0f1c0f1c", epoch = 1, k = OriginSigner.encodeKey(key)),
         WellnessSyncState(state = WellnessRules.EnrollmentState.ACTIVE.wire, sourceLabel = "Test phone (SM-TEST)"),
+        server.url("").toString(),
     )
 
     private fun runTurn(): ChatViewModel {
@@ -170,7 +171,7 @@ class WellnessChatTurnTest {
 
     @Test
     fun `a phone that is no health source sends the same turn unsigned, and still echoes the key`() {
-        WellnessChatSigning.installForTest { WellnessSigningInterceptor.Facts(null, null) }
+        WellnessChatSigning.installForTest { WellnessSigningInterceptor.Facts(null, null, server.url("").toString()) }
         runTurn()
         assertNull(requests.first { it.path == "/chat/stream" }.origin)
         val save = Json.parseToJsonElement(requests.first { it.path == "/chat/save" }.body.toString(Charsets.UTF_8)).jsonObject
