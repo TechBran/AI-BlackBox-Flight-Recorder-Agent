@@ -109,6 +109,7 @@ class IngestClient(
         const val DISCONNECT = "/wellness/disconnect"
         const val ERASE = "/wellness/erase"
         const val DISCLOSURES = "/wellness/disclosures"
+        const val REPLACE_APPROVE = "/wellness/replace-approve"
         const val PRIVACY_POLICY = "/wellness/privacy-policy"
         private const val MAX_REPLY_CHARS = 1_000_000
 

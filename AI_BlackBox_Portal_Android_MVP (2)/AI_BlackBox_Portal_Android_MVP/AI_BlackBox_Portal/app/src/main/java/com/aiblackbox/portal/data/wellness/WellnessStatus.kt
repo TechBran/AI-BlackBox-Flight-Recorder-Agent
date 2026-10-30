@@ -38,6 +38,8 @@ data class WellnessBoxStatus(
     val outboxHint: String? = null,
     val policyVersion: String? = null,
     val disclosuresCount: Int? = null,
+    /** Another phone of this operator waits for THIS phone's approval to become the source (signed status only). */
+    val replacePending: Boolean? = null,
 ) {
     /** The settings view of a credentialed status, falling back to the catalog defaults. */
     fun settings(): WellnessRules.Settings = WellnessRules.Settings(
@@ -94,8 +96,15 @@ object WellnessStatusParser {
             outboxHint = sync?.get("outbox_hint")?.let { if (it is JsonPrimitive) it.contentOrNull else it.toString() },
             policyVersion = obj.str("policy_version"),
             disclosuresCount = obj["disclosures_count"]?.jsonPrimitive?.intOrNull,
+            replacePending = (obj["replace_pending"] as? JsonPrimitive)?.booleanOrNull,
         )
     }
+
+    /** The `POST /wellness/replace-approve` body (signed by the OLD phone): `{operator, approve}`. */
+    fun replaceApproveBody(operator: String, approve: Boolean): String = buildJsonObject {
+        put("operator", JsonPrimitive(operator))
+        put("approve", JsonPrimitive(approve))
+    }.toString()
 
     /** `GET /wellness/disclosures`: a list, bare or under "disclosures"/"items", newest first. */
     fun parseDisclosures(body: String): List<WellnessDisclosure> {

@@ -161,6 +161,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 st.copy(
                     categories = box.categories.mapKeys { it.key.wire }.mapValues { it.value.wire },
                     state = box.state.wire,
+                    sourceLabel = box.sourceLabel ?: st.sourceLabel,
                 )
             }
         }
@@ -192,11 +193,13 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 samsungWritesToHc = probe?.samsungWritesToHc ?: true,
                 batteryExempt = batteryExempt() ?: true,
                 periodicOverdue = WellnessRules.periodicOverdue(st.lastPeriodicRunMs, st.intervalMin, System.currentTimeMillis()),
+                replacePending = WellnessRules.shownState(box?.state, box?.credentialed == true, st.enrollmentState()) ==
+                    WellnessRules.EnrollmentState.REPLACE_PENDING,
             ),
         )
         val troubleCodes = WellnessRules.mergeTroubles(box?.troubles.orEmpty(), if (record != null) local else
             local.filter { it == "hc_unavailable" || it == "hc_needs_update" })
-        val boxState = box?.state ?: st.enrollmentState()
+        val boxState = WellnessRules.shownState(box?.state, box?.credentialed == true, st.enrollmentState())
         _state.update { s ->
             s.copy(
                 loading = false,
@@ -327,7 +330,15 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             assignToMe = s.setup.assignToMe,
             replace = s.setup.replace,
         )
-        if (outcome is WellnessEnrollment.Outcome.Enrolled) {
+        if (outcome is WellnessEnrollment.Outcome.Enrolled && outcome.awaitsApproval) {
+            // A replacement of a source that is still online: the box takes nothing from this
+            // phone until the old one approves (its settings, the AI choices among them, move
+            // with the approval), so no settings call. The periodic sync reads the signed
+            // status and finds the enrollment active once it is approved.
+            outcome.syncIntervalMin?.let { m -> writeState { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
+            writeState { it.copy(state = WellnessRules.EnrollmentState.REPLACE_PENDING.wire) }
+            WellnessScheduler.onEnrolled(app)
+        } else if (outcome is WellnessEnrollment.Outcome.Enrolled) {
             outcome.syncIntervalMin?.let { m -> writeState { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
             // Providers and local-only are settings: one signed PUT, now that this phone holds the key.
             val wanted = WellnessRules.Settings(
@@ -506,6 +517,31 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             say(if (keepHistory == true) "Disconnected. Your stored history stays on the box."
                 else "Disconnected and your stored health history was deleted.")
         }
+    }
+
+    /**
+     * The OLD phone's answer to a replacement (spec §3.1): another phone of this operator asked
+     * to become the health source while this one is online, and the box waits for this tap.
+     * Approve moves Health (history, settings) to the new phone and the box revokes this
+     * phone's key, so Health is forgotten here; decline keeps this phone the source.
+     */
+    fun answerReplacement(approve: Boolean) = viewModelScope.launch {
+        val record = withContext(Dispatchers.IO) { binding.current() } ?: run { say("Health isn't set up on this phone."); return@launch }
+        val client = client() ?: run { say("Couldn't reach your box."); return@launch }
+        _state.update { it.copy(busy = true) }
+        val body = WellnessStatusParser.replaceApproveBody(record.operator, approve)
+        var reply = client.action(IngestClient.REPLACE_APPROVE, body, binding.signer())
+        // As for a narrowing: one retry after a 401 tells a drifted clock (just corrected
+        // from the refusal's Date header) from a key the box no longer accepts.
+        if (reply.status == 401) reply = client.action(IngestClient.REPLACE_APPROVE, body, binding.signer())
+        _state.update { it.copy(busy = false) }
+        val outcome = WellnessRules.replaceOutcome(reply.status, com.aiblackbox.portal.data.wellness.WellnessOutbox.parseError(reply.body), approve)
+        if (WellnessRules.replaceClearsHere(outcome)) {
+            WellnessScheduler.cancelAll(app)
+            withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
+        }
+        say(outcome.message)
+        refresh()
     }
 
     fun erase(typed: String) {

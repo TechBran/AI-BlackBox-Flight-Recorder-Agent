@@ -38,8 +38,17 @@ class WellnessEnrollment(
 ) {
 
     sealed class Outcome(val message: String) {
+        /**
+         * The box took this phone. [state] "replace_pending": it replaces a source that is still
+         * online, and the box waits for that phone's approval before it accepts anything from
+         * this one ([awaitsApproval]).
+         */
         class Enrolled(val enrollmentId: String, val epoch: Int, val state: String, val syncIntervalMin: Int?,
-                       val policyVersion: String?) : Outcome("This phone is now your health source.")
+                       val policyVersion: String?) : Outcome(
+            if (WellnessRules.awaitsApproval(state)) WellnessRules.AWAITING_APPROVAL_MESSAGE else WellnessRules.ENROLLED_MESSAGE,
+        ) {
+            val awaitsApproval: Boolean get() = WellnessRules.awaitsApproval(state)
+        }
         object OwnerMismatch : Outcome(
             "This phone belongs to another operator in Devices. Its owner (or the box owner) can reassign it.")
         object AlreadyEnrolled : Outcome(

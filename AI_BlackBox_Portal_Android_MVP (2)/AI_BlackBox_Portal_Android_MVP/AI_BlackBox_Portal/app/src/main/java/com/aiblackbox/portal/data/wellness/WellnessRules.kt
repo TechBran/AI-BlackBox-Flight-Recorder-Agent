@@ -23,6 +23,13 @@ object WellnessRules {
         NEEDS_ATTENTION("needs_attention"),
         OWNERSHIP_CHANGED("ownership_changed"),
         REVOKED("revoked"),
+        /**
+         * This phone asked to replace a health source that is still online: it holds a key,
+         * but the box waits for the OLD phone's approval (`POST /wellness/replace-approve`)
+         * before it accepts anything from it. The enroll answer's state; the box's status never
+         * says it (to anyone but the old phone, it is the old enrollment's state).
+         */
+        REPLACE_PENDING("replace_pending"),
         ;
 
         companion object {
@@ -51,7 +58,7 @@ object WellnessRules {
         // phone has already stopped, so it says so.
         held || state == EnrollmentState.PAUSED -> StatusChip.PAUSED
         state == EnrollmentState.NEEDS_ATTENTION || state == EnrollmentState.OWNERSHIP_CHANGED ||
-            state == EnrollmentState.STALE -> StatusChip.NEEDS_ATTENTION
+            state == EnrollmentState.STALE || state == EnrollmentState.REPLACE_PENDING -> StatusChip.NEEDS_ATTENTION
         troubles.isNotEmpty() -> StatusChip.NEEDS_ATTENTION
         else -> StatusChip.ACTIVE
     }
@@ -121,6 +128,9 @@ object WellnessRules {
             "samsung_not_writing" -> TroubleCard(code, "Samsung Health isn't sharing yet",
                 "In Samsung Health, Settings, Health Connect: allow Sleep, Heart rate, Steps, Exercise (and Blood pressure).",
                 TroubleFix.OPEN_SAMSUNG_HEALTH)
+            REPLACE_PENDING_TROUBLE -> TroubleCard(code, "Waiting for your other phone",
+                "On the phone that is your health source now, open BlackBox, Settings, Health and approve this one. " +
+                    "Until then the box takes nothing from this phone.", TroubleFix.NONE)
             else -> null
         }
     }
@@ -137,11 +147,16 @@ object WellnessRules {
         val samsungWritesToHc: Boolean = true,
         val batteryExempt: Boolean = true,
         val periodicOverdue: Boolean = false,
+        /** This phone's enrollment waits for the old phone's approval ([EnrollmentState.REPLACE_PENDING]). */
+        val replacePending: Boolean = false,
     )
+
+    const val REPLACE_PENDING_TROUBLE = "replace_pending"
 
     /** The phone's own trouble codes, in display order. */
     fun localTroubles(f: LocalFacts): List<String> {
         val out = mutableListOf<String>()
+        if (f.replacePending) out += REPLACE_PENDING_TROUBLE
         when (f.sdk) {
             HcSdkStatus.UNAVAILABLE -> out += "hc_unavailable"
             HcSdkStatus.NEEDS_UPDATE -> out += "hc_needs_update"
@@ -224,7 +239,10 @@ object WellnessRules {
      */
     fun shouldStartBackfill(done: Boolean, needsReconnect: Boolean, held: Boolean, state: EnrollmentState): Boolean =
         !done && !needsReconnect && !held && state != EnrollmentState.PAUSED &&
-            state != EnrollmentState.REVOKED && state != EnrollmentState.OWNERSHIP_CHANGED
+            state != EnrollmentState.REVOKED && state != EnrollmentState.OWNERSHIP_CHANGED &&
+            // Waiting for the old phone's approval: the box takes nothing yet, and a decline
+            // revokes this key. The import starts on the first app open after the approval.
+            state != EnrollmentState.REPLACE_PENDING
 
     /** What the collector does with the box's answer to its signed status read. */
     enum class StatusReaction {
@@ -269,6 +287,59 @@ object WellnessRules {
         401, 409, 410 -> NarrowingOutcome.KEY_REFUSED
         else -> NarrowingOutcome.UNCONFIRMED
     }
+
+    // ── moving Health to another phone (spec §3.1; `POST /wellness/replace-approve`) ──────
+
+    /**
+     * The OLD phone's approval card: another phone of this operator asked to become the
+     * health source while this one is online, and the box holds it until this phone answers
+     * (`replace_pending` in this phone's signed status; nobody else's status carries it).
+     */
+    fun showReplaceApproval(boundHere: Boolean, credentialed: Boolean, replacePending: Boolean?): Boolean =
+        boundHere && credentialed && replacePending == true
+
+    /** Did an enrollment end waiting for the old phone (the enroll answer's `state`)? */
+    fun awaitsApproval(enrollState: String?): Boolean = enrollState == EnrollmentState.REPLACE_PENDING.wire
+
+    /**
+     * The state the Health screen shows. A phone waiting for approval reads only the box's
+     * four uncredentialed fields, whose state is the OLD enrollment's; until its own signed
+     * status is credentialed (it was approved), the phone's REPLACE_PENDING stands.
+     */
+    fun shownState(box: EnrollmentState?, boxCredentialed: Boolean, local: EnrollmentState): EnrollmentState = when {
+        local == EnrollmentState.REPLACE_PENDING && !boxCredentialed -> local
+        else -> box ?: local
+    }
+
+    const val ENROLLED_MESSAGE = "This phone is now your health source."
+    const val AWAITING_APPROVAL_MESSAGE = "Almost done: on the phone that is your health source now, open BlackBox, " +
+        "Settings, Health and approve this one. Your history and AI choices move with it."
+
+    /** What the old phone does after its answer to a replacement. */
+    enum class ReplaceOutcome(val message: String) {
+        /** Approved: the box moved Health to the new phone and revoked this one's key; forget Health here. */
+        MOVED("Health moved to your new phone. This phone no longer syncs health data."),
+        /** Declined: this phone stays the source; the other phone's key was revoked. */
+        KEPT("This phone stays your health source. The other phone's request was turned down."),
+        /** The request expired (24 h) or was answered already. */
+        NOTHING_PENDING("There's no request to move Health any more."),
+        /** The box no longer accepts this phone at all: forget Health here. */
+        KEY_REFUSED("Your box no longer accepts this phone for Health, so Health was removed from it."),
+        /** No answer, or a refusal that changes nothing: the request still waits. */
+        UNCONFIRMED("Couldn't get an answer from your box; try again."),
+    }
+
+    fun replaceOutcome(status: Int, error: String?, approve: Boolean): ReplaceOutcome = when {
+        status in 200..299 -> if (approve) ReplaceOutcome.MOVED else ReplaceOutcome.KEPT
+        status == 409 && error == "no_pending_replace" -> ReplaceOutcome.NOTHING_PENDING
+        // 403: the box's answer when this phone is no longer the operator's active source.
+        status == 401 || status == 403 || status == 409 || status == 410 -> ReplaceOutcome.KEY_REFUSED
+        else -> ReplaceOutcome.UNCONFIRMED
+    }
+
+    /** Does this outcome end Health on this phone? */
+    fun replaceClearsHere(outcome: ReplaceOutcome): Boolean =
+        outcome == ReplaceOutcome.MOVED || outcome == ReplaceOutcome.KEY_REFUSED
 
     /** Foreground runs are debounced: at most one expedited sync per 10 minutes of app opens. */
     const val FOREGROUND_DEBOUNCE_MS = 10 * 60_000L

@@ -146,6 +146,17 @@ private fun Enrolled(state: WellnessUiState, viewModel: WellnessViewModel) {
         }
     }
 
+    if (WellnessRules.showReplaceApproval(state.bound, state.box?.credentialed == true, state.box?.replacePending)) {
+        HealthCard("Move Health to another phone?") {
+            HealthNote("Another phone asked to become your health source. Approving moves your stored history and " +
+                "settings to it, and this phone stops syncing health data.", HealthAmber)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HealthButton("Approve the new phone") { viewModel.answerReplacement(approve = true) }
+                HealthButton("Keep this phone", color = Neutral700) { viewModel.answerReplacement(approve = false) }
+            }
+        }
+    }
+
     HealthCard("What BlackBox may use") {
         if (state.box?.credentialed != true) HealthNote("Couldn't read your settings from the box; showing defaults.", HealthAmber)
         for (cat in WellnessCategory.entries) {
