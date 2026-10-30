@@ -62,11 +62,10 @@ def mint_turn(operator: str, user_text: str, assistant_text: str, *,
     from Orchestrator.volume import now_utc_iso
     s = state.get_state(operator)
     utc = now_utc_iso()
-    s.add_conversation_turn({"role": "user", "utc": utc, "text": user_text})
+    tag = {"wellness": wellness} if wellness else {}     # as turn_persistence tags a turn
+    s.add_conversation_turn({"role": "user", "utc": utc, "text": user_text, **tag})
     s.add_conversation_turn({"role": "assistant", "utc": utc, "text": assistant_text,
-                             "snap_text": snap_text or assistant_text})
-    if wellness:
-        s.last_context_meta["wellness"] = wellness
+                             "snap_text": snap_text or assistant_text, **tag})
     return checkpoint.perform_mint(operator, "TEST")["snap_id"]
 
 

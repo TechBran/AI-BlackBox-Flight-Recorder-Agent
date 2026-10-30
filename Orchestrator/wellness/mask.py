@@ -22,9 +22,15 @@ say them; the policy discloses it). Over-masking is the safe direction.
 
 The durable carry (W28): the rows live in the operator's store, so a save that
 arrives after a restart still finds them. A client that echoes the turn key
-(stream_start's `wellness_turn`) is matched exactly; one that does not is
-masked against every delivery of the last 24 hours not yet masked (plus those
-masked in the last half hour, for a concurrent turn whose save lands second).
+(stream_start's `wellness_turn`) is matched exactly; one that does not (or
+whose key matches nothing) is masked against every delivery of the last 24
+hours not yet masked, and those rows are stamped. A turn whose rows another
+save stamped first (two chats at once, neither echoing its key) is caught by
+the recall rule: a reply that quotes one of the operator's results of the last
+72 hours in a distinctive form (a decimal, grouped thousands, a pair, a number
+with a heart, blood-pressure or step unit) is masked and tagged. The recall
+rule is a heuristic, so it only ever changes the ledger's copy: user-facing
+text (an SMS or cron reply, result_data) stays as the model wrote it.
 
 scrub_history() is the provider-switch rule (A3b): earlier assistant bubbles a
 client sends back never carry health numbers to a provider the operator did
@@ -35,6 +41,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+import sqlite3
 import time
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -44,7 +51,6 @@ MASK = "[·]"
 REASONING_OMITTED = "[REASONING omitted: wellness turn]"
 TOOLS_LINE = "- wellness: [numbers kept in the health store]"
 UNMATCHED_WINDOW_MS = 24 * 3600 * 1000
-CONCURRENT_GRACE_MS = 30 * 60 * 1000
 HISTORY_WINDOW_MS = 72 * 3600 * 1000
 UNIT_DISTANCE = 3
 CONTEXT_DISTANCE = 8
@@ -107,20 +113,29 @@ def _number_forms(x: float) -> Set[str]:
     out.add(str(r))
     out |= _words(r)
     if not integral:
-        out.add(f"{x:.1f}")
-        out.add(f"{x:.2f}".rstrip("0").rstrip("."))
+        one, two = f"{x:.1f}", f"{x:.2f}"
+        decimals = {one, two, two.rstrip("0").rstrip(".")}
+        # The same number with a decimal comma ("47,3": a Spanish reply).
+        out |= decimals | {d.replace(".", ",") for d in decimals}
         whole = int(abs(x))
         tenth = int(round((abs(x) - whole) * 10)) % 10
         out |= {f"{w} point {catalog.number_words(tenth)}" for w in _words(whole)}
     if abs(x) >= 1000:
-        out |= {f"{r:,}", f"{r:,}".replace(",", " "), f"{r:,}".replace(",", ".")}
-        for nd in (-1, -2):
+        out |= _grouped(r)
+        for nd in (-1, -2, -3):
             rr = int(round(x, nd))
-            out |= {str(rr), f"{rr:,}"}
+            out |= {str(rr)} | _grouped(rr)
             out |= _words(rr)
         k = x / 1000.0
-        out |= {f"{k:.1f}k", f"{k:.1f} thousand", f"{k:g}k"}
+        out |= {f"{k:.1f}k", f"{k:.1f} thousand", f"{k:g}k", f"{int(round(k))}k",
+                f"{k:.1f}".replace(".", ",") + "k"}
     return {v for v in out if v and not _SCI.search(v)}
+
+
+def _grouped(n: int) -> Set[str]:
+    """n with its thousands grouped by a comma, a space or a point."""
+    g = f"{n:,}"
+    return {g, g.replace(",", " "), g.replace(",", ".")}
 
 
 def _duration_forms(minutes: float) -> Set[str]:
@@ -140,7 +155,8 @@ def _duration_forms(minutes: float) -> Set[str]:
                 f"{h} hour {m} minutes", f"{h} hour and {m} minutes"}
         for nd in (1, 2):
             dec = f"{minutes / 60.0:.{nd}f}"
-            out |= {f"{dec} hours", f"{dec} h", f"{dec} hrs", f"{dec} hr", dec}
+            out |= {f"{dec} hours", f"{dec} h", f"{dec} hrs", f"{dec} hr", dec,
+                    dec.replace(".", ",")}
         for hw in _words(h):
             out |= {f"{hw} hours", f"{hw} hour"}
             for mw in _words(m) if m else ():
@@ -247,6 +263,8 @@ def value_set(payloads: Iterable) -> frozenset:
 
 # ------------------------------------------------------------------ masking text
 
+# English and Spanish (the box's second chat language): the unit rule is the
+# net under V, so a reply in either names its units in words the rule knows.
 _UNIT_WORDS = frozenset("""
 bpm beat beats heartbeat heartbeats pulse heart hr rhr hrv rmssd step steps mmhg hg spo2 spo₂
 oxygen saturation percent percentage kg kgs kilo kilos kilogram kilograms lb lbs pound pounds
@@ -254,26 +272,43 @@ kcal cal cals calorie calories ml oz ounce ounces °f °c degree degrees ms mill
 milliseconds breath breaths breathing respiratory systolic diastolic bp pressure glucose weight
 temperature km kms kilometre kilometres kilometer kilometers mile miles mi metre metres meter
 meters vo2 vo2max resting
+lpm ppm latido latidos pulsaciones pulso cardíaca cardiaca cardíaco cardiaco frecuencia paso
+pasos presión presion arterial sistólica sistolica diastólica diastolica oxígeno oxigeno
+saturación saturacion peso caloría calorías caloria calorias respiración respiracion
+respiraciones temperatura grado grados kilómetro kilómetros kilometro kilometros metros
+reposo glucosa
 """.split())
-_TIME_WORDS = frozenset("h hr hrs hour hours min mins minute minutes am pm".split())
+_TIME_WORDS = frozenset("""
+h hr hrs hour hours min mins minute minutes am pm hora horas minuto minutos
+""".split())
 _CONTEXT_WORDS = frozenset("""
 sleep sleeps slept sleeping asleep nap naps napped bed bedtime woke wake waking awake night
 nights overnight tonight rem deep run ran running runs walk walked walking walks workout
 workouts exercise exercised exercising active activity cycling cycled ride rode swim swam
 swimming training trained jog jogged jogging hike hiked
+sueño dormir dormiste dormías dormias dormido dormida durmiendo durmió durmio siesta cama
+noche noches anoche despertaste despertar profundo caminaste caminata caminar caminando
+corriste correr carrera ejercicio entrenamiento entrenaste actividad nadaste bici
 """.split())
 _NUMBER_WORDS = frozenset("""
 zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen
 sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety
 hundred thousand million half dozen
+cero uno una dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce quince
+dieciséis dieciseis diecisiete dieciocho diecinueve veinte veintiuno veintidós veintidos
+veintitrés veintitres veinticuatro veinticinco veintiséis veintiseis veintisiete veintiocho
+veintinueve treinta cuarenta cincuenta sesenta setenta ochenta noventa cien ciento
+doscientos trescientos cuatrocientos quinientos seiscientos setecientos ochocientos
+novecientos mil millón millon medio media
 """.split())
-_JOINERS = frozenset({"and", "point", "a"})
+_JOINERS = frozenset({"and", "point", "a", "y", "coma"})
 
+# Words are any letters (an accented "cardíaca" is one token, not three).
 _TOKEN_RE = re.compile(
-    r"(?P<num>\d+(?:[.,:/]\d+)*(?:k(?![A-Za-z]))?)"
-    r"|(?P<word>(?i:spo2|spo₂|vo2max|vo2)|[A-Za-z°₂]+(?:['’-][A-Za-z]+)*)"
+    r"(?P<num>\d+(?:[.,:/]\d+)*(?:k(?![^\W\d_]))?)"
+    r"|(?P<word>(?i:spo2|spo₂|vo2max|vo2)|(?:[^\W\d_]|[°₂])+(?:['’-][^\W\d_]+)*)"
     r"|(?P<pct>%)"
-    r"|(?P<other>[^\sA-Za-z\d])")
+    r"|(?P<other>[^\s\w])")
 
 
 def _is_number_word(word: str) -> bool:
@@ -338,23 +373,31 @@ def _unit_rule_spans(text: str) -> List[Tuple[int, int]]:
     return spans
 
 
-def _value_regex(values: frozenset):
+def _value_regex(values: frozenset, *, tails: bool = True):
     if not values:
         return None
     alts = sorted(values, key=len, reverse=True)
     body = "|".join(re.escape(v) for v in alts)
-    # Not inside a longer number ("147", "47.35", "12,345") or a clock time
-    # (clocks are members of their own), but a part of a pair is a hit on its
-    # own: "118/79" masks as "[·]/[·]".
-    return re.compile(r"(?<![\w.,:])(?:" + body + r")(?![\w]|[.,:]\d)", re.I)
+    # Not inside a longer number ("147", "12,345") or a clock time (clocks
+    # are members of their own), but a part of a pair is a hit on its own:
+    # "118/79" masks as "[·]/[·]". A member with a decimal tail is the same
+    # reading written another way ("47.30", "47,3", "52.1" through "52"), so
+    # with `tails` the tail goes with it.
+    tail = r"(?:[.,]\d+)?" if tails else ""
+    return re.compile(r"(?<![\w.,:])(?:" + body + r")" + tail + r"(?![\w]|[.,:]\d)", re.I)
+
+
+def mask_values(text: str, values: frozenset) -> str:
+    """`text` with every member of `values` masked (no unit rule)."""
+    rx = _value_regex(values) if text else None
+    return rx.sub(MASK, text) if rx is not None else text
 
 
 def mask_text(text: str, values: frozenset = frozenset()) -> str:
     """`text` with every member of `values` and every health-unit number masked."""
     if not text:
         return text
-    rx = _value_regex(values)
-    out = rx.sub(MASK, text) if rx is not None else text
+    out = mask_values(text, values)
     spans = _unit_rule_spans(out)
     if not spans:
         return out
@@ -420,12 +463,20 @@ def period_label(env) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class Carry:
-    """One turn's wellness results: what to mask its text against, and its tag."""
+    """One turn's wellness results: what to mask its text against, and its tag.
+
+    `exact` is a turn a delivered row names (its own key, or the keyless
+    fallback): every copy of its text is masked, user-facing ones included.
+    A heuristic carry (exact False: the recall rule, or a health store that
+    could not be read) masks and tags the ledger's copy only, and stamps no
+    row."""
     operator: str
     rows: Tuple[dict, ...]
     values: frozenset
     extra_categories: Tuple[str, ...] = ()
     op_key: Optional[str] = None
+    exact: bool = True
+    note: Optional[str] = None
 
     @property
     def refs(self) -> List[str]:
@@ -440,7 +491,8 @@ class Carry:
     @property
     def labels(self) -> List[str]:
         out = [period_label(r.get("payload")) for r in self.rows]
-        return [x for x in dict.fromkeys(out) if x] or (["on-device"] if self.extra_categories else [])
+        return [x for x in dict.fromkeys(out) if x] or (
+            [self.note] if self.note else (["on-device"] if self.extra_categories else []))
 
     def mask(self, text: str) -> str:
         return mask_text(drop_reasoning(text), self.values)
@@ -460,8 +512,9 @@ class Carry:
 
     def mark(self, now_ms: Optional[int] = None) -> None:
         """Stamp masked_at on the turn's rows (never raises: the mask already
-        happened; an unstamped row only widens a later fallback)."""
-        if not self.refs:
+        happened; an unstamped row only widens a later fallback). A heuristic
+        carry's rows belong to earlier turns: never stamped here."""
+        if not self.exact or not self.refs:
             return
         try:
             st = self._store()
@@ -499,81 +552,130 @@ def gauge_text(gauge: Optional[dict]) -> str:
                                gauge.get("refs") or [])
 
 
-def _recent_rows(st, now_ms: int) -> List[dict]:
-    """Deliveries of the last 24 h not yet masked, plus those masked in the
-    last CONCURRENT_GRACE_MS (a concurrent turn whose save lands second)."""
-    with st.read() as conn:
-        rows = conn.execute(
-            "SELECT * FROM delivered WHERE ts>=? AND (masked_at IS NULL OR masked_at>=?) "
-            "ORDER BY ts", (now_ms - UNMATCHED_WINDOW_MS, now_ms - CONCURRENT_GRACE_MS)).fetchall()
-    return [st._delivery(r) for r in rows]
+def items_gauge(items: Iterable[dict]) -> Optional[dict]:
+    """The WELLNESS gauge of the conversation items a mint covers: each
+    turn's items carry their own tag (turn_persistence), so a mint that lands
+    between two appends never separates a turn from its tag."""
+    gauge = None
+    for it in items:
+        if isinstance(it, dict) and it.get("wellness"):
+            gauge = merge_gauge(gauge, it["wellness"])
+    return gauge
 
 
-def _distinctive(values: frozenset) -> List[str]:
-    """The members of V specific enough to say a text quotes a health result:
-    a decimal, grouped thousands or a pair ("47.3", "12,345", "118/79"), or a
-    number with its unit ("47 bpm", "6 h 47 min", "forty-seven beats per
-    minute"). A bare "47" or a clock time ("12:30") alone is not."""
-    out = []
-    for v in values:
-        if re.search(r"\d[.,/]\d", v):
-            out.append(v)
-            continue
-        words = [t.lower() for t in re.findall(r"[A-Za-z%]+|\d+", v)]
-        if len(words) > 1 and any(w in _UNIT_WORDS or w in _TIME_WORDS or w == "%" for w in words) \
-                and any(w.isdigit() or _is_number_word(w) for w in words):
-            out.append(v)
-    return out
+def _unmatched_rows(st, now_ms: int) -> List[dict]:
+    """Deliveries of the last 24 h not yet masked (the keyless fallback)."""
+    return st.unmatched_deliveries(now_ms - UNMATCHED_WINDOW_MS)
+
+
+# The recall rule's units: a reading's own units, never a duration, a percent,
+# a weight or a distance (ordinary in any work chat: "30 minutes", "95%").
+_RECALL_UNITS = frozenset("""
+bpm beat beats heartbeat heartbeats pulse mmhg spo2 spo₂ hrv rmssd step steps systolic diastolic
+breath breaths lpm ppm latido latidos pulsaciones pulso paso pasos sistólica sistolica
+diastólica diastolica respiraciones
+""".split())
+# A step count is in the thousands: "step 12 of the plan" quotes nothing.
+_RECALL_MIN = {"step": 1000, "steps": 1000, "paso": 1000, "pasos": 1000}
+_DISTINCTIVE = re.compile(r"\d{2,}[.,]\d+|\d{1,3}(?:[,. ]\d{3})+|\d{2,3}/\d{2,3}")
+
+
+def _distinctive(values: frozenset) -> frozenset:
+    """The members of V specific enough to say a text quotes a health result
+    on their own: a decimal, grouped thousands or a pair ("47.3", "12,345",
+    "118/79"). A bare "47", a duration or a clock time is not."""
+    return frozenset(v for v in values if _DISTINCTIVE.fullmatch(v))
 
 
 def quotes_results(text: str, values: frozenset) -> bool:
-    """Does `text` repeat a delivered health result (a distinctive member of V)?"""
+    """Does `text` repeat a delivered health result? A distinctive member of
+    V, two of V's numbers as a pair ("118/79"), or a number of V right by
+    one of a reading's own units ("47 bpm", "12345 steps"); never a
+    duration, a percent or a clock time on its own."""
     if not text or not values:
         return False
-    rx = _value_regex(frozenset(_distinctive(values)))
-    return bool(rx is not None and rx.search(text))
+    rx = _value_regex(_distinctive(values), tails=False)
+    if rx is not None and rx.search(text):
+        return True
+    toks = [(m.lastgroup, m.group(0).lower()) for m in _TOKEN_RE.finditer(text)]
+    # Two of V's numbers written as a pair ("118/79": a reading's two halves).
+    if any(kind == "num" and _DISTINCTIVE.fullmatch(w) and "/" in w
+           and all(p in values for p in w.split("/")) for kind, w in toks):
+        return True
+    units = [(i, w) for i, (_k, w) in enumerate(toks) if w in _RECALL_UNITS]
+    if not units:
+        return False
+
+    def reading(kind, w) -> bool:
+        # Digits, or a compound number word ("forty-seven"); "seven" alone is
+        # every other sentence.
+        return w in values and (kind == "num" or ("-" in w and _is_number_word(w)))
+
+    def big_enough(w, unit) -> bool:
+        digits = re.sub(r"\D", "", w)
+        return unit not in _RECALL_MIN or (digits.isdigit() and int(digits) >= _RECALL_MIN[unit])
+
+    return any(reading(kind, w) and any(abs(i - u) <= UNIT_DISTANCE and big_enough(w, uw)
+                                        for u, uw in units)
+               for i, (kind, w) in enumerate(toks))
 
 
-def carry_for(operator: Optional[str], *, turn_key: Optional[str] = None, fallback: bool = False,
+def carry_for(operator: Optional[str], *, turn_key=None, fallback: bool = False,
               extra_categories: Sequence[str] = (), recall_text: Optional[str] = None,
               now_ms: Optional[int] = None) -> Optional[Carry]:
     """The turn's carry, or None for a turn no wellness result reached.
 
-    `turn_key` matches the turn's own rows; `fallback` (a client that echoes no
-    key) takes every recent unmasked delivery instead. `extra_categories` marks
-    a turn as wellness even with no rows (an on-device wellness tool call).
+    `turn_key` (a string; anything else is no key) matches the turn's own
+    rows; with `fallback`, a key that matches nothing (none echoed, a stale
+    one) takes every unmasked delivery of the last 24 hours instead (the
+    spec's rule for clients that do not echo the key). `extra_categories`
+    marks a turn as wellness even with no rows (an on-device wellness call).
 
     `recall_text` (the assistant text) closes the recall gap: a later turn of
     the same chat sends the earlier, unmasked bubbles back to the model as
-    history, so a reply can repeat a result no tool delivered this turn. When
-    it quotes one of the operator's results of the last 72 hours, the turn is
-    masked and tagged against all of them (over-masking is the safe way)."""
+    history, and two chats at once can have one turn's save stamp the other's
+    rows, so a reply can repeat a result with no row of its own. When it
+    quotes one of the operator's results of the last 72 hours
+    (quotes_results), the turn's ledger copy is masked and tagged against all
+    of them: a heuristic carry (exact False).
+
+    A health store that cannot be read is no reason to lose the turn: it is
+    recorded, its ledger copy masked by the unit rule and tagged."""
     if not operator:
         return None
     from Orchestrator.wellness import enroll, store as store_mod
     now_ms = _now_ms() if now_ms is None else now_ms
+    key = turn_key if isinstance(turn_key, str) and turn_key else None
     rec = enroll.get_enrollment(operator)
-    st = enroll.store_for(rec, create=False) if rec else None
     rows: List[dict] = []
     values = frozenset()
-    if st is not None:
-        try:
-            if turn_key:
-                rows = st.deliveries_for_turn(turn_key)
+    exact = True
+    try:
+        st = enroll.store_for(rec, create=False) if rec else None
+        if st is not None:
+            if key:
+                rows = st.deliveries_for_turn(key)
             if not rows and fallback:
-                rows = _recent_rows(st, now_ms)
+                rows = _unmatched_rows(st, now_ms)
             if rows:
                 values = value_set(r.get("payload") for r in rows)
             elif recall_text:
                 recent = _recent_history_rows(st, now_ms)
                 recent_values = value_set(r.get("payload") for r in recent)
                 if quotes_results(recall_text, recent_values):
-                    rows, values = recent, recent_values
-        except store_mod.StoreGone:
-            rows = []
+                    rows, values, exact = recent, recent_values, False
+    except store_mod.StoreGone:
+        rows = []
+    except (sqlite3.Error, OSError) as e:
+        # Count-only: never a value, never the store's path.
+        print(f"[WELLNESS] health store unreadable ({type(e).__name__}); "
+              "recording the turn masked by the unit rule")
+        return Carry(operator, (), frozenset(), tuple(catalog.CATEGORIES),
+                     (rec or {}).get("op_key"), exact=False, note="health data")
     if not rows and not extra_categories:
         return None
-    return Carry(operator, tuple(rows), values, tuple(extra_categories), (rec or {}).get("op_key"))
+    return Carry(operator, tuple(rows), values, tuple(extra_categories), (rec or {}).get("op_key"),
+                 exact=exact)
 
 
 def stream_turn_key(operator: Optional[str]) -> Optional[str]:
@@ -593,15 +695,16 @@ def stream_turn_key(operator: Optional[str]) -> Optional[str]:
 
 # ------------------------------------------------------------------ history scrub (A3b)
 
-def _message_text_masked(message: dict, values: frozenset) -> dict:
+def _message_text_masked(message: dict, values: frozenset, unit_rule: bool = True) -> dict:
+    fn = mask_text if unit_rule else mask_values
     content = message.get("content")
     if isinstance(content, str):
-        return {**message, "content": mask_text(content, values)}
+        return {**message, "content": fn(content, values)}
     if isinstance(content, list):
         parts = []
         for part in content:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
-                parts.append({**part, "text": mask_text(part["text"], values)})
+                parts.append({**part, "text": fn(part["text"], values)})
             else:
                 parts.append(part)
         return {**message, "content": parts}
@@ -618,14 +721,27 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
                   model: Optional[str] = None, *, now_ms: Optional[int] = None) -> list:
     """`messages` as `provider` may receive them (A3b).
 
-    An earlier assistant message tagged `wellness_ref` (clients echo it from
-    the wellness_used frame) is masked against its stored payload when the
-    provider is not allowed for that ref's categories. With no ref, every
-    client-supplied assistant message is masked (the unit rule, plus the
-    operator's recent deliveries) whenever an enrolled operator is on a
-    provider not allowed for one of their consented categories. User messages
-    stay verbatim. The `wellness_ref` key never reaches the provider. A list
-    with nothing to change is returned as the SAME object."""
+    `provider` is the one the turn is dispatched to (routes/chat/stream.py
+    resolves an alias the dispatcher does not know to the provider that
+    really runs). For an operator with health data on this box (a live
+    enrollment, or a store kept by a disconnect: an operator who is not live
+    has no allowed destination at all), every earlier health number the
+    provider may not receive is masked in the client-supplied assistant
+    messages:
+
+      * a message tagged `wellness_ref` (clients echo it from the
+        wellness_used frame) whose ref's categories the provider may not
+        receive is masked against its stored payload and by the unit rule;
+      * every message, tagged or not, is masked against the operator's
+        results of the last 72 hours the provider may not receive (a bubble
+        can quote more than its own ref: an on-device reply covering sleep
+        and blood pressure);
+      * an untagged message is also masked by the unit rule whenever the
+        provider is not allowed for one of the operator's consented
+        categories.
+
+    User messages stay verbatim. The `wellness_ref` key never reaches the
+    provider. A list with nothing to change is returned as the SAME object."""
     if not isinstance(messages, list):
         return messages
     has_refs = any(isinstance(m, dict) and "wellness_ref" in m for m in messages)
@@ -633,24 +749,27 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
         from Orchestrator.wellness import destinations, enroll, gate, store as store_mod
         rec = enroll.get_enrollment(operator) if operator else None
         live = bool(rec) and enroll.effective_state(rec) in gate.GATE_STATES
-        if not live and not has_refs:
-            return messages
         st = enroll.store_for(rec, create=False) if rec else None
+        # Health data on this box: a live enrollment, or a store kept after a
+        # disconnect. Nobody else's history is touched.
+        holds = live or st is not None
+        if not holds and not has_refs:
+            return messages
         now_ms = _now_ms() if now_ms is None else now_ms
 
         def allowed(cats) -> bool:
-            return bool(rec) and all(destinations.allowed(provider, c, rec, model=model)[0]
-                                     for c in cats)
+            return live and all(destinations.allowed(provider, c, rec, model=model)[0]
+                                for c in cats)
 
         consented = [c for c in catalog.CATEGORIES
                      if ((rec or {}).get("categories") or {}).get(c) in catalog.CONSENTED]
-        blanket = live and not allowed(consented or catalog.CATEGORIES)
-        recent_values = frozenset()
-        if blanket and st is not None:
+        blanket = holds and not allowed(consented or catalog.CATEGORIES)
+        withheld = frozenset()
+        if st is not None:
             try:
                 rows = [r for r in _recent_history_rows(st, now_ms)
                         if not allowed(r.get("categories") or catalog.CATEGORIES)]
-                recent_values = value_set(r.get("payload") for r in rows)
+                withheld = value_set(r.get("payload") for r in rows)
             except store_mod.StoreGone:
                 pass
         out, changed = [], has_refs
@@ -670,9 +789,13 @@ def scrub_history(messages: list, operator: Optional[str], provider: Optional[st
                 cats = (row or {}).get("categories") or catalog.CATEGORIES
                 if not allowed(cats):
                     values = value_set([(row or {}).get("payload")]) if row else frozenset()
-                    new = _message_text_masked(m, values | recent_values)
+                    new = _message_text_masked(m, values | withheld)
+                elif withheld:
+                    new = _message_text_masked(m, withheld, unit_rule=False)
             elif blanket:
-                new = _message_text_masked(m, recent_values)
+                new = _message_text_masked(m, withheld)
+            elif withheld:
+                new = _message_text_masked(m, withheld, unit_rule=False)
             new = _without_ref(new)
             changed = changed or new != m
             out.append(new)

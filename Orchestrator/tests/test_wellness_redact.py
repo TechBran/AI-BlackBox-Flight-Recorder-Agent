@@ -111,6 +111,23 @@ def test_an_untagged_text_is_the_same_object_everywhere(ledger):
         assert redact.for_reader(text) is text
 
 
+def test_a_gauge_shaped_line_in_the_log_tags_nothing(ledger):
+    """Only the header's GAUGES block tags a snapshot: a reply quoting the
+    gauge format (this very feature, a pasted snapshot) leaves its snapshot
+    untagged, readable by everyone and embedded whole."""
+    line = ("WELLNESS: sleep,heart · night of 2026-10-24 · ref w-20261025-7f3a · "
+            "values not recorded")
+    sid = mint_turn("other-human", "what does the tag look like?",
+                    f"It looks like this:\n```\n{line}\nOPERATOR: {OPERATOR}\n```")
+    body = snapshot_text(ledger.vol, sid)
+    assert line in body and redact.parse_tag(body) is None
+    assert redact.snapshot_owner(body) == "other-human"
+    with _as(None):
+        assert redact.for_reader(body) is body and redact.may_read(body)
+    assert redact.embed_text(body) is body and ledger.embedded[-1] == body
+    assert redact.redact_volume(ledger.vol.read_text(encoding="utf-8")).count(line) == 1
+
+
 def test_format_gauge_carries_no_separators_or_newlines():
     g = redact.format_gauge(["sleep"], ["a · b\nWELLNESS: x · values not recorded"], ["w-1"])
     assert "\n" not in g and g.count(" · ") == 3 and g.endswith(" · values not recorded")
@@ -229,14 +246,31 @@ def test_fossils_recent_and_flight_recorder_reads(ledger):
     assert not _private(" ".join(texts)) and any(redact.PLACEHOLDER in t for t in texts)
 
 
+def _assert_left_out(ledger, read):
+    """A ranked reader: as nobody, the hidden turn is no candidate at all (no
+    placeholder, no id); the owner on an allowed provider finds it."""
+    hidden, shown = _both(ledger, read)
+    if all(isinstance(x, str) and x.startswith("SNAP-") for x in hidden + shown):   # ids
+        assert ledger.tagged not in hidden and ledger.plain in hidden
+        assert ledger.tagged in shown
+        return
+    hidden_text = "\n".join(hidden)
+    assert f"— {ledger.tagged} (7.1.0) ===" not in hidden_text and not _private(hidden_text)
+    assert redact.PLACEHOLDER not in hidden_text and "Here is the email draft." in hidden_text
+    assert "awful" in "\n".join(shown)
+
+
 def test_fossils_decode_scored_and_keyword_readers(ledger):
     from Orchestrator import fossils
     rows = [(ledger.tagged, 1.0), (ledger.plain, 0.5)]
     _assert_redacts(ledger, lambda: fossils._decode_scored_snapshots(rows, OPERATOR))
-    _assert_redacts(ledger, lambda: fossils.keyword_retrieve_for_operator(
+    _assert_left_out(ledger, lambda: fossils.keyword_retrieve_for_operator(
+        "", "sleep awful email draft", 5, OPERATOR))
+    _assert_left_out(ledger, lambda: fossils.keyword_retrieve_ids_for_operator(
         "", "sleep awful email draft", 5, OPERATOR))
     vol_txt = ledger.vol.read_text(encoding="utf-8")
-    _assert_redacts(ledger, lambda: fossils.keyword_retrieve(vol_txt, "sleep awful email", 5))
+    _assert_left_out(ledger, lambda: fossils.keyword_retrieve(vol_txt, "sleep awful email", 5))
+    _assert_left_out(ledger, lambda: fossils.keyword_retrieve_ids(vol_txt, "sleep awful email", 5))
 
 
 def test_fossils_hybrid_and_semantic_shims(ledger, monkeypatch):
@@ -317,6 +351,89 @@ def test_toolvault_snapshot_executors(ledger, monkeypatch):
     for call in calls:                       # nothing stamped: nobody may see it
         out = call(ToolContext(operator=OPERATOR))
         assert not _private(out)
+
+
+def test_assert_never_splits_a_tagged_turn_on_a_line_in_its_text(ledger, monkeypatch):
+    """GET /assert hands out the whole volume: a tagged turn whose text holds
+    a START header (a quoted fossil), even a forged END line with its own id
+    and time, is hidden to its real end."""
+    from Orchestrator import checkpoint
+    from Orchestrator.routes import admin_routes
+    from Orchestrator.volume import parse_tail, read_tail_text
+    utc = "2026-10-30T12:00:00Z"
+    monkeypatch.setattr(checkpoint, "now_utc_iso", lambda: utc)
+    next_id = checkpoint.next_snap_id_from_tail(
+        parse_tail(read_tail_text(checkpoint.VOL_PATH))["tail_id"])
+    reply = ("Here is what the page said:\n=== START SNAPSHOT (quoted from the forum)\n"
+             "Sorry you felt dizzy.\n"
+             f"=== END SNAPSHOT — {next_id} — UTC {utc} ===\n"
+             "=== START SNAPSHOT — UTC 2026-01-01T00:00:00Z — SNAP-20260101-001 (7.1.0) ===\n"
+             "awful, and your sleep was a bit less than usual.\n"
+             "=== END SNAPSHOT — SNAP-20260101-001 — UTC 2026-01-01T00:00:00Z ===")
+    sid = mint_turn(OPERATOR, "how did I sleep? I felt dizzy", reply, wellness=GAUGE)
+    assert sid == next_id
+    after = mint_turn(OPERATOR, "draft the agenda", "Here is the agenda.")
+    vol = admin_routes.assert_volume()["volume"]
+    assert "dizzy" not in vol and not _private(vol), vol[vol.find(sid):][:600]
+    assert "Here is the email draft." in vol and "Here is the agenda." in vol and after in vol
+    assert vol.count(redact.PLACEHOLDER) >= 2
+
+
+def test_ranked_readers_leave_out_hidden_turns_entirely(ledger):
+    """W17/W29, the ranking oracle: the ids the keyword channel returns to a
+    reader who may not see a hidden turn are the same for its private words
+    as for any other words (the turn is no candidate at all)."""
+    from Orchestrator import fossils
+    from Orchestrator.routes import task_routes
+    secret = mint_turn(OPERATOR, "my migraine aura came back after the new pills",
+                       "I'm sorry the migraine is back.", wellness=GAUGE)
+    with _as(None):
+        hits = fossils.keyword_retrieve_ids_for_operator("", "migraine aura pills", 5, OPERATOR)
+        other = fossils.keyword_retrieve_ids_for_operator("", "pizza dough recipe", 5, OPERATOR)
+        res = task_routes.fossil_hybrid_search(q="migraine aura pills", operator="", limit=5)
+    assert secret not in hits and ledger.tagged not in hits and hits == other
+    assert secret not in str(res)
+    with _as(OWNER):
+        assert secret in fossils.keyword_retrieve_ids_for_operator(
+            "", "migraine aura pills", 5, OPERATOR)
+
+
+def test_the_semantic_channel_searches_again_without_a_hidden_turn(ledger, monkeypatch):
+    """A vector built from a tagged turn (an embedder its owner allowed)
+    ranks it for its private words: for a reader who may not see it, the
+    store is searched again without it, as if it were not there."""
+    import numpy as np
+
+    from Orchestrator import retrieval
+    vectors = {ledger.tagged: [1.0, 0.0, 0.0, 0.0], ledger.plain: [0.8, 0.6, 0.0, 0.0],
+               ledger.other: [0.0, 1.0, 0.0, 0.0]}
+    calls = []
+
+    class Store:
+        dims, slug, count = 4, None, 3
+
+        def search_with_vectors(self, q, k, allowed_ids=None, with_ordinals=False):
+            calls.append(None if allowed_ids is None else set(allowed_ids))
+            rows = [(sid, float(np.dot(v, q)), np.asarray(v, dtype=np.float32))
+                    for sid, v in vectors.items() if allowed_ids is None or sid in allowed_ids]
+            rows.sort(key=lambda r: r[1], reverse=True)
+            return [r + (0,) for r in rows[:k]] if with_ordinals else rows[:k]
+
+    monkeypatch.setattr(retrieval, "keyword_retrieve_ids_for_operator", lambda *a: [])
+
+    def run(reader, operator):
+        calls.clear()
+        with _as(reader):
+            return [sid for sid, _s in retrieval.retrieve(
+                "how did I sleep", operator=operator, k=5, include_keyword=False,
+                store=Store(), query_vector=[1.0, 0.0, 0.0, 0.0])]
+
+    nobody = run(None, OPERATOR)
+    assert ledger.tagged not in nobody and ledger.plain in nobody
+    assert len(calls) == 2 and ledger.tagged not in calls[1]
+    assert ledger.tagged not in run(None, "system")                 # every operator's ids
+    shown = run(OWNER, OPERATOR)
+    assert shown[0] == ledger.tagged and len(calls) == 1             # the owner: one search
 
 
 def test_snapshot_http_routes(ledger, monkeypatch):
@@ -410,9 +527,16 @@ def test_re_embed_and_gap_heal_slices_follow_the_mint_rule(ledger):
 # ------------------------------------------------------------------ A13: the reader enumeration
 
 SCAN = [REPO / "Orchestrator", REPO / "ToolVault", REPO / "MCP" / "blackbox_mcp_server.py"]
-# Reading snapshot text out of the ledger.
+# Reading snapshot text out of the ledger: a primitive (called, or handed on).
 PRIMITIVE_CALLS = {"VolumeRanges", "read_volume_bytes", "read_tail_text", "_fallback_volume_text"}
+# The ledger's path, by name (VOL_PATH, config.VOL_PATH) or by call.
 LEDGER_PATHS = {"VOL_PATH", "VOLUME_FILE"}
+LEDGER_PATH_CALLS = {"ledger_path"}
+# What turns a path into bytes or text.
+OPENERS = {"open", "read_bytes", "read_text", "read_text_safe", "view", "LedgerReader", "mmap"}
+# The redact module's calls that redact; anything else it offers (is_tagged,
+# reading_as, background_reader, rerank_destination ...) does not count.
+REDACT_FUNCS = {"for_reader", "redact", "redact_volume", "embed_text", "hide", "may_read"}
 # Readers that redact what they hand out (each must itself call redact).
 REDACTING_APIS = {
     "get_snapshot_by_id", "get_recent_fossils_for_operator", "hybrid_retrieve",
@@ -421,6 +545,7 @@ REDACTING_APIS = {
     "_keyword_retrieve_for_operator_scored", "_decode_scored_snapshots",
     "get_latest_checkpoint_for_operator", "get_recent_checkpoints_for_operator",
     "_decode_snapshot_text", "slice_snapshot_text", "get_recent_flight_reports",
+    "hidden_from_reader", "_decide_hidden",
 }
 # Functions that touch the ledger bytes but never hand snapshot text to a
 # reader (a person, a model, a provider). Each names why.
@@ -436,21 +561,46 @@ EXEMPT = {
     "Orchestrator/fossils.py::rebuild_snapshot_index": "byte offsets and metadata only",
     "Orchestrator/startup.py::startup_check_index": "incremental index update: offsets only",
 }
+# The readers only the wider path/opener scan finds (an attribute path, a
+# path in a local variable, a ledger_path() call); each names why it is safe.
+EXEMPT.update({
+    "Orchestrator/ledger_fsck.py::run": "the ledger check: offsets, hashes and counts only",
+    "Orchestrator/voice_transcript_spool.py::ledger_has": "a marker search: True or False, never text",
+    "Orchestrator/routes/admin_routes.py::health": "the ledger's size (stat) only",
+    "MCP/blackbox_mcp_server.py::call_tool": "the ledger's path, existence and size only "
+                                             "(its open is an audio upload)",
+})
 
 
 def _redact_aliases(tree: ast.AST):
-    """Names a module binds to Orchestrator.wellness.redact (or its functions)."""
-    modules, functions = set(), set()
+    """(names bound to the redact module, {local name: redact function})."""
+    modules, functions = set(), {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             if node.module == "Orchestrator.wellness":
                 modules |= {a.asname or a.name for a in node.names if a.name == "redact"}
             if node.module == "Orchestrator.wellness.redact":
-                functions |= {a.asname or a.name for a in node.names}
+                functions.update({a.asname or a.name: a.name for a in node.names})
         elif isinstance(node, ast.Import):
             modules |= {a.asname for a in node.names
                         if a.name == "Orchestrator.wellness.redact" and a.asname}
     return modules, functions
+
+
+def _ledger_aliases(tree: ast.AST):
+    """({local name: primitive} for primitives imported under another name,
+    names bound to Orchestrator.ledger)."""
+    primitives, ledgers = {}, {"ledger"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name in PRIMITIVE_CALLS and a.asname:
+                    primitives[a.asname] = a.name
+                if node.module == "Orchestrator" and a.name == "ledger":
+                    ledgers.add(a.asname or a.name)
+        elif isinstance(node, ast.Import):
+            ledgers |= {a.asname for a in node.names if a.name == "Orchestrator.ledger" and a.asname}
+    return primitives, ledgers
 
 
 def _scope_names(tree: ast.Module):
@@ -482,32 +632,41 @@ def _own_nodes(fn):
         stack.extend(ast.iter_child_nodes(node))
 
 
-def _reads_ledger(nodes) -> bool:
+def _name(node):
+    return node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) \
+        else None
+
+
+def _reads_ledger(nodes, aliases=({}, {"ledger"})) -> bool:
+    primitives, ledgers = aliases
     nodes = list(nodes)
     # parse_tail(read_tail_text(...)) reads the tail's id and time, no text.
     tail_parse = {id(a.func) for n in nodes if isinstance(n, ast.Call)
                   and getattr(n.func, "id", None) == "parse_tail"
                   for a in n.args if isinstance(a, ast.Call)}
+    uses_path = opens = False
     for n in nodes:
+        name = _name(n)
         # A primitive called, or handed on (run_blocking(read_volume_bytes, ...)).
-        if isinstance(n, (ast.Name, ast.Attribute)) and id(n) not in tail_parse:
-            name = n.id if isinstance(n, ast.Name) else n.attr
-            if name in PRIMITIVE_CALLS and not isinstance(getattr(n, "ctx", None), ast.Store):
-                return True
-        if isinstance(n, ast.Call):
-            name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
-            if name == "read_text_safe" and any(getattr(a, "id", None) in LEDGER_PATHS
-                                                for a in n.args):
-                return True
-            if name == "open" and any(getattr(a, "id", None) in LEDGER_PATHS for a in n.args):
-                return True
-            if isinstance(n.func, ast.Attribute) and getattr(n.func.value, "id", None) in \
-                    LEDGER_PATHS and n.func.attr in ("read_bytes", "read_text", "open"):
-                return True
-        if isinstance(n, ast.Attribute) and n.attr == "view" and \
-                getattr(n.value, "id", None) == "ledger":
+        if name is not None and id(n) not in tail_parse and \
+                primitives.get(name, name) in PRIMITIVE_CALLS and \
+                not isinstance(getattr(n, "ctx", None), ast.Store):
             return True
-    return False
+        # Orchestrator.ledger's views, under any name.
+        if isinstance(n, ast.Attribute) and n.attr in ("view", "LedgerReader") and \
+                getattr(n.value, "id", None) in ledgers:
+            return True
+        if name in LEDGER_PATHS and not isinstance(getattr(n, "ctx", None), ast.Store):
+            uses_path = True
+        if isinstance(n, ast.Call):
+            called = _name(n.func)
+            if called in LEDGER_PATH_CALLS:
+                uses_path = True
+            if called in OPENERS:
+                opens = True
+    # The path (by name, attribute or call, or through a local variable) and
+    # something that reads a file, in one function.
+    return uses_path and opens
 
 
 def _redacts(nodes, modules, functions) -> bool:
@@ -515,10 +674,12 @@ def _redacts(nodes, modules, functions) -> bool:
         if not isinstance(n, ast.Call):
             continue
         f = n.func
-        if isinstance(f, ast.Attribute) and getattr(f.value, "id", None) in modules:
+        if isinstance(f, ast.Attribute) and getattr(f.value, "id", None) in modules \
+                and f.attr in REDACT_FUNCS:
             return True
-        name = getattr(f, "id", None) or getattr(f, "attr", None)
-        if (isinstance(f, ast.Name) and f.id in functions) or name in REDACTING_APIS:
+        if isinstance(f, ast.Name) and functions.get(f.id) in REDACT_FUNCS:
+            return True
+        if _name(f) in REDACTING_APIS:
             return True
     return False
 
@@ -539,15 +700,16 @@ def _readers():
     for rel, path in _python_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         modules, functions = _redact_aliases(tree)
+        aliases = _ledger_aliases(tree)
         scopes = _scope_names(tree)
         top = [n for n in ast.iter_child_nodes(tree)
                if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
         top_nodes = [x for n in top for x in ast.walk(n)]
-        if _reads_ledger(top_nodes):
+        if _reads_ledger(top_nodes, aliases):
             found[f"{rel}::<module>"] = _redacts(top_nodes, modules, functions)
         for name, fn in scopes:
             nodes = list(_own_nodes(fn))
-            if _reads_ledger(nodes):
+            if _reads_ledger(nodes, aliases):
                 found[f"{rel}::{name}"] = _redacts(nodes, modules, functions)
     return found
 
@@ -555,6 +717,65 @@ def _readers():
 def _exempt(name: str) -> bool:
     rel = name.split("::", 1)[0]
     return name in EXEMPT or f"{rel}::*" in EXEMPT
+
+
+def test_every_slice_for_an_embedder_names_the_embedder():
+    """slice_snapshot_text applies the embedding rule for the model it is
+    given (default: the ACTIVE one); a caller that embeds with another model
+    (a re-embed, a candidate store) must name it, or a tagged turn's text
+    reaches an embedder its owner never allowed."""
+    calls = []
+    for root in (REPO / "Orchestrator", REPO / "scripts"):
+        for p in sorted(root.rglob("*.py")):
+            if "/tests/" in p.as_posix():
+                continue
+            for n in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+                if isinstance(n, ast.Call) and _name(n.func) == "slice_snapshot_text":
+                    calls.append((p.relative_to(REPO).as_posix(), n.lineno,
+                                  len(n.args) + len(n.keywords)))
+    assert len(calls) >= 5, calls
+    assert all(argc >= 4 for _p, _l, argc in calls), [c for c in calls if c[2] < 4]
+
+
+def test_the_gate_finds_attribute_paths_aliases_and_fake_redaction():
+    """The A13 scan itself: a path by attribute or in a local variable, an
+    aliased primitive or ledger module, all count as reading the ledger; a
+    call into the redact module that does not redact (is_tagged) does not
+    count as redacting."""
+    src = """
+from Orchestrator import config, ledger as L
+from Orchestrator.volume import read_volume_bytes as rvb
+from Orchestrator.wellness import redact as wellness_redact
+from Orchestrator.wellness.redact import is_tagged, for_reader as fr
+
+def leak_a(sid):
+    return open(config.VOL_PATH, 'rb').read().decode()
+
+def leak_b(meta):
+    view = L.view(config.VOL_PATH)
+    wellness_redact.is_tagged('')
+    is_tagged('')
+    return view.text(0, 10)
+
+def leak_c():
+    return rvb('x')
+
+def leak_d():
+    p = ledger_path()
+    with open(p, 'rb') as f:
+        return f.read()
+
+def ok_e():
+    return fr(open(config.VOL_PATH).read())
+"""
+    tree = ast.parse(src)
+    modules, functions = _redact_aliases(tree)
+    aliases = _ledger_aliases(tree)
+    found = {name: (_reads_ledger(list(_own_nodes(fn)), aliases),
+                    _redacts(list(_own_nodes(fn)), modules, functions))
+             for name, fn in _scope_names(tree)}
+    assert found == {"leak_a": (True, False), "leak_b": (True, False), "leak_c": (True, False),
+                     "leak_d": (True, False), "ok_e": (True, True)}, found
 
 
 def test_every_ledger_reader_redacts():

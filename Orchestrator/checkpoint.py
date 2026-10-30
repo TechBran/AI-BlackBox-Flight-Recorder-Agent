@@ -443,11 +443,12 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         loc_field = f"location={location_gauge} " if location_gauge else ""
 
         # M7 ledger rule: the turns since the last mint include one a wellness
-        # result reached (its text was masked when it was recorded); the
-        # snapshot carries the WELLNESS tag every ledger reader redacts by.
-        # "" for every other snapshot: no gauge key, byte-identical.
-        from Orchestrator.wellness.mask import gauge_text
-        wellness_gauge = gauge_text(s.last_context_meta.get("wellness"))
+        # result reached (its text was masked when it was recorded, and its
+        # items carry its tag); the snapshot carries the WELLNESS tag every
+        # ledger reader redacts by. "" for every other snapshot: no gauge
+        # key, byte-identical.
+        from Orchestrator.wellness.mask import gauge_text, items_gauge
+        wellness_gauge = gauge_text(items_gauge(new_items))
 
         def _render_log_line(it: dict) -> str:
             if it.get("role") == "user":
@@ -507,8 +508,6 @@ def perform_mint(operator: str, reason: str = "MANUAL") -> Dict[str, Any]:
         # later mint on a route that never stamps one (cron /chat, CU, on-device)
         # can never inherit a stale fix.
         s.last_context_meta["location"] = ""
-        # The WELLNESS tag belonged to the turns just minted, the same way.
-        s.last_context_meta.pop("wellness", None)
         s.conv_turns_since  = 0
         s.conv_tokens_since = 0
         s.ctx_tokens_since  = 0

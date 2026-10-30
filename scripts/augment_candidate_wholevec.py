@@ -19,7 +19,9 @@ groups from the 6d rebuild) into a NEW candidate at {new-dir}/{slug}
     (chunk_snapshot + whole-body prepend when multi-chunk).
 
 Bodies are sliced from the live volume exactly as the engine does
-(migrate.slice_snapshot_text against the snapshot index byte offsets).
+(migrate.slice_snapshot_text against the snapshot index byte offsets, for the
+candidate's --slug: a WELLNESS-tagged turn whose owner did not allow that
+embedder is its pointer line only, the M7 mint rule).
 
 SAFETY: the old candidate is opened RAW (ids.json/ordinals.json/vectors.f32
 read directly — never through VectorStore, whose open() could self-heal =
@@ -187,7 +189,7 @@ def main(argv=None) -> int:
             stats["copied_single"] += 1
             flush_staged()
         else:
-            body = slice_snapshot_text(sid, index, vol_bytes)
+            body = slice_snapshot_text(sid, index, vol_bytes, slug)
             if body is None:
                 # Should not happen (the rebuild sliced this body); keep the
                 # valid chunk vectors rather than dropping the snapshot, and
@@ -215,7 +217,7 @@ def main(argv=None) -> int:
             and sid not in done and sid not in quarantined]
     print(f"[augment] phase B: {len(late)} late-minted snapshot(s) to embed fully")
     for sid in late:
-        body = slice_snapshot_text(sid, index, vol_bytes)
+        body = slice_snapshot_text(sid, index, vol_bytes, slug)
         if body is None:
             print(f"[augment] WARNING {sid}: invalid byte range — skipping")
             stats["body_missing"] += 1

@@ -32,6 +32,7 @@ from Orchestrator.embeddings import search as _emb
 from Orchestrator.embeddings.registry import EMBEDDING_MODELS
 from Orchestrator.fossils import (
     extract_snapshot_content,
+    hidden_from_reader,
     keyword_retrieve_ids_for_operator,
     load_snapshot_index,
 )
@@ -209,6 +210,36 @@ def _note_rerank_fallthrough(reason: str) -> None:
     except Exception as e:  # noqa: BLE001 - observability must never break retrieval
         print(f"[RERANK] {reason}; falling through to the un-reranked ranking "
               f"(fallthrough record unavailable: {e})")
+
+
+# How many times retrieve() searches again for a tagged turn the reader may
+# not see (each pass drops the ones it found; a pass that finds none ends it).
+_HIDDEN_RESEARCH_LIMIT = 4
+
+
+def _hidden_ids(sids, index) -> set:
+    """The candidates the current reader may not see: WELLNESS-tagged turns
+    (fossils.hidden_from_reader probes each one's header in place). A range
+    that cannot be read is left alone: its text cannot be delivered either."""
+    out: set = set()
+    if not sids:
+        return out
+    try:
+        view = ledger.view(VOL_PATH)
+    except Exception:  # noqa: BLE001 - no ledger, no text to deliver
+        return out
+    memo: dict = {}
+    for sid in sids:
+        meta = index.get(sid) or {}
+        try:
+            start, end = int(meta["byte_start"]), int(meta["byte_end"])
+            if end <= start or end > view.size:
+                continue
+            if hidden_from_reader(view.slice(start, end), meta.get("operator"), memo):
+                out.add(sid)
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _decode_snapshot_text(meta) -> "str | None":
@@ -530,29 +561,41 @@ def retrieve(query: str, operator: str = "", k: int = 10, *, include_keyword: bo
     #    Provenance mode additionally asks the store for each winner's chunk
     #    ordinal (M8/WI-7a best-chunk identity); the default call shape stays
     #    the frozen 3-tuple contract so eval fakes/older stores are untouched.
-    ord_by_id: dict[str, "int | None"] = {}
-    if return_provenance or rerank_enabled:
-        # The rerank stage also wants best-chunk identity (its passages window
-        # on the matched chunk — audit A9), so ordinals are fetched whenever
-        # either consumer needs them. Flag-off + no provenance keeps the frozen
-        # 3-tuple call shape below, byte-identical to the historical path.
-        try:
-            sem4 = store.search_with_vectors(
-                qv_np, candidate_n, allowed_ids, with_ordinals=True
-            )
-        except TypeError:
-            if return_provenance:
-                raise  # provenance mode's documented hard requirement
-            # rerank-only on a store without ordinal support (v1-era fake /
-            # eval stub): no chunk identity — every passage degrades to the
-            # head window; ranking still proceeds.
-            sem3 = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
-            sem4 = [(sid, cos, vec, None) for (sid, cos, vec) in sem3]
-        sem = [(sid, cos, vec) for (sid, cos, vec, _o) in sem4 if cos >= junk_floor]
-        ord_by_id = {sid: o for (sid, cos, _vec, o) in sem4 if cos >= junk_floor}
-    else:
-        sem = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
-        sem = [(sid, cos, vec) for (sid, cos, vec) in sem if cos >= junk_floor]
+    #    M7 ledger rule: a WELLNESS-tagged turn the reader may not see is no
+    #    candidate (its vector was built from what it hides, so its rank alone
+    #    would say what it is about): when one comes back, the search runs
+    #    again without it, exactly as if it were not in the store.
+    excluded: set = set()
+    for _attempt in range(_HIDDEN_RESEARCH_LIMIT + 1):
+        ord_by_id: dict[str, "int | None"] = {}
+        if return_provenance or rerank_enabled:
+            # The rerank stage also wants best-chunk identity (its passages window
+            # on the matched chunk — audit A9), so ordinals are fetched whenever
+            # either consumer needs them. Flag-off + no provenance keeps the frozen
+            # 3-tuple call shape below, byte-identical to the historical path.
+            try:
+                sem4 = store.search_with_vectors(
+                    qv_np, candidate_n, allowed_ids, with_ordinals=True
+                )
+            except TypeError:
+                if return_provenance:
+                    raise  # provenance mode's documented hard requirement
+                # rerank-only on a store without ordinal support (v1-era fake /
+                # eval stub): no chunk identity — every passage degrades to the
+                # head window; ranking still proceeds.
+                sem3 = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
+                sem4 = [(sid, cos, vec, None) for (sid, cos, vec) in sem3]
+            sem = [(sid, cos, vec) for (sid, cos, vec, _o) in sem4 if cos >= junk_floor]
+            ord_by_id = {sid: o for (sid, cos, _vec, o) in sem4 if cos >= junk_floor}
+        else:
+            sem = store.search_with_vectors(qv_np, candidate_n, allowed_ids)
+            sem = [(sid, cos, vec) for (sid, cos, vec) in sem if cos >= junk_floor]
+        hidden = _hidden_ids([sid for sid, _cos, _vec in sem], index)
+        if not hidden:
+            break
+        excluded |= hidden
+        allowed_ids = (set(index) if allowed_ids is None else set(allowed_ids)) - excluded
+    sem = [c for c in sem if c[0] not in excluded]
     sem_ids = [sid for sid, _cos, _vec in sem]
     vec_by_id = {sid: vec for sid, _cos, vec in sem}
     cos_by_id = {sid: cos for sid, cos, _vec in sem}  # for the output cosine floor

@@ -36,6 +36,51 @@ from Orchestrator.volume import read_volume_bytes
 from Orchestrator.wellness import redact as wellness_redact
 
 
+# The header's GAUGES block (where a WELLNESS tag lives) ends about 1.3 KB
+# into a snapshot (render_snapshot_body_v71; the live ledger's longest is
+# 1,275 bytes to its session log).
+_HEAD_PROBE = 4096
+_LOG_HEAD_B = b"\nRaw Session Log\n"
+_GAUGE_B = b"\nWELLNESS: "
+
+
+def hidden_from_reader(data, operator: Optional[str] = None, memo: Optional[dict] = None) -> bool:
+    """True for a WELLNESS-tagged snapshot (its bytes, or a view of them) the
+    current reader may not see: a ranked reader leaves it out of the
+    candidates (M7 ledger rule; wellness_redact.may_read). Only the header is
+    probed (about 1 ms per thousand snapshots), so an untagged snapshot costs
+    one small slice. `memo` (one per ranked read: the same reader throughout)
+    keeps the decision per owner and tag."""
+    head = bytes(data[:_HEAD_PROBE])
+    log = head.find(_LOG_HEAD_B)
+    if _GAUGE_B not in (head if log < 0 else head[:log]):
+        return False
+    # The decision is the header's (the tag and its owner): decode no more.
+    return _decide_hidden(str(head[:log + 1] if log >= 0 else data, "utf-8", "replace"),
+                          operator, memo)
+
+
+def _span_hidden(vol_txt: str, s: int, e: int, memo: Optional[dict] = None) -> bool:
+    """hidden_from_reader for the snapshot at vol_txt[s:e] (no copy unless tagged)."""
+    log = vol_txt.find("\nRaw Session Log\n", s, e)
+    if vol_txt.find("\nWELLNESS: ", s, log if log >= 0 else e) < 0:
+        return False
+    return _decide_hidden(vol_txt[s:log + 1 if log >= 0 else e], None, memo)
+
+
+def _decide_hidden(text: str, operator: Optional[str], memo: Optional[dict]) -> bool:
+    tag = wellness_redact.parse_tag(text)
+    if tag is None:
+        return False
+    key = (operator or wellness_redact.snapshot_owner(text), tag.categories)
+    if memo is not None and key in memo:
+        return memo[key]
+    hidden = not wellness_redact.may_read(text, snapshot_operator=operator)
+    if memo is not None:
+        memo[key] = hidden
+    return hidden
+
+
 def cap_chars(text: str, max_chars: int) -> str:
     """Truncate text to max_chars, preserving snapshot structure."""
     if len(text) <= max_chars:
@@ -1401,7 +1446,12 @@ def _keyword_retrieve_scored(vol_txt: str, query: str, k: int = 3) -> List[Tuple
     # the old _compute_tfidf_scores + scoring loop (same df pass, same `lc.count`,
     # same `log(num_docs/df)` IDF, same bigram/trigram boosts, same `score > 0`
     # filter, same iteration/sort order) -- it only changes WHERE/WHEN text is held.
-    spans = split_snapshot_spans(vol_txt)
+    # M7 ledger rule: a WELLNESS-tagged turn the reader may not see is not a
+    # candidate at all (scored on its hidden words, its id alone would say
+    # what it is about); the rest rank exactly as before.
+    memo: dict = {}
+    spans = [(s, e) for s, e in split_snapshot_spans(vol_txt)
+             if not _span_hidden(vol_txt, s, e, memo)]
     num_docs = len(spans)
 
     def _decode_lc(i):
@@ -1503,6 +1553,17 @@ def _keyword_retrieve_for_operator_scored(vol_txt: str, query: str, k: int, op: 
                 end = recent[i][1]["byte_end"]
                 if start < vol_len and end <= vol_len:
                     raw[i] = vol.slice(start, end)
+            # M7 ledger rule: a WELLNESS-tagged turn the reader may not see is
+            # not a candidate at all (scored on its hidden words, its id alone
+            # would say what it is about); the rest rank exactly as before.
+            memo: dict = {}
+            hidden = {i for i in range(len(recent))
+                      if hidden_from_reader(raw[i], recent[i][1].get("operator"), memo)}
+            if hidden:
+                keep = [i for i in range(len(recent)) if i not in hidden]
+                recent = [recent[i] for i in keep]
+                sids = [sids[i] for i in keep]
+                raw = [raw[i] for i in keep]
 
         # PHASE 2b PEAK FIX: do NOT materialize the full decoded `texts` list.
         # Holding the raw bytes (~37 MB of volume then) alongside a decoded copy of the WHOLE

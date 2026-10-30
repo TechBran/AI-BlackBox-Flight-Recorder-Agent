@@ -2441,8 +2441,10 @@ def process_chat_task(task: Task):
 
         # M7 history scrub (A3b), as on /chat/stream: the client's earlier
         # health bubbles never reach a provider the operator did not allow.
-        from Orchestrator.wellness import mask as wellness_mask  # lazy: worker path
-        _history = wellness_mask.scrub_history(inp.messages, active_operator, provider, selected_model)
+        # (Lazy, under a private name: a function-local import binds its name
+        # for the whole function, so it must never reuse a module-level one.)
+        from Orchestrator.wellness import mask as _wellness_mask  # lazy: worker path
+        _history = _wellness_mask.scrub_history(inp.messages, active_operator, provider, selected_model)
         if _history is not inp.messages:
             msg_list = msg_list[:len(msg_list) - len(inp.messages)] + _history
 
@@ -2531,6 +2533,25 @@ def process_chat_task(task: Task):
         # failure, stores the reply AS-IS (ui_reply=raw, snap_persp="") instead of
         # embedding raw JSON or a parse-error sentinel into searchable memory.
         ui_reply, snap_persp = unwrap_reply_envelope(raw)
+
+        # M7 ledger rule: a turn a wellness result reached (a delivered row
+        # for the turn key stamped for this task) is masked before anything
+        # is made from its reply: the media prompts and [ARTIFACT] files below
+        # (Portal/), result_data (tasks.db, and the cron rows that copy it),
+        # the snapshot body and its keyword digest; the reasoning is omitted
+        # and the mint carries the WELLNESS tag. The user's own words
+        # (log_text) stay verbatim. A heuristic carry (a reply quoting an
+        # earlier result) masks the ledger's copy only, below: the reply the
+        # user gets is never changed on a guess.
+        from Orchestrator.wellness import turn as _wellness_turn  # lazy: worker path
+        _stamped = _wellness_turn.current()
+        wellness_carry = _wellness_mask.carry_for(
+            active_operator,
+            turn_key=_stamped.turn_key if _stamped and _stamped.operator == active_operator else None,
+            recall_text=ui_reply)
+        if wellness_carry is not None and wellness_carry.exact:
+            ui_reply = wellness_carry.mask(ui_reply)
+            snap_persp = wellness_carry.mask(snap_persp)
 
         # SMS mode: cap response length and strip formatting
         if sms_mode:
@@ -2653,21 +2674,12 @@ def process_chat_task(task: Task):
         user_message_content = next((m.get("content") for m in inp.messages if m.get("role") == "user"), None)
         log_text = (user_text if user_text else "[media content]") if user_message_content else ""
 
-        # M7 ledger rule: a turn a wellness result reached (a delivered row
-        # for the turn key stamped for this task) is recorded masked: the reply
-        # in result_data (tasks.db, and the cron rows that copy it) and in the
-        # snapshot body, the keyword digest built from the masked text, the
-        # reasoning omitted, the WELLNESS tag on the mint. The user's own words
-        # (log_text) stay verbatim.
-        from Orchestrator.wellness import turn as wellness_turn  # lazy: worker path
-        _stamped = wellness_turn.current()
-        wellness_carry = wellness_mask.carry_for(
-            active_operator,
-            turn_key=_stamped.turn_key if _stamped and _stamped.operator == active_operator else None,
-            recall_text=reply_alias)
-        if wellness_carry is not None:
-            ui_reply = wellness_carry.mask(ui_reply)
-            reply_alias = wellness_carry.mask(reply_alias)
+        # M7 ledger rule: the ledger's copy of a wellness turn (masked above
+        # for an exact carry; a heuristic one masks it here, and only here).
+        ledger_reply, ledger_alias = ui_reply, reply_alias
+        if wellness_carry is not None and not wellness_carry.exact:
+            ledger_reply = wellness_carry.mask(ui_reply)
+            ledger_alias = wellness_carry.mask(reply_alias)
 
         # snap_text is the searchable snapshot body for this assistant turn.
         # Post-cutover the snapshot IS the actual response (no perspective-only
@@ -2684,14 +2696,14 @@ def process_chat_task(task: Task):
         # snapshot body or the deterministic keyword digest (HTML token noise like
         # 'div'/'class'/'data-task-id'/'image-loading-placeholder'). Compute the
         # snapshot body + keywords from a TAG-STRIPPED copy; ui_reply keeps the div.
-        clean = _strip_html(reply_alias)
+        clean = _strip_html(ledger_alias)
         _kw = _extract_keywords(clean)
         if _kw:
             snap_text = clean + "\n\nKeywords: " + ", ".join(_kw)
         else:
             snap_text = clean
         if reasoning and reasoning.strip():
-            snap_text = snap_text + ("\n\n" + wellness_mask.REASONING_OMITTED if wellness_carry is not None
+            snap_text = snap_text + ("\n\n" + _wellness_mask.REASONING_OMITTED if wellness_carry is not None
                                      else "\n\n[REASONING]\n" + reasoning.strip())
 
         update_task(task.task_id, progress=90)
@@ -2702,7 +2714,7 @@ def process_chat_task(task: Task):
         # context_used, minted inline (this is a worker thread, not the loop).
         # The gate is this module's knobs, read now (tests stub them here).
         checkpoint_triggered = persist_turn_and_maybe_mint_blocking(
-            s, active_operator, log_text, ui_reply, gate=MintGate.of(sys.modules[__name__]),
+            s, active_operator, log_text, ledger_reply, gate=MintGate.of(sys.modules[__name__]),
             snap_text=snap_text, prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0), total_tokens=total_tok,
             provenance=provenance, count_context=True, tag="[CHECKPOINT]",

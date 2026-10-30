@@ -110,11 +110,17 @@ def _record_turn(state, operator: str, user_text: str, assistant_text: str, *,
                  tag: str, wellness: Optional[dict] = None) -> Optional[str]:
     """Everything before the mint; returns the mint reason (None: no mint now)."""
     utc_now = now_utc_iso()
+    # The WELLNESS tag of a turn a wellness result reached (its text arrives
+    # masked) rides on the turn's own items, so a mint on another thread that
+    # lands between these appends still mints each item with its tag
+    # (perform_mint merges the tags of the items it covers). Absent for every
+    # other turn: its items are exactly as before.
+    tag_item = {"wellness": wellness} if wellness else {}
     if user_text:
-        state.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_text})
+        state.add_conversation_turn({"role": "user", "utc": utc_now, "text": user_text, **tag_item})
     state.add_conversation_turn({
         "role": "assistant", "utc": utc_now, "text": assistant_text,
-        "snap_text": assistant_text if snap_text is None else snap_text,
+        "snap_text": assistant_text if snap_text is None else snap_text, **tag_item,
     })
 
     if total_tokens is None:
@@ -131,12 +137,6 @@ def _record_turn(state, operator: str, user_text: str, assistant_text: str, *,
         meta["model"] = model
     # The snapshot's LOCATION gauge (perform_mint reads it into `gauges`).
     meta["location"] = location_gauge
-    # The WELLNESS tag of a turn a wellness result reached (its text arrives
-    # masked). Merged, not replaced: the next mint covers every turn since the
-    # last one, and perform_mint consumes it. Absent for every other turn.
-    if wellness:
-        from Orchestrator.wellness.mask import merge_gauge
-        meta["wellness"] = merge_gauge(meta.get("wellness"), wellness)
     meta["usage_last"] = {"prompt_tokens": prompt_tokens,
                           "completion_tokens": completion_tokens,
                           "total_tokens": total_tokens}

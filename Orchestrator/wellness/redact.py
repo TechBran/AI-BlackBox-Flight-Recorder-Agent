@@ -3,7 +3,9 @@ not see them (spec §3.7, W25, W29; check A13).
 
 A snapshot whose GAUGES carry a WELLNESS line is a tagged turn: perform_mint
 renders the line for every turn a wellness result reached (mask.py masked its
-numbers first). The numbers are gone, but the words stay (the user's own,
+numbers first). Only the header's GAUGES block counts: a line shaped like the
+gauge anywhere in the session log (a quoted snapshot, this very format in a
+code block) tags nothing. The numbers are gone, but the words stay (the user's own,
 verbatim; the assistant's qualitative ones), and the ledger is read by others:
 the Flight Recorder, `system`, other operators, cross-operator MCP and Claude
 Code reads, and every provider that later receives retrieved, reranked,
@@ -61,6 +63,7 @@ BACKGROUND_SURFACE = "system"
 _GAUGE_RE = re.compile(r"^WELLNESS: (?P<body>[^\n]+?) · values not recorded[ \t]*$", re.M)
 _OPERATOR_RE = re.compile(r"^[ \t]*OPERATOR:[ \t]*(?P<op>\S[^\n]*?)[ \t]*$", re.M)
 _LOG_HEAD = "Raw Session Log\n"
+_GAUGES_HEAD = "GAUGES\n"
 _ENTRY_RE = re.compile(r"^(- \[\d+\] )(\S+ )(?:location=[^\n]*? )?(operator=[^\n]*? (?:user|assistant):)")
 _ENTRY_NO_RE = re.compile(r"^(- \[\d+\] )")
 # The fixed trailer render_snapshot_body_v71 writes after the log.
@@ -97,11 +100,28 @@ def format_gauge(categories, labels=(), refs=()) -> str:
     return f"{cats} · {label} · ref {ref_text}{GAUGE_SUFFIX}"
 
 
+def _gauges_block(text: str) -> str:
+    """The header's GAUGES block (render_snapshot_body_v71: "GAUGES" up to the
+    blank line, always before the session log), or "" when there is none.
+    The header is the box's own text; the log is anyone's."""
+    log = text.find("\n" + _LOG_HEAD)
+    head = text if log < 0 else text[:log + 1]
+    if head.startswith(_GAUGES_HEAD):
+        start = len(_GAUGES_HEAD)
+    else:
+        i = head.find("\n" + _GAUGES_HEAD)
+        if i < 0:
+            return ""
+        start = i + 1 + len(_GAUGES_HEAD)
+    end = head.find("\n\n", start)
+    return head[start:] if end < 0 else head[start:end + 1]
+
+
 def parse_tag(text: Optional[str]) -> Optional[Tag]:
     """The WELLNESS tag of a snapshot text, or None (an untagged text)."""
     if not text or "WELLNESS: " not in text:
         return None
-    m = _GAUGE_RE.search(text)
+    m = _GAUGE_RE.search(_gauges_block(text))
     if not m:
         return None
     parts = m.group("body").split(" · ")
@@ -127,7 +147,8 @@ def pointer_line(text: str) -> str:
 
 
 def snapshot_owner(text: str) -> Optional[str]:
-    m = _OPERATOR_RE.search(text or "")
+    """The OPERATOR of the header's GAUGES block (None without one)."""
+    m = _OPERATOR_RE.search(_gauges_block(text or ""))
     return m.group("op").strip() if m else None
 
 
@@ -254,6 +275,19 @@ def for_reader(text: Optional[str], *, snapshot_operator: Optional[str] = None,
     return text if _visible(tag, owner, reader, check_surface=True) else hide(text)
 
 
+def may_read(text: Optional[str], *, snapshot_operator: Optional[str] = None,
+             provider=_KEEP, model: Optional[str] = None) -> bool:
+    """False for a tagged turn the current reader may not see (for_reader
+    would hide it). A ranked reader (keyword, semantic) leaves such a turn
+    out of the candidates altogether, so which ids come back for a query
+    says nothing about what a hidden turn holds."""
+    tag = parse_tag(text)
+    if tag is None:
+        return True
+    return for_reader(text, snapshot_operator=snapshot_operator, provider=provider,
+                      model=model) is text
+
+
 def redact(text: Optional[str], snapshot_operator: Optional[str], reader_operator: Optional[str],
            provider: Optional[str], *, model: Optional[str] = None) -> Optional[str]:
     """`text` as `reader_operator` may see it when it goes to `provider`
@@ -268,19 +302,45 @@ def redact(text: Optional[str], snapshot_operator: Optional[str], reader_operato
     return text if _visible(tag, owner, reader, check_surface=False) else hide(text)
 
 
-_START_RE = re.compile(r"^=== START SNAPSHOT ", re.M)
+_START_RE = re.compile(r"^=== START SNAPSHOT — UTC (?P<utc>\S+) — (?P<snap>SNAP-\d{8}-\d+)\b[^\n]*$",
+                       re.M)
+# How far past its START a snapshot's END is looked for (the index rebuild's
+# bound: fossils.rebuild_snapshot_index).
+_MAX_SNAPSHOT = 200000
 
 
 def redact_volume(text: Optional[str]) -> Optional[str]:
-    """A run of whole snapshots (a ledger excerpt), each through for_reader()."""
+    """A run of whole snapshots (the ledger, or an excerpt of it), each
+    through for_reader().
+
+    A snapshot runs from its START header to its own END line, the way the
+    index rebuild reads the ledger; a START line inside a snapshot's text (a
+    quoted fossil) starts nothing. A tagged snapshot runs to the LAST copy of
+    its own END line (id and time) within a snapshot's reach, so no line its
+    text forges can end it early: at worst a later turn that quotes the END
+    line is hidden with it. Text outside any snapshot passes through."""
     if not text or "WELLNESS: " not in text:
         return text
-    starts = [m.start() for m in _START_RE.finditer(text)]
-    if not starts:
+    pieces, pos = [], 0
+    for m in _START_RE.finditer(text):
+        if m.start() < pos:
+            continue                      # inside the snapshot just handed out
+        end_line = f"=== END SNAPSHOT — {m.group('snap')} — UTC {m.group('utc')} ==="
+        first = text.find(end_line, m.end())
+        if first < 0:
+            continue                      # no END: not a whole snapshot
+        head = text[m.start():first]
+        last = max(first, text.rfind(end_line, m.end(), m.start() + _MAX_SNAPSHOT)) \
+            if parse_tag(head) else first
+        end = last + len(end_line)
+        if text.startswith("\n", end):
+            end += 1
+        pieces.append(text[pos:m.start()])
+        pieces.append(for_reader(text[m.start():end]))
+        pos = end
+    if not pieces:
         return for_reader(text)
-    pieces = [text[:starts[0]]]
-    for a, b in zip(starts, starts[1:] + [len(text)]):
-        pieces.append(for_reader(text[a:b]))
+    pieces.append(text[pos:])
     return "".join(pieces)
 
 

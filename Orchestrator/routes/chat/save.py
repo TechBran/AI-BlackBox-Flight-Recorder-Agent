@@ -158,8 +158,9 @@ async def chat_save(request: Request):
             snapshot (the worker's CU / CLI results), which must not take the
             location a phone's /chat/stream carried for its own save,
         wellness_turn: string (optional) - the turn key /chat/stream sent in
-            stream_start; without it the save is masked against every
-            unmasked health result of the last 24 h (spec §3.7)
+            stream_start; without it (or when it matches nothing) the save is
+            masked against every unmasked health result of the last 24 h
+            (spec §3.7)
     }
 
     A wellness turn (one a health result reached) records masked text: its
@@ -191,15 +192,14 @@ async def chat_save(request: Request):
         # M7 ledger rule (durable carry): the delivered rows of this turn live
         # in the operator's health store, so a save after a restart still
         # finds them. A client that echoes the turn key is matched exactly;
-        # one that does not is masked against every recent unmasked result;
-        # a reply that repeats an earlier result (from the chat history) is
+        # one that does not, or whose key matches nothing (stale, mistyped,
+        # not a string), is masked against every recent unmasked result; a
+        # reply that quotes an earlier result (from the chat history) is
         # masked too.
         # Off the loop: it reads the operator's health store.
-        turn_key = body.get("wellness_turn")
         carry = await run_blocking(
-            wellness_mask.carry_for, operator,
-            turn_key=turn_key if isinstance(turn_key, str) else None,
-            fallback=not turn_key, recall_text=assistant_response)
+            wellness_mask.carry_for, operator, turn_key=body.get("wellness_turn"),
+            fallback=True, recall_text=assistant_response)
 
         # Debug: log incoming response
         print(f"[CHAT/SAVE] Received response ({len(assistant_response)} chars)")

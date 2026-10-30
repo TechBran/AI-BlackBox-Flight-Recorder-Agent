@@ -29,6 +29,10 @@ from Orchestrator.wellness import mask
 SENTINELS = FX.SENTINEL_STRINGS
 BUBBLE = ("Last night your sleeping heart rate was 47.3, and on Sunday you walked "
           "12,345 steps. This morning: 118/79.")
+# The bubble as Anthropic may receive it: sleep, heart and activity are ticked
+# for it; blood pressure is off now (and local-only), so its reading goes.
+BUBBLE_FOR_ANTHROPIC = BUBBLE.replace("118/79", "[·]/[·]")
+NO_BP = "Last night your sleeping heart rate was 47.3, and on Sunday you walked 12,345 steps."
 
 
 CATS = {"night": ["heart", "sleep"], "steps": ["activity"], "bp": ["blood_pressure"]}
@@ -71,9 +75,36 @@ def test_a_tagged_bubble_is_masked_for_a_provider_that_is_not_allowed(op):
 
 
 def test_an_allowed_provider_gets_the_bubble_without_the_ref_key(op):
-    msgs = _history(op["refs"]["night"])
+    msgs = _history(op["refs"]["night"], NO_BP)
     out = mask.scrub_history(msgs, OPERATOR, "anthropic")           # ticked for sleep, heart
-    assert out[1] == {"role": "assistant", "content": BUBBLE}
+    assert out[1] == {"role": "assistant", "content": NO_BP}
+
+
+def test_a_bubble_tagged_with_an_allowed_ref_still_loses_what_the_provider_may_not_get(op):
+    """A bubble can quote more than its own ref (an on-device reply covering
+    last night and this morning's blood pressure, tagged with the night ref):
+    the provider gets the night's numbers, never the reading it may not have."""
+    out = mask.scrub_history(_history(op["refs"]["night"]), OPERATOR, "anthropic")
+    assert out[1] == {"role": "assistant", "content": BUBBLE_FOR_ANTHROPIC}
+    out = mask.scrub_history(_history(), OPERATOR, "anthropic")      # and without a ref
+    assert out[1] == {"role": "assistant", "content": BUBBLE_FOR_ANTHROPIC}
+
+
+@pytest.mark.parametrize("state", ("revoked", "paused"))
+def test_a_disconnect_that_kept_the_history_still_scrubs(op, state):
+    """Disconnect with Keep history: the results stay in the store, the
+    operator is no longer live, so no provider may receive them, and an old
+    client that never sends refs gets every health number masked."""
+    from Orchestrator.tests.wellness_support import write_record
+    write_record(state=state, providers_allowed=["anthropic"],
+                 last_push_at=op["rec"]["last_push_at"])
+    for provider in ("openai", "anthropic"):
+        out = mask.scrub_history(_history(), OPERATOR, provider)
+        if state == "revoked" or provider == "openai":
+            assert not _hits(out[1]), (state, provider, out[1])
+        else:                                    # paused is still live: as before
+            assert out[1]["content"] == BUBBLE_FOR_ANTHROPIC
+        assert out[0]["content"] == "how did I sleep? my BP was 118/79"
 
 
 def test_a_local_only_category_ref_is_masked_even_on_an_allowed_cloud(op, monkeypatch):
@@ -102,7 +133,8 @@ def test_a_client_that_never_sends_refs_is_masked_on_a_disallowed_provider(op):
     parts = [{"role": "assistant", "content": [{"type": "text", "text": BUBBLE}]}]
     assert not _hits(mask.scrub_history(parts, OPERATOR, "xai"))
     # On an allowed provider nothing changes: the same list object.
-    assert mask.scrub_history(msgs, OPERATOR, "anthropic") is msgs
+    plain = _history(content=NO_BP)
+    assert mask.scrub_history(plain, OPERATOR, "anthropic") is plain
 
 
 def test_operators_without_health_get_the_same_list(op):
@@ -131,12 +163,12 @@ def test_a_failed_scrub_masks_instead_of_sending(op, monkeypatch):
 PROVIDERS = ("openai", "anthropic", "google", "xai", "custom")
 
 
-def _stream(spec, monkeypatch, tmp_path, messages):
+def _stream(spec, monkeypatch, tmp_path, messages, provider=None):
     import Orchestrator.routes.chat_routes as cr
     golden_root = tmp_path / "golden"
     golden_root.mkdir(exist_ok=True)
     cap = pg.install(spec, monkeypatch, golden_root)
-    body = {"messages": copy.deepcopy(messages), "provider": spec["provider"],
+    body = {"messages": copy.deepcopy(messages), "provider": provider or spec["provider"],
             "model": spec["model"], "operator": OPERATOR}
 
     async def go():
@@ -170,6 +202,51 @@ def test_no_earlier_number_reaches_a_disallowed_provider(op, monkeypatch, tmp_pa
         assert s not in blob, (provider, s)
     assert "wellness_ref" not in blob
     assert "how did I sleep? my BP was 118/79" in blob                 # the user's own words
+
+
+@pytest.mark.parametrize("alias,ticked", [("local", []), ("claude", ["anthropic"]),
+                                          ("grok", ["xai"]), ("openai_rest", ["openai"]),
+                                          ("custom:gemma-box", [])])
+def test_a_provider_string_the_dispatcher_sends_to_gemini_is_judged_as_gemini(
+        op, monkeypatch, tmp_path, alias, ticked):
+    """/chat/stream sends every provider string it does not dispatch by name
+    to Gemini, whatever the allow-list would make of it ("local" reads as the
+    on-device model, "claude" as Anthropic): the scrub judges Google, the
+    provider that really receives the history."""
+    from Orchestrator.routes.chat import stream as stream_mod
+    from Orchestrator.tests.wellness_support import write_record
+    write_record(providers_allowed=ticked, last_push_at=op["rec"]["last_push_at"])
+    assert stream_mod._dispatch_provider(alias) == "google"
+    upstream = _stream(_spec("google"), monkeypatch, tmp_path, _history(), provider=alias)
+    assert upstream and all("gemini" in (u.get("url") or "") for u in upstream)
+    blob = json.dumps([u["json"] for u in upstream], ensure_ascii=False)
+    for s in ("47.3", "12,345"):
+        assert s not in blob, (alias, s)
+
+
+def test_dispatch_provider_names_what_open_provider_stream_calls(monkeypatch):
+    """_dispatch_provider and _open_provider_stream agree on every name."""
+    from types import SimpleNamespace
+
+    from Orchestrator.routes.chat import stream as stream_mod
+    calls = {"stream_openai_with_reasoning": "openai", "stream_anthropic_with_thinking": "anthropic",
+             "stream_xai_with_reasoning": "xai", "stream_custom_with_reasoning": "custom",
+             "stream_gemini_with_thinking": "google"}
+    for fn, name in calls.items():
+        monkeypatch.setattr(stream_mod, fn, lambda *a, _n=name, **k: _n)
+    for p in ("openai", "anthropic", "xai", "custom", "google", "gemini", "claude", "local",
+              "grok", "on_device", "", "OPENAI"):
+        req = SimpleNamespace(provider=p, model="m", operator=OPERATOR, cu_session_id=None,
+                              cu_device_id="blackbox")
+        assert stream_mod._open_provider_stream(req, []) == stream_mod._dispatch_provider(p), p
+    assert stream_mod._dispatch_provider("computer-use") == "computer-use"
+
+
+def test_a_computer_use_turn_gets_no_health_numbers(op):
+    """A CU agent is never a destination for health data (an unknown provider
+    to the allow-list): the history it is handed is masked."""
+    out = mask.scrub_history(_history(), OPERATOR, "computer-use")
+    assert not _hits(out[1])
 
 
 @pytest.mark.parametrize("provider", ("anthropic", "openai"))

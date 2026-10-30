@@ -326,12 +326,19 @@ def test_a_save_with_no_key_masks_against_recent_unmasked_results(box, monkeypat
     assert "WELLNESS" not in snapshot_text(box.vol, res2["snap_id"])
 
 
-def test_a_concurrent_turn_whose_save_lands_second_is_still_masked(box):
+@pytest.mark.parametrize("reply", ["Your sleeping heart rate was 47.3.",
+                                   "Your sleeping heart rate was 47 bpm."])
+def test_a_concurrent_turn_whose_save_lands_second_is_still_masked(box, reply):
+    """Two chats at once, neither echoing its key: B's save takes A's rows
+    first (over-masked, the safe way) and stamps them; A's save then quotes
+    them, so the recall rule masks and tags it. (A reply that quotes only a
+    duration is the residual until the clients echo the key: wave 3.)"""
     deliver(box.st, box.envs["night"], "wt_a")
     _save(box.cr, assistant_response="Unrelated: the build passed.")     # B, no key, first
-    _save(box.cr, assistant_response="Your sleeping heart rate was 47.3.")  # A, no key, second
+    res = _save(box.cr, assistant_response=reply)                        # A, no key, second
     _user, assistant = _last_turns()
-    assert not _hits(assistant["text"])
+    assert not _hits(assistant["text"]) and "47" not in assistant["text"]
+    assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
 
 
 def test_a_non_wellness_turn_is_byte_identical(box, capsys):
@@ -459,7 +466,8 @@ def test_worker_turn_records_masked_text_in_tasks_db_and_the_ledger(box, monkeyp
     monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
 
     def fake_call(messages, model, operator="x"):
-        deliver(box.st, box.envs["steps"], "wt_worker")      # the tool ran mid-turn
+        # The tool ran mid-turn, for the turn stamped on this task.
+        deliver(box.st, box.envs["steps"], turn_mod.current().turn_key)
         return (REPLY, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
                 "I read 12345 and 47.3.")
 
@@ -496,7 +504,10 @@ def test_stream_start_names_the_turn_key_only_for_a_stamped_enrolled_turn(box, m
     def fake_build(messages, operator, provider="openai", window_guard_tokens=None):
         return [{"role": "system", "content": "sys"}] + list(messages), {}, {}
 
+    seen = []
+
     async def fake_stream(msgs, model, operator=None, **kw):
+        seen.append(turn_mod.current())          # the turn this stream runs as
         yield {"type": "content", "data": "ok"}
 
     monkeypatch.setattr(cr, "build_streaming_context", fake_build)
@@ -521,11 +532,310 @@ def test_stream_start_names_the_turn_key_only_for_a_stamped_enrolled_turn(box, m
         block = next(b for b in sse.split("\n\n") if b.startswith("event: stream_start"))
         return json.loads(block.split("data: ", 1)[1])
 
+    def stamped_key():
+        t = seen[-1]
+        return t.turn_key if t is not None and t.operator == OPERATOR else None
+
+    # The key named is the stamped turn's (the test's here; the route's own
+    # once the entry points stamp every request), and none when none is.
     stamped = turn_mod.WellnessTurn(OPERATOR, turn_mod.SURFACE_ANDROID, True, provider="openai",
                                     turn_key="wt_stream_1")
-    assert start_event(OPERATOR, stamped)["wellness_turn"] == "wt_stream_1"
-    assert "wellness_turn" not in start_event(OPERATOR, None)
+    event = start_event(OPERATOR, stamped)
+    assert event["wellness_turn"] == stamped_key() and event["wellness_turn"]
+    assert start_event(OPERATOR, None).get("wellness_turn") == stamped_key()
     other = turn_mod.WellnessTurn("other-human", turn_mod.SURFACE_ANDROID, True,
                                   provider="openai", turn_key="wt_stream_2")
     assert start_event("other-human", other) == {"provider": "openai", "model": "m",
                                                  "provenance": {}}
+
+
+# ------------------------------------------------------------------ what is NOT a wellness turn
+
+# Ordinary replies: durations, percents, milliseconds, a plan's step, a clock.
+ORDINARY = ("I'll check back in one hour.", "The build takes 30 minutes.",
+            "Give it 45 minutes to finish.", "That's about two hours of work.",
+            "The deploy took 20 min.", "CPU sits at 95% for 120 ms bursts.",
+            "Raised the timeout to 500 ms; tests pass at 100%.",
+            "Heading out now, home in 30 minutes.", "Step 12 of the plan is done.",
+            "The meeting moved to 12:30.")
+
+
+def _answered_earlier_today(box, hours=3):
+    """The operator's health answers from earlier today, each already saved
+    (rows masked): sleep stages and workouts put plain durations in V."""
+    now = int(time.time() * 1000)
+    refs = [deliver(box.st, box.envs[k], f"wt_{k}_earlier", ts=now - hours * 3600 * 1000)
+            for k in ("night", "steps", "bp", "week", "sleeps", "workouts")]
+    box.st.mark_masked(refs, now - hours * 3600 * 1000)
+    return mask.value_set(box.envs[k] for k in ("night", "steps", "bp", "week", "sleeps",
+                                                 "workouts"))
+
+
+def test_the_recall_rule_needs_a_distinctive_quote(box):
+    """The recall rule fires on a decimal, grouped thousands, a pair or a
+    number with a reading's own unit; never on a duration, a percent, a
+    millisecond count or a clock time, though V holds "30 min" and "one hour"."""
+    v = _answered_earlier_today(box)
+    assert {"30 min", "one hour"} & v or {"45 minutes", "20 min", "two hours"} & v
+    for text in ORDINARY:
+        assert not mask.quotes_results(text, v), text
+    for text in ("As I said, 47.3 is your number.", "You did 12,345 that day.",
+                 "It was 118/79.", "Your sleeping heart rate was 47 bpm.",
+                 "you logged 12345 steps", "Tu pulso fue 47,3."):
+        assert mask.quotes_results(text, v), text
+    assert not mask.quotes_results("Step 47 of the runbook.", v)      # steps are thousands
+
+
+def test_ordinary_saves_after_a_health_answer_are_byte_identical(box, capsys):
+    _answered_earlier_today(box)
+    for text in ORDINARY:
+        res = _save(box.cr, assistant_response=text, reasoning="Plain thinking.")
+        _user, assistant = _last_turns()
+        assert assistant["text"] == text
+        assert assistant["snap_text"] == f"[REASONING]\nPlain thinking.\n\n[RESPONSE]\n{text}"
+        body = snapshot_text(box.vol, res["snap_id"])
+        assert not _gauge(body) and box.embedded[-1] == body
+    assert "Wellness turn" not in capsys.readouterr().out
+
+
+def test_a_save_after_the_wellness_turn_saved_itself_is_byte_identical(box, monkeypatch):
+    """No grace window: once a wellness turn's own save masked its rows, the
+    next turn (ten minutes on, with or without a key) is recorded as is."""
+    now = int(time.time() * 1000)
+    deliver(box.st, box.envs["steps"], "wt_s1")
+    _save(box.cr, assistant_response="You walked 12,345 steps.")            # its own save, no key
+    deliver(box.st, box.envs["night"], "wt_s2")
+    _save(box.cr, assistant_response="It was 47.3.", wellness_turn="wt_s2")  # its own, keyed
+    monkeypatch.setattr(mask, "_now_ms", lambda: now + 10 * 60 * 1000)
+    text = "Raised the timeout to 500 ms; tests pass at 100%."
+    for key in (None, "wt_next"):
+        res = _save(box.cr, assistant_response=text, reasoning="r",
+                    **({"wellness_turn": key} if key else {}))
+        _user, assistant = _last_turns()
+        assert assistant["text"] == text and "[REASONING]\nr" in assistant["snap_text"]
+        assert not _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+@pytest.mark.parametrize("key", ["wt_stale", True, 1, ["wt_x"], {"key": "wt_x"}, ""])
+def test_a_key_that_matches_nothing_still_falls_back(box, key):
+    """W28: an echoed key that names no row (stale, mistyped, not a string)
+    is no reason to skip the safety net: the save is masked against the
+    unmasked deliveries of the last 24 hours."""
+    deliver(box.st, box.envs["night"], "wt_x")
+    res = _save(box.cr, wellness_turn=key, assistant_response=(
+        "Last night you reached 46 at the lowest; overall it was 52 on a usual night."))
+    _user, assistant = _last_turns()
+    assert "46" not in assistant["text"] and "52" not in assistant["text"], assistant["text"]
+    assert "sleep" in _gauge(snapshot_text(box.vol, res["snap_id"]))
+
+
+@pytest.mark.parametrize("failure", ["corrupt", "io"])
+def test_an_unreadable_health_store_never_loses_the_turn(box, monkeypatch, capsys, failure):
+    """A broken store must not stop chat persistence: the turn is recorded,
+    masked by the unit rule and tagged (it may have been a wellness turn),
+    and the journal names only the error class."""
+    import sqlite3
+
+    if failure == "corrupt":
+        box.st.path.write_bytes(b"not a database" * 64)
+        store._INITIALIZED.clear()
+    else:
+        def broken(*a, **k):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(store.Store, "read", broken)
+    res = _save(box.cr, assistant_response="The meeting moved to Tuesday; you slept 7 hours.")
+    assert res["success"] is True and res["minted"] is True
+    _user, assistant = _last_turns()
+    assert assistant["text"] == "The meeting moved to Tuesday; you slept [·] hours."
+    gauge = _gauge(snapshot_text(box.vol, res["snap_id"]))
+    assert gauge.startswith("WELLNESS: activity,blood_pressure,heart,sleep · health data · ")
+    out = capsys.readouterr().out
+    assert "health store unreadable (" in out and "not a database" not in out
+
+
+# ------------------------------------------------------------------ locale forms (A2)
+
+_LOCALE_PHRASES = (
+    "Anoche tu frecuencia cardíaca mientras dormías fue de {comma} lpm.",
+    "Tu pulso en reposo fue {comma}.", "Last night you got to {comma} while asleep.",
+    "You averaged {two} overnight.", "({comma})", "{two}",
+)
+
+
+def test_decimal_commas_trailing_zeros_and_thousands_are_masked(answers):
+    """A2, locale forms: the same reading with a decimal comma (a Spanish
+    reply), with a trailing zero, or rounded to thousands in words."""
+    v = mask.value_set(answers.values())
+    for env in answers.values():
+        for _label, x, _d, _s, _u in _facts(env):
+            if float(x).is_integer() and abs(x) < 1000:
+                continue
+            if not float(x).is_integer():
+                forms = {"comma": f"{x:.1f}".replace(".", ","), "two": f"{x:.2f}"}
+                for phrase in _LOCALE_PHRASES:
+                    text = phrase.format(**forms)
+                    out = mask.mask_text(text, v)
+                    for form in forms.values():
+                        assert form not in out, (text, out)
+            else:
+                from Orchestrator.wellness import catalog
+                words = catalog.number_words(int(round(x, -3)))
+                out = mask.mask_text(f"You walked over {words} yesterday.", v)
+                assert words not in out, out
+                out = mask.mask_text(f"Diste {int(x):,} pasos ayer.".replace(",", "."), v)
+                assert f"{int(x):,}".replace(",", ".") not in out, out
+
+
+def test_a_spanish_wellness_reply_mints_no_value(box):
+    deliver(box.st, box.envs["night"], "wt_es")
+    deliver(box.st, box.envs["week"], "wt_es")
+    reply = ("Anoche tu frecuencia cardíaca mientras dormías fue de 47,3 lpm, un poco por "
+             "debajo de lo habitual (52,1). Dormiste 6,8 horas y diste 12.345 pasos.")
+    res = _save(box.cr, assistant_response=reply, wellness_turn="wt_es")
+    body = snapshot_text(box.vol, res["snap_id"])
+    log = body.split("Raw Session Log\n", 1)[1].split("\nRelease Notes", 1)[0]
+    assistant = next(line for line in log.splitlines() if " assistant: " in line)
+    said = assistant.split(" assistant: ", 1)[1]
+    assert not re.search(r"\d", said), said
+    assert "frecuencia cardíaca" in said and "WELLNESS: " in body
+
+
+# ------------------------------------------------------------------ the worker path
+
+def _worker(box, monkeypatch, reply, *, deliver_envs=(), stamp_key=None, extra=None,
+            task_id=None):
+    import Orchestrator.routes.chat_routes as cr
+    import Orchestrator.tasks as tasks
+    from Orchestrator.models import Task, TaskStatus, TaskType, task_db
+    from Orchestrator.volume import now_utc_iso
+    monkeypatch.setattr(tasks, "build_fossil_context", lambda *a, **k: (
+        "", {"recent": [], "keyword": [], "semantic": [], "checkpoint": []}))
+    monkeypatch.setattr(tasks, "AUTO_ENABLE", True)
+    monkeypatch.setattr(tasks, "TURNS_THRESHOLD", 1)
+    monkeypatch.setattr(tasks, "DEBOUNCE_MS", 0)
+    monkeypatch.setattr(tasks, "should_create_checkpoint", lambda *a, **k: False)
+    monkeypatch.setattr(tasks, "TOOLVAULT_ENABLED", False)
+
+    def fake_call(messages, model, operator="x"):
+        for env in deliver_envs:      # the tool ran mid-turn, for the turn stamped on this task
+            deliver(box.st, box.envs[env], turn_mod.current().turn_key)
+        return reply, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, ""
+
+    monkeypatch.setattr(cr, "call_anthropic", fake_call)
+    data = {"messages": [{"role": "user", "content": "and then?"}], "operator": OPERATOR,
+            "provider": "anthropic", "model": "m", **(extra or {})}
+    task = Task(task_id=task_id or f"wellness-worker-{time.time_ns()}", task_type=TaskType.CHAT,
+                status=TaskStatus.PENDING, created_at=now_utc_iso(), updated_at=now_utc_iso(),
+                operator=OPERATOR, result_data=data)
+    task_db.save_task(task)
+    token = turn_mod.stamp(turn_mod.WellnessTurn(
+        OPERATOR, turn_mod.SURFACE_CRON, True, provider="anthropic",
+        turn_key=stamp_key)) if stamp_key else None
+    try:
+        tasks.process_chat_task(task)
+    finally:
+        if token:
+            turn_mod.clear(token)
+    final = task_db.get_task(task.task_id)
+    assert final.status == TaskStatus.COMPLETED, final.result_data
+    return final
+
+
+def test_an_ordinary_sms_or_cron_reply_after_a_health_answer_is_untouched(box, monkeypatch):
+    """The reply the user gets (an SMS to a peer, a cron notification) is
+    never masked on a guess, and the ledger records it as is."""
+    _answered_earlier_today(box)
+    for extra in ({"sms_mode": True, "sms_sender": "+15550000000", "sms_peer": True}, {}):
+        final = _worker(box, monkeypatch, "Heading out now, home in 30 minutes.", extra=extra)
+        assert final.result_data["ui_reply"] == "Heading out now, home in 30 minutes."
+        assert final.task_id not in box.st.task_refs()
+        body = Path("Volumes/SNAPSHOT_VOLUME.txt").read_text(encoding="utf-8")
+        last = body[body.rindex("=== START SNAPSHOT"):]
+        assert not _gauge(last) and "home in 30 minutes" in last
+
+
+def test_a_recalled_result_masks_the_ledger_copy_only(box, monkeypatch):
+    """A reply quoting an earlier result (the history carried it): the user
+    gets it as written; the snapshot records it masked and tagged."""
+    _answered_earlier_today(box)
+    final = _worker(box, monkeypatch, "As I said this morning, it was 47.3.")
+    assert final.result_data["ui_reply"] == "As I said this morning, it was 47.3."
+    body = Path("Volumes/SNAPSHOT_VOLUME.txt").read_text(encoding="utf-8")
+    last = body[body.rindex("=== START SNAPSHOT"):]
+    assert _gauge(last) and "47.3" not in last and "it was [·]" in last
+    assert final.task_id in box.st.task_refs()       # the row holds the number: erase scrubs it
+
+
+def test_worker_artifacts_and_media_prompts_are_made_from_the_masked_reply(box, monkeypatch):
+    """W26/A11: an [ARTIFACT] file (Portal/artifacts) and a generate_image
+    prompt (tasks.db) of a wellness turn carry no value."""
+    import Orchestrator.tasks as tasks
+    from Orchestrator.models import TaskType, task_db
+    monkeypatch.setattr(tasks, "task_queue", type(tasks.task_queue)())   # nothing really runs
+    reply = ("Here is your file.\n[ARTIFACT:sleep_report.txt:text]Sleeping heart rate 47.3 bpm; "
+             "12,345 steps; BP 118/79[/ARTIFACT]\n\ngenerate_image: a chart of 12,345 steps")
+    final = _worker(box, monkeypatch, reply, deliver_envs=("night", "bp", "steps"),
+                    stamp_key="wt_art_worker")
+    assert final.result_data["artifacts"]
+    files = [p for p in Path("Portal").rglob("*") if p.is_file()]
+    assert files and not any(_hits(p.read_text(errors="replace")) for p in files)
+    assert not _hits(json.dumps(final.result_data))
+    prompts = [t.prompt or "" for t in task_db.get_all_tasks(OPERATOR)
+               if t.task_type == TaskType.IMAGE_GENERATION]
+    assert prompts and not any(_hits(p) for p in prompts), prompts
+
+
+# ------------------------------------------------------------------ the tag rides with the turn
+
+def test_a_mint_between_the_appends_still_tags_the_turn(box, monkeypatch):
+    """A mint on another thread that lands between a wellness turn's two
+    appends (its user words, its reply) tags whatever it mints of the turn,
+    and the next mint tags the rest; an unrelated turn after it is untagged."""
+    from Orchestrator import checkpoint, state, turn_persistence
+    from Orchestrator.routes.chat import save as save_mod
+    from Orchestrator.turn_persistence import MintGate
+    minted = []
+    orig = state.OpState.add_conversation_turn
+
+    def add_then_concurrent_mint(self, item, *a, **k):
+        orig(self, item, *a, **k)
+        if not minted:
+            minted.append(checkpoint.perform_mint(OPERATOR, "CONCURRENT")["snap_id"])
+
+    monkeypatch.setattr(state.OpState, "add_conversation_turn", add_then_concurrent_mint)
+    gauge = {"categories": ["sleep"], "labels": ["night of 2026-10-22"], "refs": ["w-1"]}
+    turn_persistence._record_turn(
+        state.get_state(OPERATOR), OPERATOR, "I felt dizzy and awful last night",
+        "Your sleep was [·], a bit less than usual.", gate=MintGate.of(save_mod), snap_text=None,
+        prompt_tokens=0, completion_tokens=0, total_tokens=0, model="m", location_gauge="",
+        provenance=None, count_context=False, tag="[T]", wellness=gauge)
+    monkeypatch.setattr(state.OpState, "add_conversation_turn", orig)
+    first = snapshot_text(box.vol, minted[0])
+    assert "dizzy" in first and _gauge(first).startswith("WELLNESS: sleep · ")
+    second = snapshot_text(box.vol, checkpoint.perform_mint(OPERATOR, "NEXT")["snap_id"])
+    assert "a bit less than usual" in second and _gauge(second)
+    third = snapshot_text(box.vol, _save(box.cr, assistant_response="Done.")["snap_id"])
+    assert not _gauge(third)
+
+
+# ------------------------------------------------------------------ merge safety
+
+def test_process_chat_task_binds_no_module_level_name_locally():
+    """A function-local import binds its name for the WHOLE function: one
+    that reuses a module-level name (wave 2's H2 imports `wellness_turn` at
+    the top of tasks.py and uses it before this unit's lazy import) turns
+    every earlier use into UnboundLocalError. The worker's lazy imports use
+    private names."""
+    import ast
+
+    import Orchestrator.tasks as tasks
+    tree = ast.parse(Path(tasks.__file__).read_text(encoding="utf-8"))
+    module_names = {a.asname or a.name.split(".")[0] for n in tree.body
+                    if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    module_names |= {"wellness_turn", "wellness_access", "wellness_mask", "wellness_redact"}
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "process_chat_task")
+    local = {a.asname or a.name.split(".")[0] for n in ast.walk(fn)
+             if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    wellness_locals = {n for n in local if "wellness" in n}
+    assert wellness_locals and not (wellness_locals & module_names), wellness_locals

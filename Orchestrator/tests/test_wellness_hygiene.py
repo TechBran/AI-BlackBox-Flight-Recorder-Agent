@@ -123,6 +123,9 @@ def ran(tmp_path_factory):
 
 REPLY = ("Your sleeping heart rate was 47.3 bpm (47 bpm), forty-seven beats per minute. "
          "You walked 12,345 steps (12345); your blood pressure was 118/79.")
+# An [ARTIFACT] a wellness turn asks for: written under Portal/ (served at /ui).
+ARTIFACT = ("\n[ARTIFACT:{name}:text]Sleeping heart rate 47.3 bpm; 12,345 steps; "
+            "BP 118/79[/ARTIFACT]")
 
 
 def _chat_turns(mp, root: Path, client, now: int) -> dict:
@@ -160,7 +163,8 @@ def _chat_turns(mp, root: Path, client, now: int) -> dict:
 
     saved = client.post("/chat/save", json={
         "operator": OPERATOR, "user_message": "how did I sleep last night?",
-        "assistant_response": REPLY, "reasoning": "The tool said 47.3 and 12345 and 118/79.",
+        "assistant_response": REPLY + ARTIFACT.format(name="save_report.txt"),
+        "reasoning": "The tool said 47.3 and 12345 and 118/79.",
         "model": "model-test", "wellness_turn": "wt_hyg"}).json()
 
     st = enroll.store_for(enroll.get_enrollment(OPERATOR), create=False)
@@ -169,10 +173,12 @@ def _chat_turns(mp, root: Path, client, now: int) -> dict:
     mp.setattr(tasks, "TOOLVAULT_ENABLED", False)
 
     def fake_call(messages, model, operator="x"):
+        # Delivered for the turn stamped on this task (the one the mask joins on).
         env = api.summary(OPERATOR, "custom", start=FX.day_of(-5), end=FX.day_of(-5), now_ms=now,
-                          delivery=api.Delivery("wt_hyg_worker", "cron", "anthropic"))
+                          delivery=api.Delivery(turn_mod.current().turn_key, "cron", "anthropic"))
         assert env["ok"]
-        return REPLY, {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, \
+        return REPLY + ARTIFACT.format(name="worker_report.txt"), \
+            {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, \
             "Thinking about 47.3 and 12345."
 
     mp.setattr(cr, "call_anthropic", fake_call)
@@ -248,6 +254,16 @@ def test_the_chat_turns_were_wellness_turns_and_minted(ran):
     assert worker.status.value == "completed" and "[·]" in worker.result_data["reply"]
     assert "hygiene-worker-1" in ran["store"].task_refs()
     assert all(r["masked_at"] for r in ran["store"].deliveries_for_turn("wt_hyg"))
+
+
+def test_both_turns_wrote_their_artifacts_with_no_value(ran):
+    """W26/A11: the scan above covers Portal/, and both paths really wrote
+    an artifact there (the save's and the worker's), from the masked text."""
+    files = sorted(p.name for p in (ran["root"] / "Portal" / "artifacts").rglob("*")
+                   if p.is_file())
+    assert any(n.endswith("save_report.txt") for n in files), files
+    assert any(n.endswith("worker_report.txt") for n in files), files
+    assert ran["saved"]["artifacts"] and ran["worker"].result_data["artifacts"]
 
 
 def test_no_sentinel_in_what_the_embedder_received(ran):
