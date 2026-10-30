@@ -283,7 +283,9 @@ def test_a5_ordinary_replies_are_not_mentions(reply):
 def test_a8_as_of():
     for yes in ("As of 22:32 last night, your sleep was 6 h 49 min.",
                 "Your data last synced on Thursday.", "The most recent data is from October 28.",
-                "Your phone hasn't synced since yesterday.", "Tus datos hasta las 22:32."):
+                "Your phone hasn't synced since yesterday.", "Tus datos hasta las 22:32.",
+                "The last successful sync was at 10:32 PM on October 29th.",
+                "Its most recent upload happened at 22:32."):
         assert evals.as_of_present(yes), yes
     for no in ("You slept well.", "Your sleep was in your usual range."):
         assert not evals.as_of_present(no), no

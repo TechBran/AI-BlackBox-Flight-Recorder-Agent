@@ -442,7 +442,8 @@ def mentions_health(reply: str) -> bool:
 # ------------------------------------------------------------------ A8, P13, P16 and friends
 
 _AS_OF = re.compile(
-    r"\bas of\b|\blast (?:sync|synced|synchroni[sz]ed|update|updated|upload)|\bsynced\b|"
+    r"\bas of\b|\blast (?:\w+ )?(?:sync|synced|synchroni[sz]ed|update|updated|upload)|"
+    r"\bsynced\b|\b(?:sync|update|upload) (?:was|happened) (?:at|on)\b|"
     r"\bhasn't (?:been )?(?:synced|updated)|\bhas not (?:been )?(?:synced|updated)|"
     r"\bnot (?:been )?synced|\b(?:most recent|latest|newest) (?:data|reading|sync|night)|"
     r"\bdata (?:is |are )?(?:from|only goes|only runs|through|up to)|\bup to date\b|"
