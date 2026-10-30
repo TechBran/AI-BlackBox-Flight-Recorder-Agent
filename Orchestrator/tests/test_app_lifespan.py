@@ -231,6 +231,7 @@ PRODUCTION_STARTUP = [
     "Orchestrator.startup.startup_memory_watchdog",
     "Orchestrator.startup.startup_embeddings_transcode",
     "Orchestrator.startup.startup_strip_retired_seed_contacts",
+    "Orchestrator.startup.startup_wellness_store",
     "Orchestrator.startup.startup_embeddings_migration_resume",
     "Orchestrator.startup.startup_embeddings_watcher",
     "Orchestrator.startup.startup_notify_bridge",

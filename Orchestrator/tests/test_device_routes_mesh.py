@@ -54,9 +54,11 @@ def test_mesh_lists_all_tailnet_nodes_with_ownership(client):
     assert by_id["work-tablet"]["online"] is True
     # An offline node still appears with online=False.
     assert by_id["brandon-laptop"]["online"] is False
-    # Contract shape for the UI wave.
+    # Contract shape for the UI wave (+ the additive, owner-only health fields of
+    # M7; test_wellness_mesh_row.py covers what fills them).
     assert set(by_id["brandon-fold6"]) == {
-        "id", "name", "tailnet", "type", "online", "owner", "is_primary", "default_provider"}
+        "id", "name", "tailnet", "type", "online", "owner", "is_primary", "default_provider",
+        "health_source", "health_state"}
 
 
 def test_mesh_operator_filter_hides_other_operators_devices(client):

@@ -156,6 +156,10 @@ app.include_router(xai_phone_router)
 from Orchestrator.routes.voice_agent_routes import router as voice_agent_router
 app.include_router(voice_agent_router)
 
+# Health tracking (/wellness/*): enrollment, signed ingest, status (design M7)
+from Orchestrator.routes.wellness_routes import router as wellness_router
+app.include_router(wellness_router)
+
 # =============================================================================
 # First-run middleware: redirect /ui index → /onboarding/ when wizard incomplete
 # =============================================================================

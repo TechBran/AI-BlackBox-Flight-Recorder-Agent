@@ -412,6 +412,21 @@ def startup_strip_retired_seed_contacts():
 
 
 @boot_hook(app, "startup")
+def startup_wellness_store():
+    """Health tracking (design M7 §3.4): data/wellness/ at 0700 and every store,
+    enrollment and key file in it at 0600, re-applied on every boot (the same
+    rule as data/tasks.db). Creates the empty dir on a fresh box. Logs counts
+    only; NEVER raises."""
+    try:
+        from Orchestrator.wellness import store as wellness_store
+        counts = wellness_store.secure_all()
+        logger.info("[WELLNESS] store secured: dbs=%d files=%d", counts["dbs"], counts["files"])
+    except Exception as e:  # noqa: BLE001 — must never crash startup.
+        logger.error("[WELLNESS] could not secure data/wellness (non-fatal): %s",
+                     type(e).__name__)
+
+
+@boot_hook(app, "startup")
 async def startup_embeddings_migration_resume():
     """Relaunch an embeddings migration that a restart interrupted (Task 8).
 

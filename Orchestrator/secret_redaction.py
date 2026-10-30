@@ -11,8 +11,10 @@ is the backstop for whatever still slips through.
                             (names ending _API_KEY/_SECRET/_SECRET_KEY/
                             _PRIVATE_KEY/_TOKEN/_PASSWORD/_AUTH/_SID, values
                             >= 12 chars) plus generic key shapes: Google
-                            AIza..., sk-..., xai-..., Bearer tokens and
-                            ?key=/&key= query values.
+                            AIza..., sk-..., xai-..., Bearer tokens,
+                            ?key=/&key= query values, and the health
+                            feature's device key ("k": "..."), origin-proof
+                            signature (sig=...) and surface tokens (wbx_s_...).
   * install_redaction()     wraps sys.stdout/sys.stderr and puts a
                             logging.Filter on every existing handler. Called
                             from app.py before any other Orchestrator import
@@ -55,6 +57,12 @@ _KEY_SHAPES = re.compile(
 )
 _URL_KEY_PARAM = re.compile(r"([?&](?:key|api_key|apikey|access_token)=)[^&#\s\"'<>]+", re.IGNORECASE)
 _BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/-]{16,}=*")
+# Health tracking (Orchestrator/wellness): a device key as it is stored and
+# sent at bind ("k": "<43 base64url>"), the origin-proof signature (sig=<64
+# hex>) and an approved-surface token (wbx_s_...).
+_WELLNESS_KEY = re.compile(r"""(["']k["']\s*:\s*["'])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])""")
+_WELLNESS_SIG = re.compile(r"(\bsig=)[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+_WELLNESS_TOKEN = re.compile(r"\bwbx_s_[A-Za-z0-9_-]{8,}")
 
 # (env size, monotonic time, compiled alternation or None, value -> env name)
 _snapshot: Tuple[int, float, Optional[re.Pattern], dict] = (-1, 0.0, None, {})
@@ -100,6 +108,9 @@ def redact(text):
         text = rx.sub(lambda m: f"[REDACTED:{names.get(m.group(0), 'secret')}]", text)
     text = _KEY_SHAPES.sub(REDACTED, text)
     text = _URL_KEY_PARAM.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _WELLNESS_KEY.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _WELLNESS_SIG.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _WELLNESS_TOKEN.sub(REDACTED, text)
     return _BEARER.sub(lambda m: m.group(1) + REDACTED, text)
 
 

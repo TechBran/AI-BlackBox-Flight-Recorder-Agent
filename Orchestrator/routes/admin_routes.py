@@ -1445,6 +1445,10 @@ def remove_operator(name: str):
         _cfg.USERS_DEFAULT = _fallback
     if _cfg.current_operator() == name:
         _cfg.set_current_operator(_fallback)
+    # Health tracking (design M7 §3.1): a removed operator's health store, device
+    # key and enrollment are erased and their phone told to forget. Never raises.
+    from Orchestrator.wellness import erase as _wellness_erase
+    _wellness_erase.on_operator_deleted(name)
 
     return {
         "status": "removed",

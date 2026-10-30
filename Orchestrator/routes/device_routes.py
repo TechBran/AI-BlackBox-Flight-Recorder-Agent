@@ -93,10 +93,35 @@ def _match_node_to_device(node: mesh.Node, registry) -> Optional[Device]:
     return None
 
 
-def _mesh_entry(node: Optional[mesh.Node], device: Optional[Device]) -> dict:
-    """One row of the mesh join: identity + liveness + ownership annotations."""
+def _health_view(operator: Optional[str]):
+    """(operator, device_id, state) of the viewing operator's OWN health source,
+    or None. Read once per request; never raises (the Devices view must not
+    fail over health)."""
+    if not operator:
+        return None
+    try:
+        from Orchestrator.wellness import enroll
+        found = enroll.mesh_health(operator)
+    except Exception:  # noqa: BLE001
+        return None
+    return (operator, *found) if found else None
+
+
+def _mesh_entry(node: Optional[mesh.Node], device: Optional[Device], health=None) -> dict:
+    """One row of the mesh join: identity + liveness + ownership annotations.
+
+    ``health_source`` / ``health_state`` (additive, M7) are filled ONLY on a row
+    the viewing operator owns (``health`` from _health_view); every other row
+    reads False / None, so the badge never tells one operator about another's
+    health enrollment (wellness rule W17)."""
     if device is not None:
         dns = (device.metadata or {}).get("tailscale_dns", "").rstrip(".")
+        source, state = False, None
+        if health is not None and (device.owner or "").lower() == health[0].lower() \
+                and device.id == health[1]:
+            from Orchestrator.wellness import enroll
+            state = health[2]
+            source = state in enroll.LIVE_STATES
         return {
             "id": device.id,
             "name": device.name,
@@ -106,6 +131,8 @@ def _mesh_entry(node: Optional[mesh.Node], device: Optional[Device]) -> dict:
             "owner": device.owner or None,
             "is_primary": bool(device.is_primary),
             "default_provider": device.default_provider,
+            "health_source": source,
+            "health_state": state,
         }
     # Un-registered tailnet node (no ownership yet).
     return {
@@ -117,6 +144,8 @@ def _mesh_entry(node: Optional[mesh.Node], device: Optional[Device]) -> dict:
         "owner": None,
         "is_primary": False,
         "default_provider": None,
+        "health_source": False,
+        "health_state": None,
     }
 
 
@@ -220,21 +249,23 @@ class DefaultProviderBody(BaseModel):
 async def list_mesh_devices(operator: Optional[str] = None):
     """ALL tailnet nodes joined with registry ownership — the source of truth for the
     System-Menu Devices views. Each row: {id, name, tailnet, type, online, owner,
-    is_primary, default_provider}. ``operator`` (optional) filters to that operator's
-    devices plus still-unclaimed nodes (so they can be assigned)."""
+    is_primary, default_provider, health_source, health_state}. ``operator`` (optional)
+    filters to that operator's devices plus still-unclaimed nodes (so they can be
+    assigned), and is the only viewer the owner-only health fields are filled for."""
     registry = get_registry()
     nodes = _get_tailnet_nodes()
+    health = _health_view(operator)
     rows: List[dict] = []
     matched_ids = set()
     for n in nodes:
         d = _match_node_to_device(n, registry)
         if d is not None:
             matched_ids.add(d.id)
-        rows.append(_mesh_entry(n, d))
+        rows.append(_mesh_entry(n, d, health))
     # Registry devices with no live tailnet node (offline / not yet discovered).
     for d in registry.get_all_devices():
         if d.id not in matched_ids:
-            rows.append(_mesh_entry(None, d))
+            rows.append(_mesh_entry(None, d, health))
     if operator:
         op = operator.lower()
         rows = [r for r in rows if r["owner"] is None or r["owner"].lower() == op]
