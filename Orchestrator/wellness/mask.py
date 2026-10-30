@@ -36,6 +36,12 @@ text (an SMS or cron reply, result_data) stays as the model wrote it.
 scrub_history() is the provider-switch rule (A3b): earlier assistant bubbles a
 client sends back never carry health numbers to a provider the operator did
 not allow.
+
+speech_refused() is the speech rule (contract e, W26/W31/W32): the box never
+reads a health reply aloud. For a caller who proves nothing it reads the
+words alone (says_health_reading), never anyone's store, so its answer is no
+way to read another operator's values back (W17); the operator's own signed
+request is also held to their results of the last 24 hours (speech_recalls).
 """
 from __future__ import annotations
 
@@ -745,6 +751,178 @@ def stream_turn_key(operator: Optional[str]) -> Optional[str]:
     except Exception:  # noqa: BLE001
         return None
     return t.turn_key if rec and rec.get("op_key") else None
+
+
+# ------------------------------------------------------------------ the speech rule (contract e)
+
+# A reply that used health data is never read aloud in v1 (W26, W31, W32);
+# routes/tts_routes.py asks these two rules before any voice runs:
+#
+#   * says_health_reading(text): the words alone. No store, no operator, no
+#     clock, so the answer is the same whoever asks and whoever a body names
+#     (W17: an answer that turned on the stored values of an operator an
+#     unsigned body named let any caller read those values back one guess
+#     at a time, and tell whether that operator was enrolled);
+#   * speech_recalls(operator, text): the recall rule over the operator's
+#     own deliveries of the last 24 hours, for a request their own phone
+#     signed (they may learn their own values).
+SPEECH_WINDOW_MS = 24 * 3600 * 1000
+
+# Words that name a health reading on their own: a number within
+# UNIT_DISTANCE of one is a reading wherever it stands ("47 bpm", "SpO2 96",
+# "4 awakenings"). Durations, percents, weights and distances are left out
+# ("30 minutes", "95%", "3 kg", "5 km" are every other reply), and so is "hr"
+# (an hour).
+_READING_WORDS = frozenset("""
+bpm mmhg spo2 spo₂ hrv rmssd systolic diastolic pulse heartbeat heartbeats beats breaths rhr bp
+vo2 vo2max oxygen lpm ppm latido latidos pulsaciones pulso sistólica sistolica diastólica
+diastolica respiraciones cardíaca cardiaca cardíaco cardiaco arterial oxígeno oxigeno reposo
+wake-up wake-ups wakeup wakeups awakening awakenings wakings despertares
+""".split())
+# Ordinary words that name a reading only after their partner ("blood
+# pressure", "heart rate"): "under pressure", "the rate" stay plain.
+_READING_PAIRS = {"pressure": frozenset({"blood"}),
+                  "rate": frozenset({"heart", "pulse", "respiratory", "breathing"})}
+# A step count is in the thousands: "step 12 of the plan" reads nothing.
+_STEP_WORDS = frozenset({"step", "steps", "paso", "pasos"})
+_BIG_NUMBER_WORDS = frozenset({"thousand", "million", "mil", "millón", "millon"})
+# A duration is a reading near a sleep word ("you slept 6 h 47 min", "deep
+# sleep 1 h 12 min"); exercise words are left out here ("walk through it in
+# 30 minutes", "run the tests for 20 min").
+_SLEEP_WORDS = frozenset("""
+sleep sleeps slept sleeping asleep nap naps napped bedtime rem
+sueño dormir dormiste dormías dormias dormido dormida durmiendo durmió durmio siesta
+""".split())
+_DURATION_WORDS = frozenset("""
+h hr hrs hour hours min mins minute minutes hora horas minuto minutos
+""".split())
+_PAIR_WORDS = frozenset({"over", "sobre"})
+_BP_TOKEN = re.compile(r"(\d{2,3})/(\d{2,3})")
+_GROUPED_TOKEN = re.compile(r"\d{1,3}(?:[,.]\d{3})+")
+
+
+def _blood_pressure(high: str, low: str) -> bool:
+    """A systolic over a diastolic: 70-250 over 30-150, the first higher."""
+    if not (high.isdigit() and low.isdigit()):
+        return False
+    s, d = int(high), int(low)
+    return 70 <= s <= 250 and 30 <= d <= 150 and s > d
+
+
+def _thousands(phrase: List[Tuple[str, str]]) -> bool:
+    """Is a number phrase 1,000 or more ("12,345", "12 345", "12345", "12.3k",
+    "twelve thousand ...")?"""
+    digits = [w for cls, w in phrase if cls == "num" and w.isdigit()]
+    if len(digits) > 1 and len(digits[0]) <= 3 and all(len(d) == 3 for d in digits[1:]):
+        return True                             # thousands grouped by a space
+    for cls, w in phrase:
+        if cls != "num":
+            continue
+        if w in _BIG_NUMBER_WORDS or w.endswith("k") or _GROUPED_TOKEN.fullmatch(w):
+            return True
+        head = re.split(r"[.,]", w)[0]
+        if head.isdigit() and int(head) >= 1000:
+            return True
+    return False
+
+
+def says_health_reading(text) -> bool:
+    """Does `text` read out a health reading, whoever's it is? A number (digits
+    or words) within 3 tokens of a reading's own unit or noun (bpm, mmHg,
+    SpO2, HRV, pulse, breaths, "heart rate", "blood pressure", awakenings,
+    and their Spanish words), a step count in the thousands, a blood-pressure
+    pair ("118/79", "120 over 77"), a duration near a sleep word, or a count
+    of awakenings ("woke up 3 times"). The mask glyph is no number: a reply
+    already masked passes. A bare value ("It was 47.3.") is no reading here;
+    only the operator's own signed request can tell it is theirs
+    (speech_recalls)."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    toks: List[Tuple[str, str]] = []
+    for m in _TOKEN_RE.finditer(text):
+        kind, low = m.lastgroup, m.group(0).lower()
+        if kind == "num":
+            toks.append(("glyph" if low == MASK.lower() else "num", low))
+        elif kind == "word":
+            toks.append(("num" if _is_number_word(low) else "word", low))
+        else:
+            toks.append(("other", low))
+    for i, (cls, w) in enumerate(toks):
+        if cls != "num":
+            continue
+        pair = _BP_TOKEN.fullmatch(w)
+        if pair and _blood_pressure(pair.group(1), pair.group(2)):
+            return True
+        if i + 2 < len(toks) and toks[i + 1][1] in _PAIR_WORDS and toks[i + 2][0] == "num" \
+                and _blood_pressure(w, toks[i + 2][1]):
+            return True
+    sleeps = [i for i, (c, w) in enumerate(toks) if c == "word" and w in _SLEEP_WORDS]
+    wakes = [i for i, (c, w) in enumerate(toks) if c == "word" and _is_wake_word(w)]
+    units: List[Tuple[int, bool]] = []          # (index, needs a count in the thousands)
+    for i, (cls, w) in enumerate(toks):
+        if cls != "word":
+            continue
+        if w in _READING_WORDS:
+            units.append((i, False))
+        elif w in _STEP_WORDS:
+            units.append((i, True))
+        elif w in _READING_PAIRS and i > 0 and toks[i - 1][1] in _READING_PAIRS[w]:
+            units.append((i, False))
+        elif w in _DURATION_WORDS and any(abs(i - s) <= CONTEXT_DISTANCE for s in sleeps):
+            units.append((i, False))
+        elif w in _TALLY_WORDS and any(abs(i - k) <= CONTEXT_DISTANCE for k in wakes):
+            units.append((i, False))
+    if not units:
+        return False
+    # Runs of number tokens are one phrase, as in the unit rule.
+    i = 0
+    while i < len(toks):
+        if toks[i][0] != "num":
+            i += 1
+            continue
+        j = i
+        while True:
+            if j + 1 < len(toks) and toks[j + 1][0] == "num":
+                j += 1
+            elif j + 2 < len(toks) and toks[j + 1][1] in _JOINERS and toks[j + 2][0] == "num":
+                j += 2
+            else:
+                break
+        phrase = toks[i:j + 1]
+        for u, big in units:
+            if (i - u if u < i else u - j) <= UNIT_DISTANCE and (not big or _thousands(phrase)):
+                return True
+        i = j + 1
+    return False
+
+
+def speech_recalls(operator: Optional[str], text, *, now_ms: Optional[int] = None) -> bool:
+    """Does `text` repeat one of `operator`'s health results of the last 24
+    hours (SPEECH_WINDOW_MS)? The recall rule (carry_for, quotes_results):
+    an exact distinctive quote ("47.3", "12,345", "118/79") or a value by a
+    reading's unit. Ask it only for a request the operator's own phone
+    signed. A health store that cannot be read is a yes (any doubt is a no
+    to speaking)."""
+    if not operator or not isinstance(text, str) or not text.strip():
+        return False
+    try:
+        return carry_for(operator, recall_text=text, recall_window_ms=SPEECH_WINDOW_MS,
+                         now_ms=now_ms) is not None
+    except Exception:  # noqa: BLE001 - a guard that cannot decide refuses
+        return True
+
+
+def speech_refused(text, *, proven_operator: Optional[str] = None,
+                   now_ms: Optional[int] = None) -> bool:
+    """The box's speech rule: refuse `text` when it reads out a health
+    reading (says_health_reading, for everyone) or, for a request
+    `proven_operator`'s own phone signed, when it repeats one of their
+    results (speech_recalls)."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if says_health_reading(text):
+        return True
+    return bool(proven_operator) and speech_recalls(proven_operator, text, now_ms=now_ms)
 
 
 # ------------------------------------------------------------------ history scrub (A3b)

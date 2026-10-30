@@ -28,7 +28,9 @@ Phone -> box (JSON; every error is {"error": <code>, ...}):
 (Orchestrator/wellness/origin_proof.py). GET /fossil/snapshot/{id}
 (routes/task_routes.py) takes the same optional proof as GET /wellness/status
 (optional_proof): the enrolled phone then reads its own wellness turns as
-minted. The kill switch ([wellness] enabled,
+minted. So do POST /tts, /tts/batch and /tts/queue (routes/tts_routes.py):
+the speech guard then also holds the text to that operator's own recent
+results. The kill switch ([wellness] enabled,
 read fresh) stops collection and every answer that carries health
 information; pause, disconnect, erase and narrowing settings still work.
 The operator is always the one the proof or the body names for THIS
@@ -139,6 +141,16 @@ def _signed(request: Request, raw: RawBody, required: bool = True):
 
 # The body a route with an optional proof reads (the signature covers it).
 small_body = _capped(SMALL_BODY)
+
+
+async def proof_body(request: Request) -> RawBody:
+    """The exact body bytes for the optional proof of a route that takes a
+    JSON `Body(...)` (the TTS routes' speech guard). Read only when the
+    request carries X-BlackBox-Origin; FastAPI has already read the whole
+    body to parse it, so this is that cached copy, not a second read."""
+    if request.headers.get(origin_proof.HEADER) is None:
+        return RawBody(b"")
+    return RawBody(await request.body())
 
 
 def optional_proof(request: Request, raw: RawBody):
