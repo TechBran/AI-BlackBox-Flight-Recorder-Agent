@@ -53,7 +53,9 @@ class WellnessSyncEngineTest {
         zone = { ZONE },
         newBatchId = WellnessFixtures.ids("e"),
         onStopped = { status, error -> stopped = status to error },
+        onReconnectNeeded = { reconnectNotices++ },
     )
+    private var reconnectNotices = 0
 
     private fun enroll() {
         binding.installId()
@@ -176,6 +178,14 @@ class WellnessSyncEngineTest {
         assertTrue(state.load().needsReconnect)
         assertEquals(1, outbox.size())
         assertEquals("skipped:stopped", engine.sync(false).outcome)
+        // One notice per refusal: a retry ("Sync now" clears the flag) that is refused again
+        // notifies again; runs that are skipped while stopped never do.
+        assertEquals(1, reconnectNotices)
+        state.update { it.copy(needsReconnect = false) }
+        assertEquals("reconnect", engine.sync(false).outcome)
+        assertEquals(2, reconnectNotices)
+        assertEquals("skipped:stopped", engine.sync(false).outcome)
+        assertEquals(2, reconnectNotices)
     }
 
     @Test

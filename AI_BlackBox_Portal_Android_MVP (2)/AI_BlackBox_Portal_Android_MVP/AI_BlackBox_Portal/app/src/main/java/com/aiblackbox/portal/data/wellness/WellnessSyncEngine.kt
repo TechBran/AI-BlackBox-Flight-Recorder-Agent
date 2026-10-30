@@ -32,6 +32,7 @@ class WellnessSyncEngine(
     private val newBatchId: () -> String = ::randomBatchId,
     private val onNotices: (List<JsonObject>) -> Unit = {},
     private val onStopped: (status: Int, error: String?) -> Unit = { _, _ -> },
+    private val onReconnectNeeded: () -> Unit = {},
 ) {
 
     data class SyncReport(
@@ -424,7 +425,13 @@ class WellnessSyncEngine(
                 SyncReport("ok", batchesSent = result.sent, pending = outbox.size())
             }
             is WellnessOutbox.DrainResult.StopReconnect -> {
-                state.update { it.copy(needsReconnect = true) }
+                var first = false
+                state.update {
+                    first = !it.needsReconnect
+                    it.copy(needsReconnect = true)
+                }
+                // Tell the person once (not on every retry) that Health needs setting up again.
+                if (first) runCatching { onReconnectNeeded() }
                 SyncReport("reconnect", batchesSent = result.sent, pending = outbox.size())
             }
             is WellnessOutbox.DrainResult.StopAndClear -> {

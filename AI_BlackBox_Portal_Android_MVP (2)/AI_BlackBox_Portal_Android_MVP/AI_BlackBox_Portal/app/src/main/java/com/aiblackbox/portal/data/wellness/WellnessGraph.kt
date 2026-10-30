@@ -77,6 +77,10 @@ object WellnessGraph {
                     },
                     onNotices = { notices -> postNotices(app, notices) },
                     onStopped = { status, error -> onStopped(app, status, error) },
+                    onReconnectNeeded = {
+                        BlackBoxNotificationManager(app).showWellnessNotice("Reconnect Health",
+                            "Open BlackBox, Settings, Health, and set this phone up again.", "wellness-reconnect")
+                    },
                 ).also {
                     engine = it
                     engineOrigin = origin
