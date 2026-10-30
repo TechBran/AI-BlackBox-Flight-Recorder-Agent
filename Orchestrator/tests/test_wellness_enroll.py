@@ -244,6 +244,21 @@ def test_replace_refused_by_the_old_phone(box, monkeypatch):
     new.close()
 
 
+def test_an_unanswered_replacement_expires(box, monkeypatch):
+    import time
+    assert box.enroll().status_code == 200
+    new = _second_phone(box, monkeypatch)
+    r = _enroll_from(box, new, "100.100.7.9", replace=True)
+    pending_enr = r.json()["enrollment_id"]
+    later = int(time.time() * 1000) + (enroll.REPLACE_PENDING_TTL_S + 60) * 1000
+    with pytest.raises(enroll.EnrollError) as e:
+        enroll.approve_replace(OPERATOR, True, now_ms=later)
+    assert e.value.code == "no_pending_replace"
+    assert enroll.get_enrollment(OPERATOR)["pending"] is None
+    assert enroll.tombstone_reason(pending_enr) == "revoked"
+    new.close()
+
+
 # ------------------------------------------------------------------ select (Portal)
 
 def test_use_for_health_sets_awaiting_phone(box):

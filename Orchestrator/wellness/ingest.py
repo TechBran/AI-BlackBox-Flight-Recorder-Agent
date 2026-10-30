@@ -206,8 +206,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                 def note_offset(day: str, off: Optional[int]):
                     if off is not None and offsets.by_day.get(day) != off:
                         st.set_day_offset(conn, day, off)
-                        offsets.by_day[day] = off
-                        offsets._days = sorted(offsets.by_day)
+                        offsets.set(day, off)
 
                 # ---- buckets
                 for g in batch.buckets:

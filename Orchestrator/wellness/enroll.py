@@ -451,9 +451,16 @@ def select(operator: str, device_id: str, *, now_ms: Optional[int] = None) -> di
 # ------------------------------------------------------------------ enroll (phone)
 
 def _expire_pending(rec: dict, now_ms: int) -> dict:
+    """Drop a replacement the old phone never answered (24 h): its key is
+    revoked and the pending entry cleared on disk."""
     pend = rec.get("pending")
     if pend and pend.get("expires_at_ms", 0) < now_ms:
         revoke_key(pend.get("enrollment_id"), "revoked", now_ms)
+        with editing() as data:
+            cur = data.get(rec.get("operator"))
+            if cur and (cur.get("pending") or {}).get("enrollment_id") == \
+                    pend.get("enrollment_id"):
+                cur["pending"] = None
         rec = dict(rec, pending=None)
     return rec
 

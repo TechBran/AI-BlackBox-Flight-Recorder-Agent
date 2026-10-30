@@ -138,6 +138,12 @@ class Offsets:
         near = self._days[i - 1] if i > 0 else self._days[0]
         return self.by_day[near]
 
+    def set(self, day: str, offset_s: int) -> None:
+        """Record a day's offset in this view (store.set_day_offset persists it)."""
+        if day not in self.by_day:
+            bisect.insort(self._days, day)
+        self.by_day[day] = int(offset_s)
+
     def latest(self) -> int:
         return self.by_day[self._days[-1]] if self._days else 0
 
