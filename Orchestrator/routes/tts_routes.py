@@ -28,7 +28,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 
 # External library imports
 from fastapi import HTTPException, WebSocket, Body, UploadFile, File, Form, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 # Local imports
 from Orchestrator.checkpoint import app
@@ -186,6 +186,41 @@ def _default_tts_voice() -> dict:
     return resolve_tts_default(_assemble_tts_catalog())
 
 
+# M7 speech rule (W26, W31, W32): a reply that used health data is never read
+# aloud in v1, on any surface. The on-box voice writes a WAV under
+# Portal/uploads/ and serves it at /ui/uploads/; every other voice is a
+# service the health settings never allowed. The clients say so before they
+# ask (the same sentence); this is the box's own guard, so a client that
+# does not know the rule is covered too.
+WELLNESS_TEXT = "wellness_text"
+WELLNESS_TEXT_DETAIL = ("Health replies aren't read aloud: the voice service would get your "
+                        "health data.")
+
+
+def wellness_text_refusal(operator, text) -> Optional[JSONResponse]:
+    """403 {"error": "wellness_text", "detail": ...} for a text that RECALLS a
+    wellness result delivered to `operator` (the body's own operator field):
+    mask.carry_for's recall rule over the operator's recent deliveries
+    (mask.HISTORY_WINDOW_MS), so only the distinctive forms count ("47.3",
+    "12,345", "118/79", a number by a reading's own unit) and ordinary
+    numbers pass, as does a text whose health numbers are already the mask
+    glyph. No operator, or one with no health store, is nothing to recall
+    against: None. A health store that cannot be read refuses (any doubt is
+    a no). Nothing about the text is logged."""
+    if not isinstance(operator, str) or not operator.strip() or not isinstance(text, str) \
+            or not text.strip():
+        return None
+    try:
+        from Orchestrator.wellness import mask
+        recalled = mask.carry_for(operator.strip(), turn_key=None, recall_text=text) is not None
+    except Exception:  # noqa: BLE001 - a guard that cannot decide refuses
+        recalled = True
+    if not recalled:
+        return None
+    return JSONResponse(status_code=403,
+                        content={"error": WELLNESS_TEXT, "detail": WELLNESS_TEXT_DETAIL})
+
+
 @app.post("/tts")
 def tts_openai(body: dict = Body(...)):
     """Text-to-speech for any /tts/catalog voice id: OpenAI, ElevenLabs, local,
@@ -204,6 +239,11 @@ def tts_openai(body: dict = Body(...)):
     # up front so every provider branch below inherits speech-clean text.
     if isinstance(body, dict) and body.get("text"):
         body["text"] = sanitize_for_speech(body["text"])
+    # M7: never speak a text that repeats this operator's health data.
+    if isinstance(body, dict):
+        refusal = wellness_text_refusal(body.get("operator"), body.get("text"))
+        if refusal is not None:
+            return refusal
     # Nothing chosen: speak with the box default (GET /tts/catalog "default")
     # instead of assuming OpenAI, so a caller that names no voice -- the
     # text_to_speech tool, the overlay -- works on a box whose only TTS provider
@@ -505,6 +545,11 @@ async def tts_queue_submit(body: dict = Body(...)):
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "No text provided")
+    # M7: never speak a text that repeats this operator's health data (the
+    # health store is read off the loop).
+    refusal = await asyncio.to_thread(wellness_text_refusal, body.get("operator"), text)
+    if refusal is not None:
+        return refusal
     voice = (body.get("voice") or "").strip()
     provider = (body.get("provider") or "").strip().lower()
     if not (voice.startswith("qwen:") or provider == "qwen"):
@@ -583,6 +628,11 @@ async def tts_batch(body: dict = Body(...), request: Request = None):
     text = sanitize_for_speech(body.get("text") or "")
     if not text:
         raise HTTPException(400, "No text provided")
+    # M7: never speak a text that repeats this operator's health data (the
+    # health store is read off the loop).
+    refusal = await asyncio.to_thread(wellness_text_refusal, body.get("operator"), text)
+    if refusal is not None:
+        return refusal
 
     explicit_provider = (body.get("provider") or "").strip().lower()
     provider = explicit_provider or "openai"
