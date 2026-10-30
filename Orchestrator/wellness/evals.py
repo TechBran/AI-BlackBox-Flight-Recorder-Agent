@@ -1507,6 +1507,13 @@ def contaminated_snapshots(volume_text: str, operator: str, key: Sequence[str] =
             if s.operator == operator and (why := contamination(s.block, key))}
 
 
+# The tools that read the operator's memory mid-turn. Their results name no
+# snapshot in the stream, so on a ledger that holds the eval's own text a
+# turn that called one may have read it.
+MEMORY_TOOLS = frozenset({"search_snapshots", "get_snapshot", "list_recent_snapshots",
+                          "seek_snapshot_direct", "browse_index"})
+
+
 def context_ids(provenance) -> List[str]:
     """The snapshot ids a stream_start's provenance says the turn was given."""
     out = []
@@ -1606,5 +1613,5 @@ __all__ = [
     "render_prompt", "CHECKS", "RUBRIC", "BLOCKING", "claims_zero", "claims_done",
     "declines_from_chat", "hints_about_other", "JUDGE_MARKERS", "JUDGE_CONTROLS", "Snapshot",
     "snapshots", "answer_key", "contamination", "contaminated_snapshots", "context_ids",
-    "control_prompt", "control_caught", "DEFAULT_OTHERS",
+    "control_prompt", "control_caught", "DEFAULT_OTHERS", "MEMORY_TOOLS",
 ]

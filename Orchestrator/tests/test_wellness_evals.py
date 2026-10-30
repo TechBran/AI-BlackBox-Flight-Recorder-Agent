@@ -1694,3 +1694,36 @@ def test_the_answer_key_and_the_ledger_reader():
     stale = next(c for c in evals.JUDGE_CONTROLS if c["id"] == "control-rubric-stale")
     assert evals.control_caught(stale, {"calibrated": 1}) and \
         not evals.control_caught(stale, {"calibrated": 2})
+
+
+def test_a_memory_read_on_a_contaminated_ledger_counts_as_contaminated():
+    """A turn that calls search_snapshots gets results the stream names no
+    snapshot for: on a ledger that holds the eval's own text it may have read
+    it (the live smoke's landlord email did call it), so it fails `context`;
+    on a clean ledger the same call is fine."""
+    class FakeBox:
+        offset_s = 0
+
+        def chat(self, prompt, provider, model, save=False):
+            return {"status": 200, "reply": "Dear landlord, the sink leaks.",
+                    "tools": [{"tool": "search_snapshots"}, {"tool": "get_current_time"}],
+                    "wellness_used": [], "provenance": {"recent": ["SNAP-20261030-0001"]}}
+
+        def envelope(self, ref):
+            return None
+
+        def status(self):
+            return {"state": "active"}
+    args = SimpleNamespace(provider="custom", model=LAN_MODEL, other_name="Morgan",
+                           other_name2="Riley")
+    t = {"id": "P19", "set": "p", "spec": P["P19"], "prompt": P["P19"]["prompt"],
+         "expected": P["P19"]["expected"]}
+    row = HARNESS.run_turn(FakeBox(), t, args, {"state": "active"},
+                           contaminated={"SNAP-20261030-0002": ["judge"]})
+    assert row["context_contaminated"] == ["via search_snapshots"]
+    assert row["context_snapshots"] == 1
+    row = HARNESS.run_turn(FakeBox(), t, args, {"state": "active"},
+                           contaminated={"SNAP-20261030-0001": ["judge"]})
+    assert row["context_contaminated"] == ["SNAP-20261030-0001", "via search_snapshots"]
+    assert HARNESS.run_turn(FakeBox(), t, args, {"state": "active"},
+                            contaminated={})["context_contaminated"] == []

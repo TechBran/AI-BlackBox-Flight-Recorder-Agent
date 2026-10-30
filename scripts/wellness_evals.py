@@ -223,7 +223,9 @@ def run_turn(box: Box, t: dict, args, start_status: dict, *, save: bool = False,
              contaminated: Optional[dict] = None) -> dict:
     """One graded turn. `contaminated` is {snap_id: reasons} of the
     operator's snapshots that hold the eval's own text: the row lists the
-    ones this turn's context was given (ids, never their text)."""
+    ones this turn's context was given (ids, never their text), and, when
+    there are any, the memory tools the turn called (their results name no
+    snapshot, so they may have read one)."""
     began = time.time()
     out = box.chat(t["prompt"], args.provider, args.model, save=save)
     took = round(time.time() - began, 1)
@@ -262,7 +264,9 @@ def run_turn(box: Box, t: dict, args, start_status: dict, *, save: bool = False,
            "wellness_used": len(refs), "refs": refs,
            "outbound_tools": evals.outbound_tools(result["tools"]),
            "context_snapshots": len(given),
-           "context_contaminated": [s for s in given if s in (contaminated or {})],
+           "context_contaminated": [s for s in given if s in (contaminated or {})] + (
+               [f"via {n}" for n in dict.fromkeys(result["tools"]) if n in evals.MEMORY_TOOLS]
+               if contaminated else []),
            "provider_label": next((f.get("provider_label") for f in out.get("wellness_used") or []
                                    if isinstance(f, dict)), None)}
     if save:
