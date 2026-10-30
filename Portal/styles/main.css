@@ -42,9 +42,9 @@
 @import url('./features/_updates.css');
 @import url('./features/_collapsibles.css');
 @import url('./features/_system_controls.css');
-@import url('./features/_ember-fx.css?v=genui344');
+@import url('./features/_ember-fx.css?v=genui345');
 @import url('./features/_devices-section.css?v=genui299');
-@import url('./features/_wellness.css');
+@import url('./features/_wellness.css?v=genui345');
 
 /* === GENERATION === */
 @import url('./generation/_base.css');

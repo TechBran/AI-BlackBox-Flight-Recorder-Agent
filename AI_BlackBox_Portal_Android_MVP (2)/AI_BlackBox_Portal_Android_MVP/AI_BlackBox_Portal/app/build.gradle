@@ -38,7 +38,7 @@ android {
         // First public APK release. Bump versionCode on every future
         // change so customers' installed APKs upgrade over the top
         // without uninstalling.
-        versionCode = 39
+        versionCode = 40
         // W10 mic A/B: `-PforceMicSource=VOICE_COMMUNICATION` builds a debug APK whose composer
         // mic is pinned to that source (MicSourcePolicy.simplexChain), named so it cannot be
         // mistaken for the shipping build. Empty, and pinned by MicSourcePolicyTest, otherwise.
@@ -48,7 +48,7 @@ android {
         // it cannot be mistaken for the shipping build. Off, and pinned by
         // WellnessProbeGateTest, otherwise; debug builds always show it.
         def wellnessProbe = project.hasProperty('wellnessProbe')
-        versionName = "1.15.0-m7-wave1" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "") +
+        versionName = "1.15.1-m7-wave3" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "") +
             (wellnessProbe ? "-health-probe" : "")
         buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
         buildConfigField "boolean", "WELLNESS_PROBE", wellnessProbe ? "true" : "false"
