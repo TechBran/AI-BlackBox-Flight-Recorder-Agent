@@ -29,6 +29,15 @@ data class WellnessSyncState(
     @SerialName("posted_notice_ids") val postedNoticeIds: List<String> = emptyList(),
     /** A 401 was seen: stop until the user reconnects. */
     @SerialName("needs_reconnect") val needsReconnect: Boolean = false,
+    /**
+     * A narrowing the person asked for on THIS phone (Pause, Disconnect, Stop & erase) that
+     * the box has not confirmed yet: nothing is read or sent meanwhile, whatever the box's
+     * view says. Null when there is none. Values: [WellnessRules.HOLD_PAUSE], [WellnessRules.HOLD_DISCONNECT],
+     * [WellnessRules.HOLD_ERASE].
+     */
+    @SerialName("local_hold") val localHold: String? = null,
+    /** When the box's view of consent and state was last read by the collector (signed status). */
+    @SerialName("last_status_ms") val lastStatusMs: Long = 0L,
     @SerialName("backoff_until_ms") val backoffUntilMs: Long = 0L,
     @SerialName("quota_attempt") val quotaAttempt: Int = 0,
     @SerialName("last_push_ms") val lastPushMs: Long = 0L,
@@ -86,8 +95,14 @@ data class BackfillCursor(
     val done: Boolean = false,
 )
 
+/**
+ * Read-modify-write access to `sync_state.json`. The listener threads, the view model and
+ * three workers all update it, through more than one instance; the lock is therefore shared
+ * PER FILE across the process ([lockFor]), never per instance, so no update is lost and no
+ * two writes interleave.
+ */
 class WellnessSyncStateStore(private val file: File) {
-    private val lock = Any()
+    private val lock: Any = lockFor(file)
 
     fun load(): WellnessSyncState = synchronized(lock) {
         val raw = WellnessAtomic.readTextOrNull(file) ?: return WellnessSyncState()
@@ -104,5 +119,9 @@ class WellnessSyncStateStore(private val file: File) {
 
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        private val LOCKS = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+        /** One lock per state file for the whole process. */
+        internal fun lockFor(file: File): Any = LOCKS.computeIfAbsent(file.absoluteFile.normalize().path) { Any() }
     }
 }

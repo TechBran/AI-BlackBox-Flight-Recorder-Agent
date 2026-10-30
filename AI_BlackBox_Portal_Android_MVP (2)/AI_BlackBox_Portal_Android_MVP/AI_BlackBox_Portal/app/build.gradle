@@ -43,8 +43,15 @@ android {
         // mic is pinned to that source (MicSourcePolicy.simplexChain), named so it cannot be
         // mistaken for the shipping build. Empty, and pinned by MicSourcePolicyTest, otherwise.
         def forceMicSource = (project.findProperty('forceMicSource') ?: '').toString().trim()
-        versionName = "1.14.0-m6-acceptance" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "")
+        // M7.1 Health probe: `-PwellnessProbe` puts Settings, Health, "Health probe" into a
+        // RELEASE build for the owner's device walk (T-1 needs the release signing), named so
+        // it cannot be mistaken for the shipping build. Off, and pinned by
+        // WellnessProbeGateTest, otherwise; debug builds always show it.
+        def wellnessProbe = project.hasProperty('wellnessProbe')
+        versionName = "1.14.0-m6-acceptance" + (forceMicSource ? "-ab-mic-" + forceMicSource.toLowerCase() : "") +
+            (wellnessProbe ? "-health-probe" : "")
         buildConfigField "String", "FORCE_MIC_SOURCE", "\"${forceMicSource}\""
+        buildConfigField "boolean", "WELLNESS_PROBE", wellnessProbe ? "true" : "false"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: every phone, Fold and XR headset this app targets is arm64, and
         // LiteRT-LM ships no 32-bit build. Dropping armeabi-v7a/x86/x86_64 keeps 4 KB-aligned

@@ -34,6 +34,10 @@ class FakeHealthConnectGateway(
     var quotaAfterCalls: Int? = null
     var calls = 0
     var pageSize: Int? = null
+    /** Runs inside the next gateway call (then clears): a re-enroll or unbind landing mid-run. */
+    var duringNextCall: (() -> Unit)? = null
+    /** Calls that read health data (aggregates and records), the import's quota cost. */
+    var reads = 0
 
     // ── test setup ─────────────────────────────────────────────────────────────────────────
 
@@ -60,7 +64,16 @@ class FakeHealthConnectGateway(
 
     private fun tick() {
         calls++
+        duringNextCall?.let { hook ->
+            duringNextCall = null
+            hook()
+        }
         quotaAfterCalls?.let { if (calls > it) throw HcQuotaException("quota") }
+    }
+
+    private fun read() {
+        reads++
+        tick()
     }
 
     override fun sdkStatus(): HcSdkStatus = sdk
@@ -76,7 +89,7 @@ class FakeHealthConnectGateway(
         sliceMs: Long,
         originPackage: String?,
     ): List<HcAggBucket> {
-        tick()
+        read()
         val out = mutableListOf<HcAggBucket>()
         var t = startMs
         while (t < endMs) {
@@ -89,7 +102,7 @@ class FakeHealthConnectGateway(
     }
 
     override suspend fun aggregate(keys: Set<AggKey>, startMs: Long, endMs: Long, originPackage: String?): Map<AggKey, Double?> {
-        tick()
+        read()
         return aggregateRange(keys, startMs, endMs, originPackage)
     }
 
@@ -126,7 +139,7 @@ class FakeHealthConnectGateway(
         pageSize: Int,
         ascending: Boolean,
     ): HcPage {
-        tick()
+        read()
         if (type.readPermission !in granted) throw HcPermissionException(type, "not granted")
         val all = records.values.filter { it.type == type && it.startMs >= startMs && it.startMs < endMs }
             .let { list -> if (ascending) list.sortedBy { it.startMs } else list.sortedByDescending { it.startMs } }

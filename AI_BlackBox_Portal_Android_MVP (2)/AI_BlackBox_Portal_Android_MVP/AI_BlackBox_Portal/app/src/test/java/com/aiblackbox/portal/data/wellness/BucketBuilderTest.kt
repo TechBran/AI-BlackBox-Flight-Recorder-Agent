@@ -20,6 +20,20 @@ class BucketBuilderTest {
     }
 
     @Test
+    fun `a bucket group's offset is the zone offset at the start of its local day`() {
+        // Daylight time ends on 1 Nov 2026 at 02:00 and starts on 8 Mar 2026 at 02:00 (New York).
+        assertEquals(-14400, BucketBuilder.dayOffsetS("2026-11-01", ZONE))
+        assertEquals(-18000, BucketBuilder.dayOffsetS("2026-11-02", ZONE))
+        assertEquals(-18000, BucketBuilder.dayOffsetS("2026-03-08", ZONE))
+        assertEquals(-14400, BucketBuilder.dayOffsetS("2026-03-09", ZONE))
+        assertEquals(0, BucketBuilder.dayOffsetS("2026-11-01", java.time.ZoneOffset.UTC))
+        assertTrue(BucketBuilder.heartRateBuckets("2026-11-01", WellnessFixtures.WATCH, emptyList(), emptyList(), ZONE)
+            .all { it.offsetS == -14400 })
+        assertTrue(BucketBuilder.activityBuckets("2026-11-02", emptyList(), listOf(HcType.STEPS), ZONE)
+            .all { it.offsetS == -18000 })
+    }
+
+    @Test
     fun `days touched - an overnight session touches two days, a point its own`() {
         assertEquals(listOf("2026-11-02", "2026-11-03"), BucketBuilder.daysTouched(at(2, 23), at(3, 6), ZONE))
         assertEquals(listOf("2026-11-03"), BucketBuilder.daysTouched(at(3, 8), at(3, 8), ZONE))
@@ -71,7 +85,7 @@ class BucketBuilderTest {
 
     @Test
     fun `heart rate always yields both grains for a processed day so an emptied day replaces to nothing`() {
-        val buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, emptyList(), emptyList())
+        val buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, emptyList(), emptyList(), ZONE)
         assertEquals(listOf("5min", "1min"), buckets.map { it.grain.wire })
         assertTrue(buckets.all { it.replaceDay == "2026-11-03" && it.rows.isEmpty() && it.metric == "heart_rate" })
     }
@@ -83,7 +97,7 @@ class BucketBuilderTest {
         gw.upsert(WellnessFixtures.steps("st-2", at(3, 9, 30), at(3, 10, 30)), 800.0)
         val (ds, de) = BucketBuilder.dayRange("2026-11-03", ZONE)
         val hourly = gw.aggregateByDuration(setOf(AggKey.STEPS), ds, de, BucketBuilder.HOUR_MS, null)
-        val buckets = BucketBuilder.activityBuckets("2026-11-03", hourly, listOf(HcType.STEPS, HcType.EXERCISE))
+        val buckets = BucketBuilder.activityBuckets("2026-11-03", hourly, listOf(HcType.STEPS, HcType.EXERCISE), ZONE)
         assertEquals(1, buckets.size)
         val steps = buckets.single()
         assertEquals("steps", steps.metric)

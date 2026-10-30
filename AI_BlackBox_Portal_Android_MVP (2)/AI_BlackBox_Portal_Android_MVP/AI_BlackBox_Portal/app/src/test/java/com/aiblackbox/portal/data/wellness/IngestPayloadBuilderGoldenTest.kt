@@ -73,7 +73,7 @@ class IngestPayloadBuilderGoldenTest {
             enrollmentId = enr,
             epoch = 1,
             window = IngestPayloadBuilder.Window("changes", at(3, 0), at(3, 19)),
-            buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, five, one),
+            buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, five, one, ZONE),
             sessions = listOf(BucketBuilder.sleepSession(night)),
             readings = listOf(
                 BucketBuilder.reading(WellnessFixtures.spo2("spo2-1", 3, 3, 96.0)),
@@ -105,7 +105,7 @@ class IngestPayloadBuilderGoldenTest {
             enrollmentId = enr,
             epoch = 1,
             window = IngestPayloadBuilder.Window("backfill", ds, de),
-            buckets = BucketBuilder.activityBuckets("2026-11-03", hourly, types),
+            buckets = BucketBuilder.activityBuckets("2026-11-03", hourly, types, ZONE),
             sessions = listOf(BucketBuilder.exerciseSession(run, agg)),
         )
     }
@@ -126,7 +126,7 @@ class IngestPayloadBuilderGoldenTest {
         enrollmentId = enr,
         epoch = 2,
         window = IngestPayloadBuilder.Window("changes", at(3, 12), at(3, 13)),
-        buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, emptyList(), emptyList()),
+        buckets = BucketBuilder.heartRateBuckets("2026-11-03", WellnessFixtures.WATCH, emptyList(), emptyList(), ZONE),
         deletedIds = listOf("sleep-20261103", "never-indexed-id"),
     )
 
@@ -158,8 +158,10 @@ class IngestPayloadBuilderGoldenTest {
         assertEquals(listOf("o1"), origins.map { it.getValue("key").jsonPrimitive.content })
         assertEquals(listOf("key", "package", "device_type", "model"), origins[0].keys.toList())
         val bucket = obj.getValue("buckets").jsonArray[0].jsonObject
-        assertEquals(listOf("metric", "grain", "origin", "replace_day", "rows"), bucket.keys.toList())
+        assertEquals(listOf("metric", "grain", "origin", "replace_day", "offset_s", "rows"), bucket.keys.toList())
         assertEquals("o1", bucket.getValue("origin").jsonPrimitive.content)
+        // The zone offset at the start of the local replace_day (New York, standard time).
+        assertEquals("-18000", bucket.getValue("offset_s").toString())
         for (row in bucket.getValue("rows").jsonArray) assertEquals(5, row.jsonArray.size)
         val session = obj.getValue("sessions").jsonArray[0].jsonObject
         assertEquals(listOf("kind", "hc_id", "origin", "start", "end", "offset_s", "stages", "last_modified"), session.keys.toList())

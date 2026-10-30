@@ -8,7 +8,6 @@ import android.util.Log
 import com.aiblackbox.portal.BlackBoxNotificationManager
 import com.aiblackbox.portal.BuildConfig
 import com.aiblackbox.portal.data.remote.TailnetAddress
-import com.aiblackbox.portal.overlay.AppForegroundState
 import com.aiblackbox.portal.util.Constants
 import com.aiblackbox.portal.util.normalizeApiOrigin
 import kotlinx.serialization.json.JsonObject
@@ -26,16 +25,26 @@ object WellnessGraph {
     private val lock = Any()
 
     @Volatile private var binding: WellnessBinding? = null
+    @Volatile private var state: WellnessSyncStateStore? = null
+    @Volatile private var outbox: WellnessOutbox? = null
     @Volatile private var engine: WellnessSyncEngine? = null
     @Volatile private var engineOrigin: String? = null
 
     fun files(context: Context): WellnessFiles = WellnessFiles.of(context)
 
     fun binding(context: Context): WellnessBinding = binding ?: synchronized(lock) {
-        binding ?: WellnessBinding(files(context)).also { binding = it }
+        binding ?: WellnessBinding(files(context), state = state(context)).also { binding = it }
     }
 
-    fun state(context: Context): WellnessSyncStateStore = WellnessSyncStateStore(files(context).syncState)
+    /** The ONE state store of the process (the listener, the view model and the workers share it). */
+    fun state(context: Context): WellnessSyncStateStore = state ?: synchronized(lock) {
+        state ?: WellnessSyncStateStore(files(context).syncState).also { state = it }
+    }
+
+    /** The one outbox of the process (the engine writes it; the screen counts it). */
+    fun outbox(context: Context): WellnessOutbox = outbox ?: synchronized(lock) {
+        outbox ?: files(context).let { f -> WellnessOutbox(f.outbox, f.quarantine) }.also { outbox = it }
+    }
 
     fun gateway(context: Context): HealthConnectGateway = AndroidHealthConnectGateway(context)
 
@@ -69,10 +78,14 @@ object WellnessGraph {
                     binding = binding(app),
                     tokens = ChangesTokenStore(f.tokens),
                     dayIndex = DayIndex(f.dayIndex),
-                    outbox = WellnessOutbox(f.outbox, f.quarantine),
+                    outbox = outbox(app),
                     state = state(app),
                     send = { bytes, signer ->
                         val r = client.ingest(bytes, signer)
+                        WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
+                    },
+                    fetchStatus = { operator, signer ->
+                        val r = client.status(operator, signer)
                         WellnessOutbox.SendResult(r.status, r.body, r.retryAfterS)
                     },
                     onNotices = { notices -> postNotices(app, notices) },
@@ -157,15 +170,17 @@ object WellnessGraph {
             override fun current(): WellnessBindingRecord? = b.current()
             override fun requestSync() {
                 state(app).update { it.copy(lastNudgeMs = System.currentTimeMillis()) }
-                WellnessScheduler.syncNow(app, foreground = AppForegroundState.isForeground())
+                WellnessScheduler.syncNow(app)
             }
             override fun clearAll() {
                 WellnessScheduler.cancelAll(app)
                 b.clearAll()
             }
             override fun onBound(record: WellnessBindingRecord) {
+                // Scheduling waits for the box's 200 to the enroll call (WellnessViewModel): a
+                // run started now could reach the box before it has stored the key, take its
+                // 401 for a refused key, and ask the person to reconnect a setup that worked.
                 state(app).update { it.copy(state = WellnessRules.EnrollmentState.ACTIVE.wire, needsReconnect = false) }
-                WellnessScheduler.onEnrolled(app)
             }
         }
     }

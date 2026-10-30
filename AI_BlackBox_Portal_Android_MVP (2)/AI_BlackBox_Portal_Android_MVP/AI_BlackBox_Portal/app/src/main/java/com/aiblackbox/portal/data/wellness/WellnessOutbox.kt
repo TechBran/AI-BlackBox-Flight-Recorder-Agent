@@ -85,73 +85,103 @@ class WellnessOutbox(
             val status: Int,
             val error: String?,
         ) : DrainResult()
-        data class BackOff(override val sent: Int, override val notices: List<JsonObject>, val retryAfterS: Long?) : DrainResult()
+        data class BackOff(
+            override val sent: Int,
+            override val notices: List<JsonObject>,
+            val retryAfterS: Long?,
+            /** The box's error code (503 "paused" means the person paused Health elsewhere). */
+            val error: String? = null,
+        ) : DrainResult()
         data class RetryLater(override val sent: Int, override val notices: List<JsonObject>) : DrainResult()
+        /** The binding changed under the drain (re-enroll, unbind): it stopped touching anything. */
+        data class Stale(override val sent: Int, override val notices: List<JsonObject>) : DrainResult()
     }
 
-    /** One push attempt's answer: HTTP status (-1 = no answer) and body. */
-    data class SendResult(val status: Int, val body: String = "", val retryAfterS: Long? = null)
+    /**
+     * One push attempt's answer: HTTP status (-1 = no answer) and body. [local] marks an
+     * answer the phone gave itself without a request (a batch with nothing left to send after
+     * the consent filter: 200, deleted and not counted; one it could not read: 422).
+     */
+    data class SendResult(val status: Int, val body: String = "", val retryAfterS: Long? = null, val local: Boolean = false)
 
     /**
      * Push every pending batch, oldest first, through [send] (which signs and POSTs the gzip
      * bytes). Stops at the first answer that says stop or wait. [newBatchId] names 413 halves.
+     *
+     * [fence] runs each change to the outbox (and a no-op check before each send); it returns
+     * false when the binding the drain started with is gone, and the drain then stops without
+     * touching another file ([DrainResult.Stale]): an unbind keeps nothing, and a re-enroll's
+     * fresh outbox is never written by a drain of the old one.
      */
     suspend fun drain(
         send: suspend (ByteArray) -> SendResult,
         newBatchId: () -> String,
         maxSends: Int = 500,
+        fence: (() -> Unit) -> Boolean = { it(); true },
     ): DrainResult {
         var sent = 0
         val notices = mutableListOf<JsonObject>()
         var budget = maxSends
         while (budget-- > 0) {
+            if (!fence {}) return DrainResult.Stale(sent, notices)
             val entry = pending().firstOrNull() ?: return DrainResult.Drained(sent, notices)
             val bytes = try {
                 read(entry)
             } catch (e: Exception) {
-                quarantine(entry)
+                if (!fence { quarantine(entry) }) return DrainResult.Stale(sent, notices)
                 continue
             }
             val result = send(bytes)
             when (WellnessRules.outboxReaction(result.status)) {
                 WellnessRules.OutboxReaction.DELETE -> {
-                    delete(entry)
-                    sent++
-                    notices += parseNotices(result.body)
+                    if (!fence { delete(entry) }) return DrainResult.Stale(sent, notices)
+                    if (!result.local) {
+                        sent++
+                        notices += parseNotices(result.body)
+                    }
                 }
                 WellnessRules.OutboxReaction.STOP_RECONNECT -> return DrainResult.StopReconnect(sent, notices)
                 WellnessRules.OutboxReaction.STOP_AND_CLEAR ->
                     return DrainResult.StopAndClear(sent, notices, result.status, parseError(result.body))
                 WellnessRules.OutboxReaction.SPLIT -> {
                     val halves = runCatching { IngestPayloadBuilder.split(gunzip(bytes), newBatchId) }.getOrNull()
-                    if (halves == null) quarantine(entry) else replaceWithHalves(entry, halves)
+                    val ok = fence { if (halves == null) quarantine(entry) else replaceWithHalves(entry, halves) }
+                    if (!ok) return DrainResult.Stale(sent, notices)
                 }
-                WellnessRules.OutboxReaction.QUARANTINE -> quarantine(entry)
-                WellnessRules.OutboxReaction.BACK_OFF -> return DrainResult.BackOff(sent, notices, result.retryAfterS)
+                WellnessRules.OutboxReaction.QUARANTINE ->
+                    if (!fence { quarantine(entry) }) return DrainResult.Stale(sent, notices)
+                WellnessRules.OutboxReaction.BACK_OFF ->
+                    return DrainResult.BackOff(sent, notices, result.retryAfterS, parseError(result.body))
                 WellnessRules.OutboxReaction.RETRY_LATER -> return DrainResult.RetryLater(sent, notices)
             }
         }
         return DrainResult.RetryLater(sent, notices)
     }
 
-    private fun delete(entry: Entry) = synchronized(lock) {
-        delivered += entry.name
-        entry.file.delete()
+    private fun delete(entry: Entry) {
+        synchronized(lock) {
+            delivered += entry.name
+            entry.file.delete()
+        }
     }
 
-    private fun quarantine(entry: Entry) = synchronized(lock) {
-        quarantineDir.mkdirs()
-        val dest = File(quarantineDir, entry.name)
-        if (!entry.file.renameTo(dest)) entry.file.delete()
-        Log.w(TAG, "batch quarantined (422 or unreadable); ${quarantinedCount()} set aside")
+    private fun quarantine(entry: Entry) {
+        synchronized(lock) {
+            quarantineDir.mkdirs()
+            val dest = File(quarantineDir, entry.name)
+            if (!entry.file.renameTo(dest)) entry.file.delete()
+            Log.w(TAG, "batch quarantined (422 or unreadable); ${quarantinedCount()} set aside")
+        }
     }
 
     /** Write both halves (as `<name>-1`, `<name>-2`) BEFORE removing the original. */
-    private fun replaceWithHalves(entry: Entry, halves: Pair<String, String>) = synchronized(lock) {
-        val base = entry.name.removeSuffix(SUFFIX)
-        WellnessAtomic.writeBytes(File(dir, "$base-1$SUFFIX"), gzip(halves.first))
-        WellnessAtomic.writeBytes(File(dir, "$base-2$SUFFIX"), gzip(halves.second))
-        entry.file.delete()
+    private fun replaceWithHalves(entry: Entry, halves: Pair<String, String>) {
+        synchronized(lock) {
+            val base = entry.name.removeSuffix(SUFFIX)
+            WellnessAtomic.writeBytes(File(dir, "$base-1$SUFFIX"), gzip(halves.first))
+            WellnessAtomic.writeBytes(File(dir, "$base-2$SUFFIX"), gzip(halves.second))
+            entry.file.delete()
+        }
     }
 
     private fun isFullLocked(): Boolean {

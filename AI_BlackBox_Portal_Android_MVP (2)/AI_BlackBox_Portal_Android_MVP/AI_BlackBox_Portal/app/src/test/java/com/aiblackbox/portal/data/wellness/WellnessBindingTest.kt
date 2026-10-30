@@ -75,4 +75,62 @@ class WellnessBindingTest {
         bind()
         assertNotNull(binding.signer())
     }
+
+    // ── the generation fence (a run that outlives its binding stops writing) ──────────────
+
+    @Test
+    fun `a run's fence closes on unbind and on a new enrollment, not on a repeat of the same bind`() {
+        assertNull(binding.snapshot())
+        bind()
+        val (_, gen) = binding.snapshot()!!
+        var wrote = 0
+        assertTrue(binding.runIfCurrent(gen) { wrote++ })
+
+        // The box retries the same bind (same enrollment, epoch and key): runs carry on.
+        bind()
+        assertTrue(binding.runIfCurrent(gen) { wrote++ })
+
+        bind(enr = "en_12ab34cd", epoch = 2)
+        assertFalse(binding.runIfCurrent(gen) { wrote++ })
+        val (_, gen2) = binding.snapshot()!!
+        assertTrue(binding.runIfCurrent(gen2) { wrote++ })
+
+        binding.clearAll()
+        assertFalse(binding.runIfCurrent(gen2) { wrote++ })
+        assertEquals(3, wrote)
+    }
+
+    @Test
+    fun `clearIfCurrent never clears the binding that replaced the refused one`() {
+        bind()
+        val (_, old) = binding.snapshot()!!
+        bind(enr = "en_12ab34cd", epoch = 2)
+        assertFalse(binding.clearIfCurrent(old))
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+        val (_, gen) = binding.snapshot()!!
+        assertTrue(binding.clearIfCurrent(gen))
+        assertNull(binding.current())
+    }
+
+    @Test
+    fun `rollBackBind removes only the binding the given attempt's nonce created`() {
+        val first = binding.beginIntent(WellnessFixtures.OPERATOR)
+        binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_0badc0de", 1, first.nonce, key))
+        // A later attempt that never got a bind cannot remove the earlier enrollment.
+        val second = binding.beginIntent(WellnessFixtures.OPERATOR)
+        assertFalse(binding.rollBackBind(second.nonce))
+        assertEquals("en_0badc0de", binding.current()!!.enrollmentId)
+        assertTrue(binding.rollBackBind(first.nonce))
+        assertNull(binding.current())
+        assertFalse(binding.rollBackBind(first.nonce))
+    }
+
+    @Test
+    fun `clearAll takes the probe exports with everything else`() {
+        bind()
+        files.probeExports.mkdirs()
+        java.io.File(files.probeExports, "probe-1.json").writeText("{}")
+        binding.clearAll()
+        assertFalse(files.probeExports.exists())
+    }
 }

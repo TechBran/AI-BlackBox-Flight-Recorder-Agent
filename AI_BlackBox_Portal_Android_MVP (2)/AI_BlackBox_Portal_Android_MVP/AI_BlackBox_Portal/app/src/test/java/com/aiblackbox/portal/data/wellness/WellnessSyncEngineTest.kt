@@ -4,7 +4,10 @@ import com.aiblackbox.portal.data.wellness.WellnessFixtures.ZONE
 import com.aiblackbox.portal.data.wellness.WellnessFixtures.at
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -37,15 +40,19 @@ class WellnessSyncEngineTest {
     var reply: (JsonObject) -> WellnessOutbox.SendResult = { WellnessOutbox.SendResult(200, """{"accepted":1}""") }
     private var stopped: Pair<Int, String?>? = null
 
-    private val engine = WellnessSyncEngine(
+    /** Signed status reads the engine made, and what the stand-in box answers them. */
+    private var statusCalls = 0
+
+    private fun newEngine(fetch: (suspend () -> WellnessOutbox.SendResult)? = null) = WellnessSyncEngine(
         gateway = gw, binding = binding, tokens = tokens, dayIndex = DayIndex(files.dayIndex), outbox = outbox,
         state = state,
         send = { bytes, signer ->
+            val obj = Json.parseToJsonElement(WellnessOutbox.gunzip(bytes)).jsonObject
+            val enr = obj.getValue("enrollment_id").jsonPrimitive.content
             val header = signer.header("POST", "/wellness/ingest", bytes, now / 1000, "a".repeat(32))
             val sig = header.substringAfter("sig=")
-            signaturesOk += sig == OriginSigner.signature(OriginSigner.decodeKey(key), "en_0badc0de", now / 1000,
+            signaturesOk += sig == OriginSigner.signature(OriginSigner.decodeKey(keyFor(enr)), enr, now / 1000,
                 "a".repeat(32), "POST", "/wellness/ingest", bytes)
-            val obj = Json.parseToJsonElement(WellnessOutbox.gunzip(bytes)).jsonObject
             received += obj
             reply(obj)
         },
@@ -54,8 +61,35 @@ class WellnessSyncEngineTest {
         newBatchId = WellnessFixtures.ids("e"),
         onStopped = { status, error -> stopped = status to error },
         onReconnectNeeded = { reconnectNotices++ },
+        fetchStatus = fetch?.let { f -> { _, _ -> statusCalls++; f() } },
     )
+
+    private val engine = newEngine()
     private var reconnectNotices = 0
+
+    /** A second enrollment's key (a re-enroll mints a new one). */
+    private val key2 = OriginSigner.encodeKey(ByteArray(32) { (it * 11 + 1).toByte() })
+
+    private fun keyFor(enr: String) = if (enr == "en_12ab34cd") key2 else key
+
+    /** The box re-enrolls this phone (Reconnect Health, or replace): a new enrollment and key. */
+    private fun reEnroll() {
+        val intent = binding.beginIntent(WellnessFixtures.OPERATOR)
+        assertTrue(binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, "en_12ab34cd", 2, intent.nonce, key2))
+            is BindDecision.Accepted)
+    }
+
+    /** A credentialed `GET /wellness/status` body. */
+    private fun statusBody(categories: Map<String, String>, state: String = "active"): String = buildJsonObject {
+        put("state", JsonPrimitive(state))
+        put("enrolled", JsonPrimitive(true))
+        put("troubles", JsonArray(emptyList()))
+        put("categories", JsonObject(categories.mapValues { JsonPrimitive(it.value) }))
+        put("local_only", JsonObject(emptyMap()))
+        put("providers_allowed", JsonArray(emptyList()))
+    }.toString()
+
+    private val allAsk = mapOf("sleep" to "ask", "heart" to "ask", "activity" to "ask", "blood_pressure" to "ask")
 
     private fun enroll() {
         binding.installId()
@@ -269,7 +303,7 @@ class WellnessSyncEngineTest {
             startMs = at(12, 23, month = 10), endMs = at(13, 6, month = 10), stages = emptyList()))
         gw.upsert(WellnessFixtures.bp("bp-old", 13, 7).copy(timeMs = at(13, 7, month = 10)))
         gw.upsert(WellnessFixtures.sleepNight("sleep-new", 3))
-        val first = engine.backfillPage()
+        val first = engine.backfillPage(inForeground = false)
         assertTrue(first is WellnessSyncEngine.BackfillStep.Progress)
         assertEquals(12, tokens.all().size)
         first as WellnessSyncEngine.BackfillStep.Progress
@@ -278,8 +312,8 @@ class WellnessSyncEngineTest {
         assertEquals("backfill", received.first().getValue("window").jsonObject.getValue("type").jsonPrimitive.content)
         assertTrue(all("sessions").any { it.getValue("hc_id").jsonPrimitive.content == "sleep-new" })
         var steps = 1
-        while (engine.backfillPage() is WellnessSyncEngine.BackfillStep.Progress) steps++
-        assertEquals(WellnessSyncEngine.BackfillStep.Done, engine.backfillPage())
+        while (engine.backfillPage(inForeground = false) is WellnessSyncEngine.BackfillStep.Progress) steps++
+        assertEquals(WellnessSyncEngine.BackfillStep.Done, engine.backfillPage(inForeground = false))
         val cursor = state.load().backfill
         assertTrue(cursor.done)
         assertEquals(cursor.pagesTotal, cursor.pagesDone)
@@ -297,7 +331,7 @@ class WellnessSyncEngineTest {
         gw.granted = gw.granted - WellnessCatalog.PERMISSION_HISTORY
         gw.upsert(WellnessFixtures.bp("bp-old", 1, 7).copy(timeMs = at(1, 7, month = 9)))
         gw.upsert(WellnessFixtures.sleepNight("sleep-new", 3))
-        while (engine.backfillPage() is WellnessSyncEngine.BackfillStep.Progress) Unit
+        while (engine.backfillPage(inForeground = false) is WellnessSyncEngine.BackfillStep.Progress) Unit
         val floor = state.load().backfill.floorMs!!
         assertTrue(floor >= now - 31 * BucketBuilder.DAY_MS)
         assertFalse(all("readings").any { it.getValue("hc_id").jsonPrimitive.content == "bp-old" })
@@ -307,7 +341,7 @@ class WellnessSyncEngineTest {
     fun `a category turned on after the import finished runs the import again`() = runBlocking {
         enroll()
         state.update { it.copy(categories = it.categories + ("blood_pressure" to "off")) }
-        while (engine.backfillPage() is WellnessSyncEngine.BackfillStep.Progress) Unit
+        while (engine.backfillPage(inForeground = false) is WellnessSyncEngine.BackfillStep.Progress) Unit
         assertTrue(state.load().backfill.done)
         engine.sync(false)
         assertTrue(state.load().backfill.done)
@@ -327,9 +361,9 @@ class WellnessSyncEngineTest {
         gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
         // Older history, so the import has more than one page.
         gw.upsert(WellnessFixtures.sleepNight("sleep-old", 3).copy(startMs = at(10, 23, month = 10), endMs = at(11, 6, month = 10)))
-        assertTrue(e.backfillPage() is WellnessSyncEngine.BackfillStep.Progress)
+        assertTrue(e.backfillPage(inForeground = false) is WellnessSyncEngine.BackfillStep.Progress)
         val cursor = state.load().backfill.cursorMs
-        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("outbox_full"), e.backfillPage())
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("outbox_full"), e.backfillPage(inForeground = false))
         assertEquals(cursor, state.load().backfill.cursorMs)
     }
 
@@ -338,6 +372,300 @@ class WellnessSyncEngineTest {
         enroll()
         state.update { it.copy(state = "paused") }
         assertEquals("skipped:paused", engine.sync(true).outcome)
-        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("paused"), engine.backfillPage())
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("paused"), engine.backfillPage(inForeground = false))
+    }
+
+    // ── review fixes: binding changes mid-run (the generation fence) ──────────────────────
+
+    @Test
+    fun `a re-enroll while a push is in flight keeps the new binding (the old key's 410 clears nothing)`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        // The box re-enrolls this phone and tombstones the old enrollment while its push is on the wire.
+        reply = { p ->
+            if (p.getValue("enrollment_id").jsonPrimitive.content == "en_0badc0de") {
+                reEnroll()
+                WellnessOutbox.SendResult(410, """{"error":"revoked"}""")
+            } else WellnessOutbox.SendResult(200, "{}")
+        }
+        assertEquals("stale", engine.sync(false).outcome)
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+        assertNull("no 'turned off from your box' notice for a phone that was just set up again", stopped)
+        // The new enrollment collects and signs with its own key.
+        received.clear()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-2", 3, 8))
+        assertEquals("ok", engine.sync(false).outcome)
+        assertEquals(listOf("en_12ab34cd"), received.map { it.getValue("enrollment_id").jsonPrimitive.content }.distinct())
+        assertTrue(signaturesOk.all { it })
+    }
+
+    @Test
+    fun `a re-enroll during the reads of a sync writes nothing for the old enrollment`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.steps("st-1", at(3, 9), at(3, 10)), 1500.0)
+        gw.duringNextCall = { reEnroll() }
+        assertEquals("stale", engine.sync(false).outcome)
+        assertTrue(received.isEmpty())
+        assertEquals(0, outbox.size())
+        // The re-enroll reset the tokens; the old run advanced none of them afterwards.
+        assertTrue(tokens.all().isEmpty())
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+    }
+
+    @Test
+    fun `a re-enroll during a history page keeps the new binding and stops the old import`() = runBlocking {
+        enroll()
+        gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
+        gw.duringNextCall = { reEnroll() }
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("stale"), engine.backfillPage(inForeground = false))
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+        assertTrue(received.isEmpty())
+        assertEquals(0, outbox.size())
+        assertFalse(state.load().backfill.done)
+        assertNull(state.load().backfill.cursorMs)
+    }
+
+    @Test
+    fun `an unbind during a run keeps nothing (no outbox, tokens or index come back)`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.steps("st-1", at(3, 9), at(3, 10)), 1500.0)
+        gw.addHeartRate(WellnessFixtures.meta("hr-1"), WellnessFixtures.OFFSET_EST,
+            WellnessFixtures.hrSeries(at(3, 1), at(3, 2), 60, 54.0))
+        reply = { WellnessOutbox.SendResult(-1) }
+        gw.duringNextCall = { binding.clearAll() }
+        assertEquals("stale", engine.sync(false).outcome)
+        assertNull(binding.current())
+        assertEquals(listOf("install_id"), files.root.listFiles()!!.map { it.name }.sorted())
+    }
+
+    @Test
+    fun `an unbind while a push is in flight keeps nothing either`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { binding.clearAll(); WellnessOutbox.SendResult(413, "") }
+        assertEquals("stale", engine.sync(false).outcome)
+        assertEquals(listOf("install_id"), files.root.listFiles()!!.map { it.name }.sorted())
+    }
+
+    // ── review fixes: the history import obeys the same stops as the sync ─────────────────
+
+    private fun historyOverWeeks() {
+        gw.upsert(WellnessFixtures.sleepNight("sleep-new", 3))
+        gw.upsert(WellnessFixtures.sleepNight("sleep-old", 3).copy(startMs = at(1, 23, month = 9), endMs = at(2, 6, month = 9)))
+    }
+
+    @Test
+    fun `the history import stops at a 401 and reads no further page`() = runBlocking {
+        enroll()
+        historyOverWeeks()
+        reply = { WellnessOutbox.SendResult(401, """{"error":"bad_signature"}""") }
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("reconnect"), engine.backfillPage(inForeground = false))
+        assertTrue(state.load().needsReconnect)
+        val reads = gw.reads
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("stopped"), engine.backfillPage(inForeground = false))
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("stopped"), engine.backfillPage(inForeground = false))
+        assertEquals("no Health Connect read after the refusal", reads, gw.reads)
+        assertEquals("one refused push (and its one retry), not one per page", 2, received.size)
+        assertEquals(1, reconnectNotices)
+        val st = state.load()
+        assertFalse(WellnessRules.shouldStartBackfill(st.backfill.done, st.needsReconnect, st.localHold != null, st.enrollmentState()))
+    }
+
+    @Test
+    fun `without the background grant the import reads only while the app is visible`() = runBlocking {
+        enroll()
+        gw.granted = gw.granted - WellnessCatalog.PERMISSION_BACKGROUND
+        historyOverWeeks()
+        val reads = gw.reads
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("foreground_only"), engine.backfillPage(inForeground = false))
+        assertEquals(reads, gw.reads)
+        assertTrue(received.isEmpty())
+        assertTrue(engine.backfillPage(inForeground = true) is WellnessSyncEngine.BackfillStep.Progress)
+    }
+
+    @Test
+    fun `a quota back-off re-queues a hidden retry only with the background grant`() = runBlocking {
+        enroll()
+        historyOverWeeks()
+        gw.granted = gw.granted - WellnessCatalog.PERMISSION_BACKGROUND
+        gw.quotaAfterCalls = gw.calls
+        val fg = engine.backfillPage(inForeground = true) as WellnessSyncEngine.BackfillStep.QuotaBackoff
+        assertFalse(fg.requeue)
+        gw.granted = gw.granted + WellnessCatalog.PERMISSION_BACKGROUND
+        val bg = engine.backfillPage(inForeground = false) as WellnessSyncEngine.BackfillStep.QuotaBackoff
+        assertTrue(bg.requeue)
+    }
+
+    @Test
+    fun `a background run in foreground-only mode still delivers what the outbox holds`() = runBlocking {
+        enroll()
+        engine.sync(true)
+        gw.granted = gw.granted - WellnessCatalog.PERMISSION_BACKGROUND
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { WellnessOutbox.SendResult(-1) }
+        engine.sync(inForeground = true)            // read while open; the box was unreachable
+        assertEquals(1, outbox.size())
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        val reads = gw.reads
+        val report = engine.sync(inForeground = false)
+        assertEquals("skipped:foreground_only", report.outcome)
+        assertEquals(1, report.batchesSent)
+        assertEquals(0, outbox.size())
+        assertEquals("delivered without reading Health Connect", reads, gw.reads)
+    }
+
+    // ── review fixes: narrowing on another surface reaches the collector ──────────────────
+
+    @Test
+    fun `a category turned off on another surface stops its reads and is never delivered from the outbox`() = runBlocking {
+        var boxCategories = allAsk
+        val e = newEngine { WellnessOutbox.SendResult(200, statusBody(boxCategories)) }
+        enroll()
+        e.sync(false)
+        gw.upsert(WellnessFixtures.sleepNight("sleep-1", 3))
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { WellnessOutbox.SendResult(-1) }
+        now += 61_000
+        e.sync(false)                               // read with consent; the box was unreachable
+        assertEquals(1, outbox.size())
+        // On the Portal: blood pressure off (narrowing needs no signature there).
+        boxCategories = allAsk + ("blood_pressure" to "off")
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        gw.upsert(WellnessFixtures.bp("bp-2", 3, 8))
+        now += 61_000
+        received.clear()
+        assertEquals("ok", e.sync(false).outcome)
+        assertEquals("off", state.load().categories["blood_pressure"])
+        assertTrue("no blood pressure leaves the phone after it was turned off", all("readings").isEmpty())
+        assertEquals(listOf("sleep-1"), all("sessions").map { it.getValue("hc_id").jsonPrimitive.content })
+        assertEquals(0, outbox.size())
+    }
+
+    @Test
+    fun `a batch with nothing left after the consent filter is dropped without a request`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { WellnessOutbox.SendResult(-1) }
+        engine.sync(false)
+        assertEquals(1, outbox.size())
+        state.update { it.copy(categories = it.categories + ("blood_pressure" to "off")) }
+        received.clear()
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        val report = engine.sync(false)
+        assertTrue(received.isEmpty())
+        assertEquals(0, report.batchesSent)
+        assertEquals(0, outbox.size())
+        assertEquals(0L, state.load().lastPushMs)
+    }
+
+    @Test
+    fun `a pause on another surface stops the collector, from the status read or a 503`() = runBlocking {
+        val e = newEngine { WellnessOutbox.SendResult(200, statusBody(allAsk, state = "paused")) }
+        enroll()
+        val reads = gw.reads
+        assertEquals("skipped:paused", e.sync(true).outcome)
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("paused"), e.backfillPage(inForeground = true))
+        assertEquals(reads, gw.reads)
+
+        // Without a status read the push says it: 503 paused.
+        state.update { it.copy(state = "active") }
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { WellnessOutbox.SendResult(503, """{"error":"paused"}""", retryAfterS = 3600) }
+        assertEquals("paused", engine.sync(false).outcome)
+        assertEquals("skipped:paused", engine.sync(false).outcome)
+        assertEquals(1, outbox.size())
+    }
+
+    @Test
+    fun `an ended enrollment is learned from the status read even with nothing to push`() = runBlocking {
+        val revoked = newEngine { WellnessOutbox.SendResult(410, """{"error":"revoked"}""") }
+        enroll()
+        assertEquals("stopped:revoked", revoked.sync(false).outcome)
+        assertNull(binding.current())
+        assertEquals(410 to "revoked", stopped)
+
+        val refused = newEngine { WellnessOutbox.SendResult(401, """{"error":"bad_signature"}""") }
+        enroll()
+        assertEquals("reconnect", refused.sync(false).outcome)
+        assertTrue(state.load().needsReconnect)
+        assertEquals(1, reconnectNotices)
+    }
+
+    @Test
+    fun `an unreachable box costs one status attempt a minute, and the run carries on`() = runBlocking {
+        val e = newEngine { WellnessOutbox.SendResult(-1) }
+        enroll()
+        assertEquals("ok", e.sync(false).outcome)
+        assertEquals("ok", e.sync(false).outcome)
+        assertEquals(1, statusCalls)
+        now += 61_000
+        e.sync(false)
+        assertEquals(2, statusCalls)
+    }
+
+    @Test
+    fun `a narrowing held on this phone stops every read and push`() = runBlocking {
+        enroll()
+        engine.sync(false)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        reply = { WellnessOutbox.SendResult(-1) }
+        engine.sync(false)
+        state.update { it.copy(localHold = WellnessRules.HOLD_DISCONNECT) }
+        reply = { WellnessOutbox.SendResult(200, "{}") }
+        received.clear()
+        val reads = gw.reads
+        assertEquals("skipped:held", engine.sync(true).outcome)
+        assertEquals(WellnessSyncEngine.BackfillStep.Skipped("held"), engine.backfillPage(inForeground = true))
+        assertTrue(received.isEmpty())
+        assertEquals(reads, gw.reads)
+        assertEquals(1, outbox.size())
+    }
+
+    // ── review fix: bucket groups say which local day they replace ────────────────────────
+
+    @Test
+    fun `every bucket group carries the zone offset of its local day, DST days included`() = runBlocking {
+        now = at(2, 12)
+        enroll()
+        engine.sync(false)
+        // 1 Nov 2026 is the day New York leaves daylight time: it starts at -4 h.
+        gw.addHeartRate(WellnessFixtures.meta("hr-dst"), -14400,
+            WellnessFixtures.hrSeries(at(1, 0, 30), at(1, 0, 50), 60, 50.0))
+        gw.upsert(WellnessFixtures.steps("st-2", at(2, 9), at(2, 10)), 800.0)
+        engine.sync(false)
+        val offsets = all("buckets").associate {
+            (it.getValue("metric").jsonPrimitive.content + "@" + it.getValue("replace_day").jsonPrimitive.content + "/" +
+                it.getValue("grain").jsonPrimitive.content) to it.getValue("offset_s").jsonPrimitive.content.toInt()
+        }
+        assertEquals(-14400, offsets.getValue("heart_rate@2026-11-01/5min"))
+        assertEquals(-14400, offsets.getValue("heart_rate@2026-11-01/1min"))
+        assertEquals(-18000, offsets.getValue("steps@2026-11-02/1h"))
+    }
+
+    @Test
+    fun `a single 401 from a drifted clock is retried and never asks the person to reconnect`() = runBlocking {
+        var refusals = 1
+        val e = newEngine {
+            if (refusals-- > 0) WellnessOutbox.SendResult(401, """{"error":"bad_signature"}""")
+            else WellnessOutbox.SendResult(200, statusBody(allAsk))
+        }
+        enroll()
+        e.sync(false)
+        assertFalse(state.load().needsReconnect)
+        assertEquals(2, statusCalls)
+        gw.upsert(WellnessFixtures.bp("bp-1", 3, 7))
+        var pushRefusals = 1
+        reply = { if (pushRefusals-- > 0) WellnessOutbox.SendResult(401, """{"error":"bad_signature"}""") else WellnessOutbox.SendResult(200, "{}") }
+        assertEquals("ok", e.sync(false).outcome)
+        assertFalse(state.load().needsReconnect)
+        assertEquals(0, reconnectNotices)
+        assertEquals(0, outbox.size())
     }
 }

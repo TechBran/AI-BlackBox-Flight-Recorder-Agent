@@ -31,11 +31,13 @@ class WellnessFiles(noBackupDir: File) {
     val probeLog: File get() = File(root, "probe_log.json")
     val outbox: File get() = File(root, "outbox")
     val quarantine: File get() = File(outbox, "quarantine")
+    /** The M7.1 probe's JSON exports (counts and dates; erased with everything else). */
+    val probeExports: File get() = File(root, "probe")
 
     /** Every file and directory above (the no-backup test walks this list). */
     fun all(): List<File> = listOf(
         root, binding, intent, installId, tokens, dayIndex, backfill, syncState, statusCache,
-        probeLog, outbox, quarantine,
+        probeLog, outbox, quarantine, probeExports,
     )
 
     /** Erase everything the phone holds for wellness (unbind, erase, a 410). */
@@ -50,7 +52,14 @@ class WellnessFiles(noBackupDir: File) {
     }
 }
 
-/** Crash-safe whole-file writes for wellness state (text and gzip bytes). */
+/**
+ * Crash-safe whole-file writes for wellness state (text and gzip bytes): a temp file in the
+ * same directory, fsync, then an atomic rename over the target.
+ *
+ * Each write gets its OWN temp file. A fixed `<name>.tmp` let two writers of one file (two
+ * threads, or two store instances) share a temp inode: one renamed it away under the other
+ * (NoSuchFileException), or a half-written temp replaced the real file.
+ */
 internal object WellnessAtomic {
 
     fun writeText(file: File, text: String) = writeBytes(file, text.toByteArray(Charsets.UTF_8))
@@ -58,7 +67,7 @@ internal object WellnessAtomic {
     fun writeBytes(file: File, bytes: ByteArray) {
         val dir = file.absoluteFile.parentFile ?: throw IllegalArgumentException("no parent for $file")
         dir.mkdirs()
-        val tmp = File(dir, "${file.name}.tmp")
+        val tmp = File.createTempFile("${file.name}.", TMP_SUFFIX, dir)
         try {
             FileOutputStream(tmp).use { out ->
                 out.write(bytes)
@@ -71,6 +80,9 @@ internal object WellnessAtomic {
             throw e
         }
     }
+
+    /** Temp files end with this, so no reader that lists a directory mistakes one for data. */
+    const val TMP_SUFFIX = ".tmp"
 
     fun readTextOrNull(file: File): String? = try {
         if (file.exists()) file.readText(Charsets.UTF_8) else null

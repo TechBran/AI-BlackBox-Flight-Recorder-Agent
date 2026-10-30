@@ -11,15 +11,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
 import androidx.health.connect.client.PermissionController
-import com.aiblackbox.portal.data.wellness.WellnessCatalog
+import com.aiblackbox.portal.data.wellness.WellnessRules
 import com.aiblackbox.portal.ui.theme.BbxWhite
 import com.aiblackbox.portal.ui.theme.Neutral700
 
 /**
- * The M7.1 probe (spec §2.4 and M7.1 scope 2), behind the debug flag: it runs the device tests
- * T-1 to T-11 as far as they can run on the phone, SENDS NOTHING to the box, writes the JSON
- * report to the app's files dir and offers it to the share sheet. The report holds statuses,
- * counts, dates and gaps, never a health value.
+ * The M7.1 probe (spec §2.4 and M7.1 scope 2), only in debug builds or a build made with
+ * `-PwellnessProbe` (BuildConfig.WELLNESS_PROBE; a customer's release build cannot open it):
+ * it runs the device tests T-1 to T-11 as far as they can run on the phone, SENDS NOTHING to
+ * the box, writes the JSON report to no-backup storage (erased with the rest of Health) and
+ * offers its text to the share sheet. The report holds statuses, counts, dates and gaps,
+ * never a health value.
  */
 @Composable
 fun ProbeScreen(state: WellnessUiState, viewModel: WellnessViewModel, onClose: () -> Unit) {
@@ -33,8 +35,9 @@ fun ProbeScreen(state: WellnessUiState, viewModel: WellnessViewModel, onClose: (
                 "is saved on this phone and you choose where to share it. Counts and dates only.")
             Row {
                 HealthButton("Ask Health Connect for everything") {
-                    launcher.launch(WellnessCatalog.ALL_READ_PERMISSIONS + WellnessCatalog.PERMISSION_HISTORY +
-                        WellnessCatalog.PERMISSION_BACKGROUND)
+                    // Every category, plus past data and background only where Health Connect
+                    // says it can grant them (the setup rule).
+                    launcher.launch(WellnessRules.probePermissions(state.historyFeature, state.backgroundFeature))
                 }
             }
             Row {

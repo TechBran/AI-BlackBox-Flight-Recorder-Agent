@@ -109,7 +109,8 @@ class WellnessRulesTest {
         full: Boolean = false,
         backoffUntil: Long = 0L,
         now: Long = 1_000_000L,
-    ) = WellnessRules.SyncInputs(bound, state, sdk, types, fg, bg, stopped, full, backoffUntil, now)
+        held: Boolean = false,
+    ) = WellnessRules.SyncInputs(bound, state, sdk, types, fg, bg, stopped, full, backoffUntil, now, held)
 
     @Test
     fun `sync runs when everything is in place`() {
@@ -276,5 +277,52 @@ class WellnessRulesTest {
         assertEquals("Samsung Health, watch SM-R960", WellnessRules.originLabel("Samsung Health", "WATCH", "SM-R960"))
         assertEquals("Samsung Health, this phone", WellnessRules.originLabel("Samsung Health", "PHONE", "SM-TEST0"))
         assertEquals("Oura", WellnessRules.originLabel("Oura", null, null))
+    }
+
+    // ── review fixes: holds, drains, the import's gate, the box's answers ─────────────────
+
+    @Test
+    fun `a narrowing held on this phone is a full stop, ahead of everything but a refused key`() {
+        assertEquals(SyncDecision.Skip("held"), WellnessRules.maySync(inputs(held = true, fg = true)))
+        assertEquals(SyncDecision.Skip("stopped"), WellnessRules.maySync(inputs(held = true, stopped = true)))
+        assertFalse(WellnessRules.mayDrainWhenSkipped("held"))
+        assertEquals(StatusChip.PAUSED, WellnessRules.statusChip(EnrollmentState.ACTIVE, true, emptyList(), held = true))
+        assertEquals(StatusChip.NOT_SET_UP, WellnessRules.statusChip(EnrollmentState.ACTIVE, false, emptyList(), held = true))
+    }
+
+    @Test
+    fun `only the skips that forbid reading may still deliver the outbox`() {
+        for (reason in listOf("foreground_only", "no_permissions", "hc_unavailable")) assertTrue(reason, WellnessRules.mayDrainWhenSkipped(reason))
+        for (reason in listOf("not_enrolled", "stopped", "held", "paused", "revoked", "ownership_changed", "backoff"))
+            assertFalse(reason, WellnessRules.mayDrainWhenSkipped(reason))
+    }
+
+    @Test
+    fun `the history import is started only when it can do any good`() {
+        assertTrue(WellnessRules.shouldStartBackfill(false, false, false, EnrollmentState.ACTIVE))
+        assertFalse(WellnessRules.shouldStartBackfill(true, false, false, EnrollmentState.ACTIVE))
+        assertFalse(WellnessRules.shouldStartBackfill(false, true, false, EnrollmentState.ACTIVE))
+        assertFalse(WellnessRules.shouldStartBackfill(false, false, true, EnrollmentState.ACTIVE))
+        for (s in listOf(EnrollmentState.PAUSED, EnrollmentState.REVOKED, EnrollmentState.OWNERSHIP_CHANGED))
+            assertFalse(s.wire, WellnessRules.shouldStartBackfill(false, false, false, s))
+        assertTrue(WellnessRules.shouldStartBackfill(false, false, false, EnrollmentState.STALE))
+    }
+
+    @Test
+    fun `the collector's status read reacts like a push to a refused key`() {
+        assertEquals(WellnessRules.StatusReaction.APPLY, WellnessRules.statusReaction(200, null))
+        assertEquals(WellnessRules.StatusReaction.STOP_RECONNECT, WellnessRules.statusReaction(401, "bad_signature"))
+        assertEquals(WellnessRules.StatusReaction.STOP_AND_CLEAR, WellnessRules.statusReaction(409, "owner_changed"))
+        assertEquals(WellnessRules.StatusReaction.STOP_AND_CLEAR, WellnessRules.statusReaction(410, "revoked"))
+        assertEquals(WellnessRules.StatusReaction.PAUSED, WellnessRules.statusReaction(503, "paused"))
+        for ((status, error) in listOf(-1 to null, 500 to null, 503 to "wellness_disabled", 429 to "rate_limited"))
+            assertEquals("$status", WellnessRules.StatusReaction.KEEP_LOCAL, WellnessRules.statusReaction(status, error))
+    }
+
+    @Test
+    fun `a narrowing the box did not confirm keeps the phone stopped, a refused key ends Health here`() {
+        assertEquals(WellnessRules.NarrowingOutcome.CONFIRMED, WellnessRules.narrowingOutcome(200))
+        for (s in listOf(401, 409, 410)) assertEquals(WellnessRules.NarrowingOutcome.KEY_REFUSED, WellnessRules.narrowingOutcome(s))
+        for (s in listOf(-1, 403, 422, 500, 503)) assertEquals(WellnessRules.NarrowingOutcome.UNCONFIRMED, WellnessRules.narrowingOutcome(s))
     }
 }

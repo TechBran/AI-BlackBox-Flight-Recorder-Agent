@@ -101,4 +101,13 @@ class WellnessPermissionUxTest {
             WellnessRules.readableTypes(consent(sleep = on, heart = on), granted))
         assertTrue(WellnessRules.readableTypes(consent(activity = on), granted).isEmpty())
     }
+
+    @Test
+    fun `the probe asks for every category, past data and background only where available`() {
+        val reads = WellnessCatalog.ALL_READ_PERMISSIONS
+        assertEquals(reads + WellnessCatalog.PERMISSION_HISTORY + WellnessCatalog.PERMISSION_BACKGROUND,
+            WellnessRules.probePermissions(avail, avail))
+        assertEquals(reads, WellnessRules.probePermissions(unavail, unavail))
+        assertEquals(reads + WellnessCatalog.PERMISSION_BACKGROUND, WellnessRules.probePermissions(unavail, avail))
+    }
 }

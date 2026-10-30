@@ -21,13 +21,20 @@ import kotlinx.serialization.json.jsonPrimitive
  *  4. the box answers 200 {enrollment_id, epoch, state, sync_interval_min, policy_version}
  *     and this checks the bind it received is that enrollment.
  *
- * [Outcome] carries the user-facing words for every refusal the contract defines.
+ * Anything else ends the attempt with NO key on the phone: a bind this attempt received is
+ * rolled back ([WellnessBinding.rollBackBind]) when the box's answer is a refusal, a 5xx, lost,
+ * or names another enrollment, and [onRolledBack] cancels whatever was scheduled for it. A
+ * key the box never stored would only collect health data into a 401.
+ *
+ * [Outcome] carries the user-facing words for every refusal the contract defines; for codes
+ * this build does not know, the box's own `fix` (or `detail`) text.
  */
 class WellnessEnrollment(
     private val binding: WellnessBinding,
     private val post: suspend (body: String) -> WellnessHttp,
     private val tailnetIps: () -> List<String>,
     private val bindWaitMs: Long = 3_000L,
+    private val onRolledBack: () -> Unit = {},
 ) {
 
     sealed class Outcome(val message: String) {
@@ -42,9 +49,14 @@ class WellnessEnrollment(
         object BindFailed : Outcome("The box couldn't reach this phone to finish setup. Keep BlackBox open and try again.")
         object NotAllowed : Outcome("This operator can't set up Health. Pick your own operator in Settings.")
         object NotOnTailnet : Outcome("This phone isn't on your BlackBox network (Tailscale). Connect it and try again.")
+        object UnknownDevice : Outcome(
+            "The box doesn't know this phone yet. Open BlackBox once so it appears in Devices. If the app reaches " +
+                "your box by a local network address, switch it to the box's Tailscale address and try again.")
+        object WellnessDisabled : Outcome("Health is turned off on your box. Turn it on in the box's settings, then try again.")
         object Unreachable : Outcome("Couldn't reach your box. Check the connection and try again.")
-        class Refused(status: Int, error: String?) : Outcome(
-            "The box didn't accept the setup (${error ?: "HTTP $status"}).")
+        /** A refusal this build has no words for: the box's own fix text when it sent one. */
+        class Refused(val status: Int, val error: String?, fix: String? = null) : Outcome(
+            fix?.takeIf { it.isNotBlank() } ?: "The box didn't accept the setup (${error ?: "HTTP $status"}).")
         object BindMissing : Outcome("The box answered but this phone never received its key. Try again.")
     }
 
@@ -63,6 +75,7 @@ class WellnessEnrollment(
         val outcome = interpret(reply)
         if (outcome !is Outcome.Enrolled) {
             binding.clearIntent()
+            rollBack(intent.nonce)
             return outcome
         }
         // The bind normally lands before the box answers; allow a short race either way.
@@ -71,7 +84,14 @@ class WellnessEnrollment(
             delay(100)
             waited += 100
         }
-        return if (binding.current()?.enrollmentId == outcome.enrollmentId) outcome else Outcome.BindMissing
+        if (binding.current()?.enrollmentId == outcome.enrollmentId) return outcome
+        binding.clearIntent()
+        rollBack(intent.nonce)
+        return Outcome.BindMissing
+    }
+
+    private fun rollBack(nonce: String) {
+        if (binding.rollBackBind(nonce)) runCatching { onRolledBack() }
     }
 
     companion object {
@@ -103,6 +123,7 @@ class WellnessEnrollment(
             if (!reply.reached) return Outcome.Unreachable
             val obj = runCatching { JSON.parseToJsonElement(reply.body).jsonObject }.getOrNull()
             val error = obj?.get("error")?.jsonPrimitive?.contentOrNull
+            val fix = (obj?.get("fix") ?: obj?.get("detail"))?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
             return when (reply.status) {
                 200 -> {
                     val id = obj?.get("enrollment_id")?.jsonPrimitive?.contentOrNull
@@ -120,12 +141,14 @@ class WellnessEnrollment(
                     "owner_mismatch" -> Outcome.OwnerMismatch
                     "already_enrolled" -> Outcome.AlreadyEnrolled
                     "device_in_use" -> Outcome.DeviceInUse
-                    else -> Outcome.Refused(409, error)
+                    else -> Outcome.Refused(409, error, fix)
                 }
                 424 -> Outcome.NotPaired
                 502 -> Outcome.BindFailed
                 403 -> Outcome.NotAllowed
-                else -> Outcome.Refused(reply.status, error)
+                404 -> if (error == "unknown_device") Outcome.UnknownDevice else Outcome.Refused(404, error, fix)
+                503 -> if (error == "wellness_disabled") Outcome.WellnessDisabled else Outcome.Refused(503, error, fix)
+                else -> Outcome.Refused(reply.status, error, fix)
             }
         }
     }

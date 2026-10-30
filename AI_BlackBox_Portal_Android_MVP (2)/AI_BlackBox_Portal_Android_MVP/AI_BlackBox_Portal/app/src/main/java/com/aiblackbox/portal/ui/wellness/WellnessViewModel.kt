@@ -24,6 +24,7 @@ import com.aiblackbox.portal.data.wellness.WellnessProbe
 import com.aiblackbox.portal.data.wellness.WellnessRules
 import com.aiblackbox.portal.data.wellness.WellnessScheduler
 import com.aiblackbox.portal.data.wellness.WellnessStatusParser
+import com.aiblackbox.portal.data.wellness.WellnessSyncState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -101,7 +102,6 @@ data class WellnessUiState(
     val setupOpen: Boolean = false,
     val busy: Boolean = false,
     val message: String? = null,
-    val probeUnlocked: Boolean = false,
     val probeReport: String? = null,
     val probeFile: String? = null,
 ) {
@@ -130,6 +130,14 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
     private var lastProbe: CapabilityProbe.Result? = null
     private var lastProbeMs = 0L
 
+    /**
+     * Every write to the collector's state file goes through here: off the main thread (it
+     * fsyncs) and never able to crash the screen (the listener and the workers write the same
+     * file). False when the write failed.
+     */
+    private suspend fun writeState(change: (WellnessSyncState) -> WellnessSyncState): Boolean =
+        withContext(Dispatchers.IO) { runCatching { store.update(change) }.isSuccess }
+
     fun refresh() = viewModelScope.launch {
         val operator = runCatching { BlackBoxStore(app).operator.first() }.getOrDefault("")
         val sdk = gateway.sdkStatus()
@@ -149,7 +157,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         } else null
         // The box's consent is the truth; the collector reads what it says.
         if (box?.categories != null) {
-            store.update { st ->
+            writeState { st ->
                 st.copy(
                     categories = box.categories.mapKeys { it.key.wire }.mapValues { it.value.wire },
                     state = box.state.wire,
@@ -167,11 +175,10 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             ?: runCatching { withContext(Dispatchers.IO) { WellnessGraph.probe(app).run() } }.getOrNull()?.also {
                 lastProbe = it
                 lastProbeMs = now
-                WellnessGraph.applyProbe(app, it)
+                runCatching { withContext(Dispatchers.IO) { WellnessGraph.applyProbe(app, it) } }
             }
-        val st = store.load()
-        val files = WellnessGraph.files(app)
-        val outbox = com.aiblackbox.portal.data.wellness.WellnessOutbox(files.outbox, files.quarantine)
+        val st = withContext(Dispatchers.IO) { store.load() }
+        val outbox = WellnessGraph.outbox(app)
         val consented = st.consent().filterValues { it.isOn }.keys
         val local = WellnessRules.localTroubles(
             WellnessRules.LocalFacts(
@@ -203,7 +210,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
                 epoch = record?.epoch,
                 box = box,
                 settings = box?.takeIf { it.credentialed }?.settings() ?: s.settings,
-                chip = WellnessRules.statusChip(boxState, record != null, troubleCodes),
+                chip = WellnessRules.statusChip(boxState, record != null, troubleCodes, held = st.localHold != null),
                 troubles = troubleCodes.mapNotNull { WellnessRules.troubleCard(it) },
                 sync = WellnessSyncInfo(
                     lastPushMs = st.lastPushMs, pending = outbox.size(), quarantined = outbox.quarantinedCount(),
@@ -297,7 +304,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             // A permission change re-sends the capability report and syncs (spec §3.2).
             if (binding.current() != null) {
                 runCatching { WellnessGraph.pushCapabilities(app, force = true) }
-                WellnessScheduler.syncNow(app, foreground = true)
+                WellnessScheduler.syncNow(app)
             }
         }
     }
@@ -306,10 +313,13 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         val s = state.value
         val client = client() ?: run { say("Pair this phone with your box first."); return@launch }
         setupUpdate { it.copy(enrolling = true, outcome = null) }
-        store.update { it.copy(categories = s.setup.consent.mapKeys { e -> e.key.wire }.mapValues { e -> e.value.wire }) }
+        writeState { it.copy(categories = s.setup.consent.mapKeys { e -> e.key.wire }.mapValues { e -> e.value.wire }) }
         val report = runCatching { withContext(Dispatchers.IO) { WellnessGraph.probe(app).run() } }.getOrNull()
-        report?.let { WellnessGraph.applyProbe(app, it) }
-        val enrollment = WellnessEnrollment(binding, { body -> client.enroll(body) }, { WellnessGraph.tailnetIps() })
+        report?.let { runCatching { withContext(Dispatchers.IO) { WellnessGraph.applyProbe(app, it) } } }
+        // A bind this attempt received but the box did not confirm is rolled back with
+        // whatever it scheduled (nothing is scheduled before the box's 200).
+        val enrollment = WellnessEnrollment(binding, { body -> client.enroll(body) }, { WellnessGraph.tailnetIps() },
+            onRolledBack = { WellnessScheduler.cancelAll(app) })
         val outcome = enrollment.enroll(
             operator = s.operator,
             consent = s.setup.consent,
@@ -318,7 +328,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             replace = s.setup.replace,
         )
         if (outcome is WellnessEnrollment.Outcome.Enrolled) {
-            outcome.syncIntervalMin?.let { m -> store.update { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
+            outcome.syncIntervalMin?.let { m -> writeState { it.copy(intervalMin = WellnessRules.clampInterval(m)) } }
             // Providers and local-only are settings: one signed PUT, now that this phone holds the key.
             val wanted = WellnessRules.Settings(
                 categories = s.setup.consent, localOnly = s.setup.localOnly,
@@ -327,6 +337,7 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             val body = WellnessStatusParser.settingsBody(s.operator, wanted, wanted, WellnessStatusParser.SETUP_FIELDS)
             val put = binding.signer()?.let { client.putSettings(body, it) }
             if (put?.ok != true) say("Health is set up, but your AI choices didn't save. Set them again in Health settings.")
+            // The box has stored the key: now the first sync, the periodic job and the import.
             WellnessScheduler.onEnrolled(app)
         }
         setupUpdate {
@@ -365,7 +376,9 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
         }
         if (!reply.ok) say(if (reply.reached) "The box didn't accept that change." else "Couldn't reach your box.")
         else {
-            store.update { st -> st.copy(categories = new.categories.mapKeys { e -> e.key.wire }.mapValues { e -> e.value.wire }) }
+            // The collector filters every push by this, so a category turned off here is never
+            // delivered from the outbox afterwards.
+            writeState { st -> st.copy(categories = new.categories.mapKeys { e -> e.key.wire }.mapValues { e -> e.value.wire }) }
             // A category turned on needs its Health Connect permission: the screen offers it.
         }
     }
@@ -398,81 +411,113 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
 
     // ── sync ───────────────────────────────────────────────────────────────────────────────
 
-    fun syncNow() {
-        if (binding.current() == null) return
-        store.update { it.copy(needsReconnect = false) }
-        WellnessScheduler.syncNow(app, foreground = true)
+    fun syncNow() = viewModelScope.launch {
+        if (withContext(Dispatchers.IO) { binding.current() } == null) return@launch
+        writeState { it.copy(needsReconnect = false) }
+        WellnessScheduler.syncNow(app)
         say("Syncing health data now.")
     }
 
-    fun setInterval(minutes: Int) {
+    fun setInterval(minutes: Int) = viewModelScope.launch {
         val m = WellnessRules.clampInterval(minutes)
-        store.update { it.copy(intervalMin = m) }
-        if (binding.current() != null) WellnessScheduler.schedulePeriodic(app, m)
         _state.update { it.copy(sync = it.sync.copy(intervalMin = m)) }
+        writeState { it.copy(intervalMin = m) }
+        if (withContext(Dispatchers.IO) { binding.current() } != null) WellnessScheduler.schedulePeriodic(app, m)
     }
 
-    fun setHeartRateOrigin(choice: String) {
-        store.update { it.copy(hrOriginChoice = choice) }
+    fun setHeartRateOrigin(choice: String) = viewModelScope.launch {
         _state.update { it.copy(sync = it.sync.copy(hrOriginChoice = choice)) }
+        writeState { it.copy(hrOriginChoice = choice) }
     }
 
     // ── pause / disconnect / erase ─────────────────────────────────────────────────────────
 
-    private fun action(path: String, extra: (JsonObjectBuilderScope) -> Unit = {}, onOk: () -> Unit = {}) = viewModelScope.launch {
-        val record = binding.current()
-        val operator = record?.operator ?: state.value.operator
-        val client = client() ?: return@launch
-        val body = buildJsonObject {
-            put("operator", JsonPrimitive(operator))
-            extra(JsonObjectBuilderScope { k, v -> put(k, v) })
-        }.toString()
+    private fun body(operator: String, extra: (JsonObjectBuilderScope) -> Unit): String = buildJsonObject {
+        put("operator", JsonPrimitive(operator))
+        extra(JsonObjectBuilderScope { k, v -> put(k, v) })
+    }.toString()
+
+    /**
+     * Pause, Disconnect and Stop & erase take effect ON THIS PHONE first, whatever the box
+     * answers: the hold ([WellnessSyncState.localHold]) stops every read and push before the
+     * request goes out. Then the box is told, signed with the key, which stays until the box
+     * confirms (erase needs it, and a retry must be possible). A box that no longer accepts
+     * the key at all ends Health on this phone (WellnessRules.narrowingOutcome).
+     */
+    private fun narrow(path: String, hold: String, extra: (JsonObjectBuilderScope) -> Unit = {},
+                       onConfirmed: suspend () -> Unit) = viewModelScope.launch {
+        val record = withContext(Dispatchers.IO) { binding.current() } ?: run { say("Health isn't set up on this phone."); return@launch }
+        val signer = binding.signer()
         _state.update { it.copy(busy = true) }
-        val reply = client.action(path, body, binding.signer())
+        writeState { it.copy(localHold = hold) }
+        if (hold != WellnessRules.HOLD_PAUSE) WellnessScheduler.cancelAll(app)
+        val client = client()
+        val requestBody = body(record.operator, extra)
+        var reply = client?.action(path, requestBody, signer) ?: com.aiblackbox.portal.data.wellness.WellnessHttp(-1, "")
+        // A 401 can be this phone's clock: the refusal's Date header has just corrected it, so
+        // one signed retry tells a drifted clock from a key the box no longer accepts.
+        if (reply.status == 401 && client != null) reply = client.action(path, requestBody, signer)
         _state.update { it.copy(busy = false) }
-        if (reply.ok) onOk() else say(if (reply.reached) "The box didn't accept that." else "Couldn't reach your box.")
+        when (WellnessRules.narrowingOutcome(reply.status)) {
+            WellnessRules.NarrowingOutcome.CONFIRMED -> onConfirmed()
+            WellnessRules.NarrowingOutcome.KEY_REFUSED -> {
+                WellnessScheduler.cancelAll(app)
+                withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
+                say(if (hold == WellnessRules.HOLD_PAUSE) "Your box no longer accepts this phone for Health, so Health was removed from it."
+                    else "Your box no longer accepts this phone's key, so Health was removed from this phone. Anything the " +
+                        "box already stored stays there until you set Health up again and erase it.")
+            }
+            WellnessRules.NarrowingOutcome.UNCONFIRMED -> say(
+                if (reply.reached) "Stopped on this phone. The box didn't accept the change yet; try again."
+                else "Stopped on this phone. Couldn't reach your box; try again when it's reachable.")
+        }
         refresh()
     }
 
-    fun pause() = action(IngestClient.PAUSE, onOk = {
-        store.update { it.copy(state = WellnessRules.EnrollmentState.PAUSED.wire) }
+    fun pause() = narrow(IngestClient.PAUSE, WellnessRules.HOLD_PAUSE) {
+        writeState { it.copy(localHold = null, state = WellnessRules.EnrollmentState.PAUSED.wire) }
         say("Health collection paused.")
-    })
+    }
 
-    fun resume() = action(IngestClient.RESUME, onOk = {
-        store.update { it.copy(state = WellnessRules.EnrollmentState.ACTIVE.wire) }
-        WellnessScheduler.syncNow(app, foreground = true)
-        say("Health collection resumed.")
-    })
+    /** Resume widens, so it needs the box's yes first (signed); it also lifts a hold. */
+    fun resume() = viewModelScope.launch {
+        val record = withContext(Dispatchers.IO) { binding.current() } ?: return@launch
+        val client = client() ?: return@launch
+        _state.update { it.copy(busy = true) }
+        val reply = client.action(IngestClient.RESUME, body(record.operator) {}, binding.signer())
+        _state.update { it.copy(busy = false) }
+        if (reply.ok) {
+            writeState { it.copy(localHold = null, state = WellnessRules.EnrollmentState.ACTIVE.wire) }
+            WellnessScheduler.syncNow(app)
+            say("Health collection resumed.")
+        } else {
+            say(if (reply.reached) "The box didn't accept that." else "Couldn't reach your box.")
+        }
+        refresh()
+    }
 
     /** [keepHistory] must be an explicit choice (WellnessRules.disconnectAllowed). */
     fun disconnect(keepHistory: Boolean?) {
         if (!WellnessRules.disconnectAllowed(keepHistory)) { say("Choose Keep history or Delete history."); return }
-        action(IngestClient.DISCONNECT, extra = { it.put("keep_history", JsonPrimitive(keepHistory!!)) }, onOk = {
+        narrow(IngestClient.DISCONNECT, WellnessRules.HOLD_DISCONNECT,
+            extra = { it.put("keep_history", JsonPrimitive(keepHistory!!)) }) {
             WellnessScheduler.cancelAll(app)
-            binding.clearAll()
+            withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
             say(if (keepHistory == true) "Disconnected. Your stored history stays on the box."
                 else "Disconnected and your stored health history was deleted.")
-        })
+        }
     }
 
     fun erase(typed: String) {
         if (!WellnessRules.eraseConfirmed(typed)) { say("Type ${WellnessRules.ERASE_WORD} to confirm."); return }
-        action(IngestClient.ERASE, onOk = {
+        narrow(IngestClient.ERASE, WellnessRules.HOLD_ERASE) {
             WellnessScheduler.cancelAll(app)
-            binding.clearAll()
+            withContext(Dispatchers.IO) { runCatching { binding.clearAll() } }
             say("Erased. Your past health conversations stay in your BlackBox memory, but they contain no health numbers.")
-        })
+        }
     }
 
-    // ── the M7.1 probe (debug) ─────────────────────────────────────────────────────────────
-
-    /** Seven taps on the title unlock the Probe in a release build (debug builds show it). */
-    private var unlockTaps = 0
-
-    fun onTitleTapped() {
-        if (++unlockTaps >= 7) _state.update { it.copy(probeUnlocked = true) }
-    }
+    // ── the M7.1 probe (debug builds, or a build made with -PwellnessProbe) ─────────────────
 
     fun runProbe() = viewModelScope.launch {
         _state.update { it.copy(busy = true, probeReport = null, probeFile = null) }
@@ -499,10 +544,12 @@ class WellnessViewModel(application: Application) : AndroidViewModel(application
             return@launch
         }
         val pretty = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), report)
-        // The export goes to the app's files dir for the share sheet; it holds counts and dates only.
+        // The export holds counts, dates and gaps (no values), but it is still about the
+        // person's health: no-backup storage like every wellness file, erased with them. The
+        // share sheet sends the text itself.
         val file = withContext(Dispatchers.IO) {
             runCatching {
-                val dir = File(app.filesDir, "wellness_probe").apply { mkdirs() }
+                val dir = WellnessGraph.files(app).probeExports.apply { mkdirs() }
                 File(dir, "probe-${System.currentTimeMillis()}.json").apply { writeText(pretty) }
             }.getOrNull()
         }

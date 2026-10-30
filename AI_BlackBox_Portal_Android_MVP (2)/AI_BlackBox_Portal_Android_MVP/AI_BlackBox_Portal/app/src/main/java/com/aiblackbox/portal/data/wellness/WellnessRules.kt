@@ -43,11 +43,13 @@ object WellnessRules {
      * trouble list. A phone that holds no binding is "Not set up" whatever the box says: the
      * collector cannot run without K.
      */
-    fun statusChip(state: EnrollmentState, boundHere: Boolean, troubles: List<String>): StatusChip = when {
+    fun statusChip(state: EnrollmentState, boundHere: Boolean, troubles: List<String>, held: Boolean = false): StatusChip = when {
         !boundHere -> StatusChip.NOT_SET_UP
         state == EnrollmentState.NOT_SET_UP || state == EnrollmentState.AWAITING_PHONE ||
             state == EnrollmentState.REVOKED -> StatusChip.NOT_SET_UP
-        state == EnrollmentState.PAUSED -> StatusChip.PAUSED
+        // A Pause / Disconnect / erase asked for here and not yet confirmed by the box: the
+        // phone has already stopped, so it says so.
+        held || state == EnrollmentState.PAUSED -> StatusChip.PAUSED
         state == EnrollmentState.NEEDS_ATTENTION || state == EnrollmentState.OWNERSHIP_CHANGED ||
             state == EnrollmentState.STALE -> StatusChip.NEEDS_ATTENTION
         troubles.isNotEmpty() -> StatusChip.NEEDS_ATTENTION
@@ -183,16 +185,20 @@ object WellnessRules {
         val outboxFull: Boolean,
         val backoffUntilMs: Long,
         val nowMs: Long,
+        /** A narrowing asked for on this phone that the box has not confirmed ([WellnessSyncState.localHold]). */
+        val held: Boolean = false,
     )
 
     /**
-     * May a sync run now? Foreground-only mode (no background grant) reads ONLY while the app
-     * is visible: the worker never borrows another foreground service to read without the
-     * grant (spec §3.2, decision D1).
+     * May a sync (or a history-import page) run now? Foreground-only mode (no background
+     * grant) reads ONLY while the app is visible, decided when the work RUNS: the worker never
+     * borrows another foreground service, or a "foreground" flag set when it was queued, to
+     * read without the grant (spec §3.2, decision D1).
      */
     fun maySync(i: SyncInputs): SyncDecision = when {
         !i.bound -> SyncDecision.Skip("not_enrolled")
         i.stopped -> SyncDecision.Skip("stopped")
+        i.held -> SyncDecision.Skip("held")
         i.state == EnrollmentState.PAUSED -> SyncDecision.Skip("paused")
         i.state == EnrollmentState.REVOKED || i.state == EnrollmentState.OWNERSHIP_CHANGED ->
             SyncDecision.Skip(i.state.wire)
@@ -201,6 +207,67 @@ object WellnessRules {
         i.grantedReadTypes == 0 -> SyncDecision.Skip("no_permissions")
         !i.inForeground && !i.backgroundGranted -> SyncDecision.Skip("foreground_only")
         else -> SyncDecision.Run(collect = !i.outboxFull)
+    }
+
+    /**
+     * The skips that only forbid READING Health Connect. What is already in the outbox was read
+     * with consent and may still go to the box (each send is filtered by the consent of that
+     * moment). Every other skip (stopped, held, paused, revoked, backoff) is a full stop.
+     */
+    fun mayDrainWhenSkipped(reason: String): Boolean =
+        reason == "foreground_only" || reason == "no_permissions" || reason == "hc_unavailable"
+
+    /**
+     * Should the app start (or resume) the history import? Not once it is done, and never while
+     * the box refused the key, a narrowing is held, or the enrollment is paused or over: the
+     * import would only read Health Connect into an outbox nobody may receive.
+     */
+    fun shouldStartBackfill(done: Boolean, needsReconnect: Boolean, held: Boolean, state: EnrollmentState): Boolean =
+        !done && !needsReconnect && !held && state != EnrollmentState.PAUSED &&
+            state != EnrollmentState.REVOKED && state != EnrollmentState.OWNERSHIP_CHANGED
+
+    /** What the collector does with the box's answer to its signed status read. */
+    enum class StatusReaction {
+        /** 200: take the box's consent and state as the truth. */
+        APPLY,
+        /** 401: the key is refused; stop and show "Reconnect Health" (as for a push). */
+        STOP_RECONNECT,
+        /** 409 / 410: owner changed, source moved or revoked; stop and clear (as for a push). */
+        STOP_AND_CLEAR,
+        /** 503 "paused": the person paused Health elsewhere. */
+        PAUSED,
+        /** No answer or anything else: carry on with the last view the phone has. */
+        KEEP_LOCAL,
+    }
+
+    fun statusReaction(status: Int, error: String?): StatusReaction = when {
+        status == 200 -> StatusReaction.APPLY
+        status == 401 -> StatusReaction.STOP_RECONNECT
+        status == 409 || status == 410 -> StatusReaction.STOP_AND_CLEAR
+        status == 503 && error == "paused" -> StatusReaction.PAUSED
+        else -> StatusReaction.KEEP_LOCAL
+    }
+
+    // ── narrowing asked for on this phone (Pause, Disconnect, Stop & erase) ───────────────
+
+    const val HOLD_PAUSE = "pause"
+    const val HOLD_DISCONNECT = "disconnect"
+    const val HOLD_ERASE = "erase"
+
+    /** What the phone does once the box has answered a narrowing it already applied locally. */
+    enum class NarrowingOutcome {
+        /** 2xx: the box agrees; drop the hold (Pause) or forget everything (Disconnect, erase). */
+        CONFIRMED,
+        /** 401 / 409 / 410: the box no longer accepts this key; forget everything here. */
+        KEY_REFUSED,
+        /** No answer or another refusal: stay stopped (the hold stays) and let the person retry. */
+        UNCONFIRMED,
+    }
+
+    fun narrowingOutcome(status: Int): NarrowingOutcome = when (status) {
+        in 200..299 -> NarrowingOutcome.CONFIRMED
+        401, 409, 410 -> NarrowingOutcome.KEY_REFUSED
+        else -> NarrowingOutcome.UNCONFIRMED
     }
 
     /** Foreground runs are debounced: at most one expedited sync per 10 minutes of app opens. */
@@ -286,6 +353,15 @@ object WellnessRules {
         if (wantBackground && showBackgroundCard(background)) out += WellnessCatalog.PERMISSION_BACKGROUND
         return out
     }
+
+    /**
+     * The M7.1 probe's "ask for everything" (debug or `-PwellnessProbe` builds only): every
+     * category's READ permissions, plus past data and background only where Health Connect
+     * says it can grant them, the same availability rule as setup.
+     */
+    fun probePermissions(history: HcFeatureStatus, background: HcFeatureStatus): Set<String> =
+        permissionsToRequest(WellnessCategory.entries.associateWith { WellnessConsent.ASK },
+            wantHistory = true, wantBackground = true, history = history, background = background)
 
     /** Record types the collector may read: consented AND granted. */
     fun readableTypes(consent: Map<WellnessCategory, WellnessConsent>, granted: Set<String>): List<HcType> =

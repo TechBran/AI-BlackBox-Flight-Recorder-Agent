@@ -19,13 +19,24 @@ import java.security.SecureRandom
  *
  * All of it lives in [WellnessFiles] (no-backup storage). Thread-safe: the listener's worker
  * threads and the UI both reach it.
+ *
+ * GENERATION FENCE. A sync or history import can run for minutes with the record it read at
+ * its start. Every change of binding (a new enrollment or epoch, an unbind, an erase) bumps
+ * [generation]; the engine writes only through [runIfCurrent] with the generation it started
+ * with, under this object's lock. So a run that outlives its binding can neither recreate the
+ * files an unbind deleted, nor sign with the old key and then clear the NEW binding when the
+ * box refuses that key.
  */
 class WellnessBinding(
     private val files: WellnessFiles,
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: SecureRandom = SecureRandom(),
+    private val state: WellnessSyncStateStore = WellnessSyncStateStore(files.syncState),
 ) {
     private val lock = Any()
+
+    /** Bumped on every change of binding (see the class doc). In memory: runs are in-process. */
+    private var generation = 0L
 
     /** This install's stable id (sent at enrollment). Survives unbind; a reinstall mints a new one. */
     fun installId(): String = synchronized(lock) {
@@ -38,6 +49,19 @@ class WellnessBinding(
 
     /** The live binding, or null when this phone is not a health source. */
     fun current(): WellnessBindingRecord? = synchronized(lock) { readRecord() }
+
+    /** The live binding and its generation, read together (a run starts from this). */
+    fun snapshot(): Pair<WellnessBindingRecord, Long>? = synchronized(lock) { readRecord()?.let { it to generation } }
+
+    /**
+     * Run [block] under the binding lock if the binding is still the one of [gen]. Returns
+     * false (and runs nothing) when it changed: the caller's run is stale and must stop.
+     */
+    fun runIfCurrent(gen: Long, block: () -> Unit): Boolean = synchronized(lock) {
+        if (gen != generation || readRecord() == null) return false
+        block()
+        true
+    }
 
     /** The operator the box may address `/wellness/sync` and `/wellness/unbind` to ("" if none). */
     fun enrolledOperator(): String = current()?.operator.orEmpty()
@@ -83,11 +107,14 @@ class WellnessBinding(
             epoch = request.epoch,
             k = request.k,
             boundAtMs = clock(),
+            boundBy = intent.nonce,
         )
         val previous = readRecord()
-        if (previous == null || previous.enrollmentId != record.enrollmentId || previous.epoch != record.epoch) {
-            resetCollectedLocked()
-        }
+        val sameEnrollment = previous != null && previous.enrollmentId == record.enrollmentId &&
+            previous.epoch == record.epoch
+        if (!sameEnrollment) resetCollectedLocked()
+        // A run still going with the old record must not write or sign another thing.
+        if (!sameEnrollment || previous?.k != record.k) generation++
         WellnessAtomic.writeText(files.binding, JSON.encodeToString(record))
         files.intent.delete()
         Log.i(TAG, "health source bound (epoch=${record.epoch})")
@@ -98,11 +125,36 @@ class WellnessBinding(
      * Forget the enrollment and everything collected for it: key, tokens, cursor, index,
      * outbox. The install id stays (it names the install, not the person's data).
      */
-    fun clearAll() = synchronized(lock) {
+    fun clearAll() = synchronized(lock) { clearAllLocked() }
+
+    /**
+     * [clearAll], but only if the binding is still the one of [gen]. The engine uses it when
+     * the box refuses a key for good (409/410): if a re-enroll replaced that binding while the
+     * refused request was in flight, the NEW one stays. True when it cleared.
+     */
+    fun clearIfCurrent(gen: Long): Boolean = synchronized(lock) {
+        if (gen != generation) return false
+        clearAllLocked()
+        true
+    }
+
+    /**
+     * Undo a bind that an enrollment attempt received but did not finish (the box's answer
+     * was a refusal, a 5xx, lost, or named another enrollment): only the binding that
+     * attempt's [nonce] created is removed, never an older or newer one. True when it was.
+     */
+    fun rollBackBind(nonce: String): Boolean = synchronized(lock) {
+        val record = readRecord() ?: return false
+        if (record.boundBy == null || !constantTimeEquals(record.boundBy, nonce)) return false
+        clearAllLocked()
+        true
+    }
+
+    private fun clearAllLocked() {
+        generation++
         files.root.listFiles()?.forEach { f ->
             if (f.name != files.installId.name) f.deleteRecursively()
         }
-        Unit
     }
 
     /**
@@ -115,9 +167,9 @@ class WellnessBinding(
         files.tokens.delete()
         files.dayIndex.delete()
         files.outbox.deleteRecursively()
-        WellnessSyncStateStore(files.syncState).update {
-            it.copy(backfill = BackfillCursor(), needsReconnect = false, backoffUntilMs = 0L, quotaAttempt = 0,
-                lastPushMs = 0L, lastReconcileMs = 0L)
+        state.update {
+            it.copy(backfill = BackfillCursor(), needsReconnect = false, localHold = null, backoffUntilMs = 0L,
+                quotaAttempt = 0, lastPushMs = 0L, lastReconcileMs = 0L, lastStatusMs = 0L)
         }
     }
 
@@ -158,6 +210,8 @@ data class WellnessBindingRecord(
     val epoch: Int,
     val k: String,
     @SerialName("bound_at_ms") val boundAtMs: Long = 0L,
+    /** The intent nonce of the enrollment attempt that delivered this bind (spent; see rollBackBind). */
+    @SerialName("bound_by") val boundBy: String? = null,
 )
 
 @Serializable

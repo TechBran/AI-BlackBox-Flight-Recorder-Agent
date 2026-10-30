@@ -41,7 +41,7 @@ class WellnessOutboxTest {
         assertEquals(listOf("a", "b", "c"), pending.map { idOf(reopened.read(it)) })
         val raw = pending[0].file.readBytes()
         assertTrue("gzip magic", raw[0] == 0x1f.toByte() && raw[1] == 0x8b.toByte())
-        assertFalse(File(dir, "outbox/1.json.gz.tmp").exists())
+        assertTrue("no temp file is left behind", File(dir, "outbox").listFiles()!!.none { it.name.endsWith(WellnessAtomic.TMP_SUFFIX) })
     }
 
     @Test
@@ -164,5 +164,46 @@ class WellnessOutboxTest {
         assertEquals(listOf("1.json.gz"), outbox.pending().map { it.name })
         outbox.clear()
         assertEquals(0, outbox.size())
+    }
+
+    @Test
+    fun `a closed fence stops the drain before it touches a file`() = runBlocking {
+        listOf("a", "b").forEach { outbox.enqueue(batch(it)) }
+        var open = true
+        var sends = 0
+        val result = outbox.drain(
+            send = { sends++; open = false; WellnessOutbox.SendResult(200, "{}") },
+            newBatchId = { "x" },
+            fence = { block -> if (open) { block(); true } else false },
+        )
+        assertTrue(result is WellnessOutbox.DrainResult.Stale)
+        assertEquals(1, sends)
+        assertEquals(0, result.sent)
+        // The batch the stale drain sent is NOT deleted by it (that is the new binding's outbox now).
+        assertEquals(2, outbox.size())
+    }
+
+    @Test
+    fun `answers the phone gave itself are applied but not counted as pushes`() = runBlocking {
+        listOf("a", "b").forEach { outbox.enqueue(batch(it)) }
+        var n = 0
+        val result = outbox.drain(send = {
+            if (n++ == 0) WellnessOutbox.SendResult(200, "", local = true) else WellnessOutbox.SendResult(422, "", local = true)
+        }, newBatchId = { "x" })
+        assertTrue(result is WellnessOutbox.DrainResult.Drained)
+        assertEquals(0, result.sent)
+        assertEquals(0, outbox.size())
+        assertEquals(1, outbox.quarantinedCount())
+    }
+
+    @Test
+    fun `a 503 carries the box's error so the engine can tell paused from busy`() = runBlocking {
+        outbox.enqueue(batch("a"))
+        val result = outbox.drain(send = { WellnessOutbox.SendResult(503, """{"error":"paused"}""", retryAfterS = 3600) },
+            newBatchId = { "x" })
+        result as WellnessOutbox.DrainResult.BackOff
+        assertEquals("paused", result.error)
+        assertEquals(3600L, result.retryAfterS)
+        assertEquals(1, outbox.size())
     }
 }

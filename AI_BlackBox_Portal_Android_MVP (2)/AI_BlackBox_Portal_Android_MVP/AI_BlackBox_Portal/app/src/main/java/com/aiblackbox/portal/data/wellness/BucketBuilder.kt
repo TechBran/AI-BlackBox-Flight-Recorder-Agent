@@ -47,6 +47,14 @@ object BucketBuilder {
         return start to end
     }
 
+    /**
+     * The zone offset (seconds east of UTC) at the start of local [day]: what a bucket group
+     * sends as `offset_s`, so the box replaces exactly that local day (a DST day starts on the
+     * offset before the change).
+     */
+    fun dayOffsetS(day: String, zone: ZoneId): Int =
+        zone.rules.getOffset(Instant.ofEpochMilli(dayRange(day, zone).first)).totalSeconds
+
     /** Every local day [startMs, endMs) touches; a point (start == end) touches its own day. */
     fun daysTouched(startMs: Long, endMs: Long, zone: ZoneId): List<String> {
         val first = Instant.ofEpochMilli(startMs).atZone(zone).toLocalDate()
@@ -102,19 +110,25 @@ object BucketBuilder {
         origin: HcOrigin?,
         fiveMinute: List<HcAggBucket>,
         oneMinute: List<HcAggBucket>,
-    ): List<IngestPayloadBuilder.Bucket> = listOf(
-        IngestPayloadBuilder.Bucket("heart_rate", IngestPayloadBuilder.Grain.MIN5, origin, day, hrRows(fiveMinute)),
-        IngestPayloadBuilder.Bucket("heart_rate", IngestPayloadBuilder.Grain.MIN1, origin, day, hrRows(oneMinute)),
-    )
+        zone: ZoneId,
+    ): List<IngestPayloadBuilder.Bucket> {
+        val offset = dayOffsetS(day, zone)
+        return listOf(
+            IngestPayloadBuilder.Bucket("heart_rate", IngestPayloadBuilder.Grain.MIN5, origin, day, offset, hrRows(fiveMinute)),
+            IngestPayloadBuilder.Bucket("heart_rate", IngestPayloadBuilder.Grain.MIN1, origin, day, offset, hrRows(oneMinute)),
+        )
+    }
 
     /** Hourly activity bucket objects for one day, one per readable activity type. */
-    fun activityBuckets(day: String, hourly: List<HcAggBucket>, types: List<HcType>): List<IngestPayloadBuilder.Bucket> =
-        ACTIVITY_KEYS.filterKeys { it in types }.map { (type, key) ->
+    fun activityBuckets(day: String, hourly: List<HcAggBucket>, types: List<HcType>, zone: ZoneId): List<IngestPayloadBuilder.Bucket> {
+        val offset = dayOffsetS(day, zone)
+        return ACTIVITY_KEYS.filterKeys { it in types }.map { (type, key) ->
             IngestPayloadBuilder.Bucket(
-                IngestPayloadBuilder.bucketMetric(type), IngestPayloadBuilder.Grain.HOUR, null, day,
+                IngestPayloadBuilder.bucketMetric(type), IngestPayloadBuilder.Grain.HOUR, null, day, offset,
                 sumRows(hourly, key),
             )
         }
+    }
 
     fun sleepSession(r: HcRecord.Sleep): IngestPayloadBuilder.Session = IngestPayloadBuilder.Session(
         kind = "sleep",

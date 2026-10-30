@@ -33,8 +33,17 @@ class WellnessEnrollmentTest {
             "sync_interval_min":60,"policy_version":"2026-10-29"}""")
     }
 
+    private var rolledBack = 0
+
     private fun enrollment(post: suspend (String) -> WellnessHttp, ips: List<String> = listOf("100.101.102.103")) =
-        WellnessEnrollment(binding, post, { ips }, bindWaitMs = 200)
+        WellnessEnrollment(binding, post, { ips }, bindWaitMs = 200, onRolledBack = { rolledBack++ })
+
+    /** A box that binds the phone (the key reaches it) and then answers [status] / [body]. */
+    private fun bindsThenAnswers(status: Int, body: String, enr: String = "en_12ab34cd"): suspend (String) -> WellnessHttp = { req ->
+        val nonce = Json.parseToJsonElement(req).jsonObject.getValue("nonce").jsonPrimitive.content
+        binding.acceptBind(WellnessBindRequest(WellnessFixtures.OPERATOR, enr, 2, nonce, key))
+        WellnessHttp(status, body)
+    }
 
     @Test
     fun `the request carries the contract's fields`() {
@@ -89,6 +98,53 @@ class WellnessEnrollmentTest {
         val unreachable = enrollment({ WellnessHttp(-1, "") }).enroll(WellnessFixtures.OPERATOR,
             WellnessCatalog.DEFAULT_CONSENT, report, false, false)
         assertEquals(WellnessEnrollment.Outcome.Unreachable, unreachable)
+    }
+
+    @Test
+    fun `the box's other setup refusals have their own words, or the box's fix text`() = runBlocking {
+        suspend fun outcome(status: Int, body: String) = enrollment(box(status, null, body))
+            .enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, false, false)
+        assertEquals(WellnessEnrollment.Outcome.UnknownDevice,
+            outcome(404, """{"error":"unknown_device","fix":"Open the BlackBox app once on this phone so it appears in Devices, then try again"}"""))
+        assertEquals(WellnessEnrollment.Outcome.WellnessDisabled, outcome(503, """{"error":"wellness_disabled"}"""))
+        val novel = outcome(409, """{"error":"something_new","fix":"Do the new thing, then try again"}""")
+        assertTrue(novel is WellnessEnrollment.Outcome.Refused)
+        assertEquals("Do the new thing, then try again", novel.message)
+        val bare = outcome(418, """{"error":"teapot"}""")
+        assertEquals("The box didn't accept the setup (teapot).", bare.message)
+    }
+
+    @Test
+    fun `a bind received by an attempt the box did not confirm is rolled back`() = runBlocking {
+        for ((status, body) in listOf(502 to """{"error":"bind_failed"}""", 500 to "", -1 to "",
+            409 to """{"error":"already_enrolled"}""")) {
+            rolledBack = 0
+            val outcome = enrollment(bindsThenAnswers(status, body))
+                .enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, false)
+            assertTrue("$status -> $outcome", outcome !is WellnessEnrollment.Outcome.Enrolled)
+            assertNull("no key the box never stored stays on the phone ($status)", binding.current())
+            assertEquals(1, rolledBack)
+        }
+    }
+
+    @Test
+    fun `a 200 naming another enrollment than the one bound rolls the bind back`() = runBlocking {
+        val outcome = enrollment(bindsThenAnswers(200, """{"enrollment_id":"en_99999999","epoch":2,"state":"active"}"""))
+            .enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, false)
+        assertTrue(outcome is WellnessEnrollment.Outcome.BindMissing)
+        assertNull(binding.current())
+        assertEquals(1, rolledBack)
+    }
+
+    @Test
+    fun `a failed attempt never removes the enrollment the phone already had`() = runBlocking {
+        enrollment(box()).enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, false)
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+        val again = enrollment(box(502, null, """{"error":"bind_failed"}"""))
+            .enroll(WellnessFixtures.OPERATOR, WellnessCatalog.DEFAULT_CONSENT, report, true, true)
+        assertEquals(WellnessEnrollment.Outcome.BindFailed, again)
+        assertEquals("en_12ab34cd", binding.current()!!.enrollmentId)
+        assertEquals(0, rolledBack)
     }
 
     @Test

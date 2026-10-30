@@ -31,8 +31,10 @@ import java.util.concurrent.TimeUnit
  *    progress notification. It never runs headless: if Android refuses the foreground start,
  *    it stops and the next app open resumes it from the persisted cursor.
  *
- * Without READ_HEALTH_DATA_IN_BACKGROUND the engine itself refuses background reads
- * (foreground-only mode), so the periodic worker then only drains the outbox.
+ * Without READ_HEALTH_DATA_IN_BACKGROUND (foreground-only mode, decision D1) the engine reads
+ * Health Connect only while the app has a visible activity, judged when each run and each
+ * history page STARTS ([AppForegroundState.isForeground]), never from a flag set when the work
+ * was queued. A background run then only delivers what the outbox already holds.
  */
 object WellnessScheduler {
 
@@ -40,25 +42,32 @@ object WellnessScheduler {
     const val NOW = "wellness-sync-now"
     const val BACKFILL = "wellness-backfill"
     const val TAG_PERIODIC = "wellness-periodic"
-    const val KEY_FOREGROUND = "foreground"
 
     private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-    fun schedulePeriodic(context: Context, intervalMin: Int = WellnessRules.INTERVAL_DEFAULT) {
+    /**
+     * The periodic job. [policy] UPDATE re-times it (an interval change, an enrollment); KEEP
+     * only makes sure it exists (an app open after the process died mid-enrollment).
+     */
+    fun schedulePeriodic(
+        context: Context,
+        intervalMin: Int = WellnessRules.INTERVAL_DEFAULT,
+        policy: ExistingPeriodicWorkPolicy = ExistingPeriodicWorkPolicy.UPDATE,
+    ) {
         val minutes = WellnessRules.clampInterval(intervalMin).toLong()
         val request = PeriodicWorkRequestBuilder<WellnessSyncWorker>(
             minutes, TimeUnit.MINUTES, WellnessRules.INTERVAL_FLEX.toLong(), TimeUnit.MINUTES,
         ).setConstraints(network).addTag(TAG_PERIODIC).build()
         runCatching {
-            WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, request)
+            WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, policy, request)
         }
     }
 
-    fun syncNow(context: Context, foreground: Boolean) {
+    /** An expedited one-off sync. Whether it may read is decided when it runs, not here. */
+    fun syncNow(context: Context) {
         val request = OneTimeWorkRequestBuilder<WellnessSyncWorker>()
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .setConstraints(network)
-            .setInputData(workDataOf(KEY_FOREGROUND to foreground))
             .build()
         runCatching { WorkManager.getInstance(context).enqueueUniqueWork(NOW, ExistingWorkPolicy.KEEP, request) }
     }
@@ -80,28 +89,36 @@ object WellnessScheduler {
         }
     }
 
-    /** A bind landed: first sync, the periodic job, and the history import. */
+    /** The box confirmed the enrollment: first sync, the periodic job, and the history import. */
     fun onEnrolled(context: Context) {
         val st = WellnessGraph.state(context).load()
         schedulePeriodic(context, st.intervalMin)
-        syncNow(context, foreground = AppForegroundState.isForeground())
+        syncNow(context)
         startBackfill(context)
     }
 
+    /** Whether [st] wants the history import (re)started (WellnessRules decides). */
+    fun backfillWanted(st: WellnessSyncState): Boolean = WellnessRules.shouldStartBackfill(
+        done = st.backfill.done, needsReconnect = st.needsReconnect, held = st.localHold != null,
+        state = st.enrollmentState(),
+    )
+
     /**
-     * The app came to the foreground: an expedited sync at most every 10 minutes, and resume
-     * an unfinished backfill (it may have been refused a foreground start while backgrounded).
+     * The app came to the foreground: make sure the periodic job exists, an expedited sync at
+     * most every 10 minutes, and resume an unfinished backfill (it may have been refused a
+     * foreground start while backgrounded), unless the box refused the key or it is paused.
      */
     fun onAppForeground(context: Context, nowMs: Long = System.currentTimeMillis()) {
         val app = context.applicationContext
         if (WellnessGraph.binding(app).current() == null) return
         val store = WellnessGraph.state(app)
         val st = store.load()
+        schedulePeriodic(app, st.intervalMin, ExistingPeriodicWorkPolicy.KEEP)
         if (WellnessRules.shouldSyncOnForeground(st.lastForegroundSyncMs, nowMs)) {
             store.update { it.copy(lastForegroundSyncMs = nowMs) }
-            syncNow(app, foreground = true)
+            syncNow(app)
         }
-        if (!st.backfill.done) startBackfill(app)
+        if (backfillWanted(st)) startBackfill(app)
     }
 }
 
@@ -112,11 +129,11 @@ class WellnessSyncWorker(context: Context, params: WorkerParameters) : Coroutine
         val app = applicationContext
         val engine = WellnessGraph.engine(app) ?: return Result.success()
         val periodic = WellnessScheduler.TAG_PERIODIC in tags
-        val foreground = inputData.getBoolean(WellnessScheduler.KEY_FOREGROUND, false) || AppForegroundState.isForeground()
         return try {
-            val report = engine.sync(inForeground = foreground)
+            // D1: visible NOW, not when this work was queued (it may run long after).
+            val report = engine.sync(inForeground = AppForegroundState.isForeground())
             Log.d(TAG, "sync worker: ${report.outcome}")
-            if (periodic) {
+            if (periodic && WellnessGraph.binding(app).current() != null) {
                 // Probe evidence (T-1, T-9): when the periodic run actually happened, screen on or off.
                 val now = System.currentTimeMillis()
                 val interactive = runCatching {
@@ -129,7 +146,8 @@ class WellnessSyncWorker(context: Context, params: WorkerParameters) : Coroutine
             runCatching { WellnessGraph.pushCapabilities(app) }
             // A history import that is due (first run, or a category just turned on) needs a
             // visible foreground worker, which Android allows only while the app is open.
-            if (!WellnessGraph.state(app).load().backfill.done && AppForegroundState.isForeground()) {
+            if (WellnessGraph.binding(app).current() != null &&
+                WellnessScheduler.backfillWanted(WellnessGraph.state(app).load()) && AppForegroundState.isForeground()) {
                 WellnessScheduler.startBackfill(app)
             }
             Result.success()
@@ -166,7 +184,9 @@ class WellnessBackfillWorker(context: Context, params: WorkerParameters) : Corou
             return Result.success()
         }
         while (!isStopped) {
-            when (val step = engine.backfillPage()) {
+            // D1: without the background grant a page is read only while the app is visible,
+            // judged per page (the person may leave the app mid-import).
+            when (val step = engine.backfillPage(inForeground = AppForegroundState.isForeground())) {
                 is WellnessSyncEngine.BackfillStep.Progress -> {
                     val pct = if (step.pagesTotal > 0) (step.pagesDone * 100 / step.pagesTotal).coerceIn(0, 99) else 0
                     runCatching {
@@ -181,7 +201,9 @@ class WellnessBackfillWorker(context: Context, params: WorkerParameters) : Corou
                     return Result.success()
                 }
                 is WellnessSyncEngine.BackfillStep.QuotaBackoff -> {
-                    WellnessScheduler.startBackfill(app, step.delayMs)
+                    // A delayed retry can fire while the app is closed; without the background
+                    // grant the next app open resumes the import instead.
+                    if (step.requeue) WellnessScheduler.startBackfill(app, step.delayMs)
                     return Result.success()
                 }
             }

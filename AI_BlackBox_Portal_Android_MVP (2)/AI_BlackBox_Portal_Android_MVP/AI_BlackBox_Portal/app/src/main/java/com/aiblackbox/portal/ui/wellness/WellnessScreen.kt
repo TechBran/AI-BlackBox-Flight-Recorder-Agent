@@ -38,7 +38,6 @@ import com.aiblackbox.portal.data.wellness.WellnessCatalog
 import com.aiblackbox.portal.data.wellness.WellnessCategory
 import com.aiblackbox.portal.data.wellness.WellnessConsent
 import com.aiblackbox.portal.data.wellness.WellnessRules
-import com.aiblackbox.portal.ui.feedback.clickFeedback
 import com.aiblackbox.portal.ui.theme.BbxAccent
 import com.aiblackbox.portal.ui.theme.BbxBlack
 import com.aiblackbox.portal.ui.theme.BbxWhite
@@ -51,7 +50,8 @@ import com.aiblackbox.portal.ui.theme.Neutral700
  * with their fixes, what BlackBox may use (Off / Ask / Proactive), where it may go ("Only AI
  * on my network", providers, local-only per kind), the health instinct prompt, where you can
  * ask, the briefing placeholder (M7.3), who saw my health data, and Pause / Disconnect /
- * Stop & erase. Not set up: the setup flow. The debug Probe sits behind a flag.
+ * Stop & erase. Not set up: the setup flow. The Probe exists only in debug builds and in a
+ * build made with `-PwellnessProbe` (the M7.1 device walk).
  */
 @Composable
 fun WellnessScreen(viewModel: WellnessViewModel = viewModel()) {
@@ -79,7 +79,7 @@ fun WellnessScreen(viewModel: WellnessViewModel = viewModel()) {
                 "Health",
                 style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
                 color = BbxWhite,
-                modifier = Modifier.weight(1f).clickFeedback { viewModel.onTitleTapped() },
+                modifier = Modifier.weight(1f),
             )
             StatusChipView(state.chip)
         }
@@ -90,7 +90,7 @@ fun WellnessScreen(viewModel: WellnessViewModel = viewModel()) {
             !state.bound -> NotSetUp(state, onSetUp = { viewModel.startSetup() })
             else -> Enrolled(state, viewModel)
         }
-        if (!probeOpen && (BuildConfig.DEBUG || state.probeUnlocked)) {
+        if (!probeOpen && (BuildConfig.DEBUG || BuildConfig.WELLNESS_PROBE)) {
             HealthButton("Health probe (M7.1 device tests)", color = Neutral700) { probeOpen = true }
         }
         Spacer(Modifier.height(24.dp))

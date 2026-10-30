@@ -20,7 +20,7 @@ import java.time.format.DateTimeFormatter
  *
  *   {"schema", "batch_id", "enrollment_id", "epoch", "window": {type, from, to},
  *    "origins": [{key, package, device_type, model}],
- *    "buckets": [{metric, grain, origin, replace_day, rows}],
+ *    "buckets": [{metric, grain, origin, replace_day, offset_s, rows}],
  *    "sessions": [{kind, hc_id, origin, start, end, offset_s, stages | subtype + attrs, last_modified}],
  *    "readings": [{metric, hc_id, origin, t, offset_s, v, [v2, attrs], last_modified}],
  *    "deleted_ids": [...]}
@@ -29,6 +29,11 @@ import java.time.format.DateTimeFormatter
  * produce the same bytes: the goldens under `src/test/resources/wellness/` are frozen contracts
  * the box replays through its real ingest route. Times are epoch ms (window ends are ISO-8601
  * UTC); a gap is an absent row, never a zero.
+ *
+ * Every bucket group carries `offset_s`, the zone offset at the START of its local
+ * `replace_day`: only the phone knows its zone, and without it the box would replace the day
+ * on the bounds of whatever offset it last saw (UTC on a fresh store), deleting the previous
+ * local evening's rows.
  */
 object IngestPayloadBuilder {
 
@@ -47,6 +52,8 @@ object IngestPayloadBuilder {
         val grain: Grain,
         val origin: HcOrigin?,
         val replaceDay: String,
+        /** The zone offset (seconds east of UTC) at the start of [replaceDay]. */
+        val offsetS: Int,
         val rows: List<List<Number>>,
     )
 
@@ -149,6 +156,7 @@ object IngestPayloadBuilder {
                     put("grain", JsonPrimitive(b.grain.wire))
                     put("origin", JsonPrimitive(key(b.origin)))
                     put("replace_day", JsonPrimitive(b.replaceDay))
+                    put("offset_s", JsonPrimitive(b.offsetS))
                     put("rows", buildJsonArray {
                         for (row in b.rows) add(buildJsonArray { for (n in row) add(num(n)) })
                     })
@@ -227,6 +235,80 @@ object IngestPayloadBuilder {
     private val ISO: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC)
 
     fun iso(ms: Long): String = ISO.format(Instant.ofEpochMilli(ms))
+
+    // ── consent at the moment of sending ───────────────────────────────────────────────────
+
+    private val SECTIONS = listOf("buckets", "sessions", "readings", "deleted_ids")
+
+    /** The exercise-session attrs that are heart data (they come from the heart-rate aggregate). */
+    private val HEART_ATTRS = listOf("avg_hr", "max_hr")
+
+    /** Wire metric (bucket or reading) -> the Health Connect type it is made from. */
+    private val METRIC_TYPES: Map<String, HcType> = HcType.entries.mapNotNull { t ->
+        when (t.shape) {
+            HcShape.BUCKETED -> bucketMetric(t) to t
+            HcShape.READING -> readingMetric(t) to t
+            HcShape.SESSION -> null
+        }
+    }.toMap()
+
+    /** The consent category one payload item belongs to; null for anything this build does not know. */
+    fun categoryOf(section: String, item: JsonObject): WellnessCategory? {
+        val type = when (section) {
+            "buckets", "readings" -> METRIC_TYPES[item["metric"]?.jsonPrimitive?.content]
+            "sessions" -> when (item["kind"]?.jsonPrimitive?.content) {
+                "sleep" -> HcType.SLEEP
+                "exercise" -> HcType.EXERCISE
+                else -> null
+            }
+            else -> null
+        } ?: return null
+        return WellnessCatalog.categoryOf(type)
+    }
+
+    /** A batch after [withoutCategories]: the JSON to send, and whether anything is left in it. */
+    data class ConsentFiltered(val json: String, val isEmpty: Boolean)
+
+    /**
+     * The batch with everything of the [off] categories taken out, applied to EVERY push with
+     * the consent of that moment: a batch read before the person turned a category off (here,
+     * or on any other surface) never delivers it afterwards. Items of a kind this build does
+     * not know go too (default deny), and an exercise session keeps its activity numbers but
+     * loses its heart-rate summary when Heart is off. Deletions always stay (they only
+     * narrow). Origins no remaining item uses are dropped; the batch id stays.
+     *
+     * Null when nothing had to go (send the stored bytes as they are).
+     */
+    fun withoutCategories(json: String, off: Set<WellnessCategory>): ConsentFiltered? {
+        val obj = Json.parseToJsonElement(json).jsonObject
+        var changed = false
+        val items = mutableListOf<Pair<String, JsonElement>>()
+        for (section in SECTIONS) {
+            for (el in obj[section]?.jsonArray.orEmpty()) {
+                if (section == "deleted_ids") {
+                    items += section to el
+                    continue
+                }
+                val item = el.jsonObject
+                val category = categoryOf(section, item)
+                if (category == null || category in off) {
+                    changed = true
+                    continue
+                }
+                val attrs = item["attrs"] as? JsonObject
+                if (section == "sessions" && WellnessCategory.HEART in off && attrs != null &&
+                    HEART_ATTRS.any { attrs[it] != null && attrs[it] !is JsonNull }) {
+                    changed = true
+                    items += section to JsonObject(item + ("attrs" to JsonObject(attrs + HEART_ATTRS.associateWith { JsonNull })))
+                    continue
+                }
+                items += section to el
+            }
+        }
+        if (!changed) return null
+        val batchId = obj["batch_id"]?.jsonPrimitive?.content ?: ""
+        return ConsentFiltered(half(obj, items, batchId), items.isEmpty())
+    }
 
     // ── 413: split a batch in two ──────────────────────────────────────────────────────────
 
