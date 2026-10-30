@@ -142,6 +142,7 @@ internal fun BlackBoxApp(
                     chatViewModel.setMessageTtsGenerating(messageId, generating, status)
                 override fun setAudioPath(messageId: String, path: String) =
                     chatViewModel.setMessageTtsAudioUrl(messageId, path)
+                override fun usedHealth(messageId: String): Boolean = chatViewModel.usedHealth(messageId)
             },
         )
     }

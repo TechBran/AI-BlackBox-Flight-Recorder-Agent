@@ -63,7 +63,10 @@ class ChatSpeechTest {
             events += "audio($messageId, ${File(path).name.replace(Regex("\\d{10,}"), "T")})"
             audioFiles += File(path)
         }
+        override fun usedHealth(messageId: String): Boolean = messageId in healthReplies
     }
+    /** Bubbles whose turn used the person's health data (M7). */
+    private val healthReplies = mutableSetOf<String>()
     private val audioFiles = mutableListOf<File>()
 
     private val speech by lazy {
@@ -257,6 +260,62 @@ class ChatSpeechTest {
         awaitUntil("auto-TTS") { done }
         assertEquals("op-b", batchBody()["operator"])
         assertEquals("nova", batchBody()["voice"])
+    }
+
+    // ---- a reply that used health data (M7) ----
+
+    @Test fun `auto-TTS never sends a health reply to a cloud voice`() {
+        healthReplies += "h1"
+        routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
+        for (v in listOf("openai:alloy", "gemini-pro:Charon", "elevenlabs:abc123", "local:af_heart", "")) {
+            voice = v
+            events.clear()
+            var done = false
+            scope.launch { speech.autoSpeak("h1", "You slept 6 h 49 min, resting 57 bpm."); done = true }
+            awaitUntil("auto-TTS ($v)") { done }
+            assertEquals(v, listOf("generating(h1, true, null)", "generating(h1, false, null)"), events)
+        }
+        assertTrue("no request left the phone: $requests", requests.isEmpty())
+    }
+
+    @Test fun `the speaker refuses a cloud voice for a health reply and says why`() {
+        healthReplies += "h2"
+        routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
+        speech.speakForMessage("h2", "You slept 6 h 49 min.")
+        awaitUntil("the refusal") { events.size == 2 }
+        assertEquals(listOf("generating(h2, true, null)", "generating(h2, false, null)"), events)
+        assertEquals(com.aiblackbox.portal.data.wellness.WellnessChatRules.NOT_SPOKEN_MESSAGE, ShadowToast.getTextOfLatestToast())
+        assertTrue(requests.isEmpty())
+        val actions = mutableListOf<String?>()
+        awaitUntil("the keep-alive stop") { actions += serviceActions(); BackgroundTaskService.ACTION_STOP in actions }
+    }
+
+    @Test fun `the on-box voice speaks a health reply, and other replies are unchanged`() {
+        healthReplies += "h3"
+        voice = "qwen:Vivian"
+        routes["/tts/queue"] = { ok("""{"task_id":"t9"}""") }
+        routes["/tts/task/t9"] = { ok("""{"status":"done","audio_url":"/ui/uploads/t9.wav"}""") }
+        routes["/ui/uploads/t9.wav"] = { bytes("RIFF".toByteArray()) }
+        speech.speakForMessage("h3", "You slept a little less than usual.")
+        awaitUntil("the clip") { events.any { it.startsWith("audio(") } }
+        assertEquals("audio(h3, tts_q_h3_T.wav)", events.last())
+        assertTrue(requests.none { it.first == "/tts/batch" })
+
+        voice = "openai:alloy"
+        routes["/tts/batch"] = { bytes("MP3".toByteArray()) }
+        events.clear()
+        var done = false
+        scope.launch { speech.autoSpeak("plain", "The answer."); done = true }
+        awaitUntil("auto-TTS") { done }
+        assertEquals(listOf("generating(plain, true, null)", "audio(plain, auto_tts_T.mp3)"), events)
+    }
+
+    @Test fun `only the on-box voice may speak a health reply`() {
+        val rules = com.aiblackbox.portal.data.wellness.WellnessChatRules
+        assertTrue(rules.maySpeak(true, "qwen"))
+        assertTrue(rules.maySpeak(true, " QWEN "))
+        for (p in listOf("openai", "gemini-pro", "gemini-flash", "elevenlabs", "local", "", null)) assertTrue(!rules.maySpeak(true, p))
+        for (p in listOf("openai", "elevenlabs", "", null)) assertTrue(rules.maySpeak(false, p))
     }
 
     // ---- plain speech ----

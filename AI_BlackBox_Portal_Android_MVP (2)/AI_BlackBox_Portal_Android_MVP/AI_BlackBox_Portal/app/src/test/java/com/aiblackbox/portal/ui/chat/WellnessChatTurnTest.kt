@@ -28,6 +28,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
@@ -159,6 +160,8 @@ class WellnessChatTurnTest {
         assertEquals("w-20261028-ab12", reply.wellnessRef)
         assertEquals(WellnessUsed("w-20261028-ab12", listOf("w-20261028-ab12"), listOf("sleep"), "2026-10-28T07:10-04:00",
             "Anthropic"), reply.wellnessUsed)
+        assertTrue("the speaker knows this reply used health data", vm.usedHealth(reply.id))
+        assertFalse(vm.usedHealth(vm.messages.value.first { it.role == "user" }.id))
 
         val history = ChatHistoryStore(RuntimeEnvironment.getApplication())
         pumpUntil("the turn in the local history") {

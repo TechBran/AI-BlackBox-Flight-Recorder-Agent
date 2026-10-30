@@ -2110,6 +2110,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * "Generating 1/3… 0:45"). Null (the cloud/direct paths) keeps the plain
      * spinner; it is always cleared when [generating] ends.
      */
+    /**
+     * (M7) Did message [messageId]'s turn use the person's health data? ChatSpeech reads it
+     * aloud only with the on-box voice then (WellnessChatRules.maySpeak).
+     */
+    fun usedHealth(messageId: String): Boolean =
+        _messages.value.firstOrNull { it.id == messageId }?.let { it.wellnessUsed != null || it.wellnessRef != null } == true
+
     fun setMessageTtsGenerating(messageId: String, generating: Boolean, status: String? = null) {
         val current = _messages.value.toMutableList()
         val idx = current.indexOfFirst { it.id == messageId }

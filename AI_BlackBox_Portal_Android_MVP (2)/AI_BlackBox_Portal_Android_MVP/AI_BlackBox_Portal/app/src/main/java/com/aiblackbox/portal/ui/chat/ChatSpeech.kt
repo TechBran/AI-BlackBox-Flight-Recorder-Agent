@@ -11,6 +11,7 @@ import com.aiblackbox.portal.data.repository.TtsQueue
 import com.aiblackbox.portal.data.repository.TtsQueueFailedException
 import com.aiblackbox.portal.data.repository.TtsQueueUnavailableException
 import com.aiblackbox.portal.data.repository.TtsRepository
+import com.aiblackbox.portal.data.wellness.WellnessChatRules
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -25,6 +26,10 @@ import java.io.File
  * and plain speech with no bubble. Each reads the operator's voice, sends an on-box voice
  * through the async queue when the box has one (B3), and otherwise asks /tts/batch. Moved
  * verbatim; the bubble state goes through [Bubbles].
+ *
+ * (M7) A reply that used the person's health data is read aloud only by the on-box voice
+ * ([WellnessChatRules.maySpeak]): any other voice would send its numbers to a speech service
+ * the health settings never allowed. Auto-TTS skips it; the speaker says why.
  */
 internal class ChatSpeech(
     /** The application context: the cache dir the clips go to, toasts, the keep-alive service. */
@@ -46,6 +51,8 @@ internal class ChatSpeech(
         fun setGenerating(messageId: String, generating: Boolean, status: String?)
         /** The clip is ready: the bubble's player appears and the spinner stops. */
         fun setAudioPath(messageId: String, path: String)
+        /** Did message [messageId]'s turn use the person's health data (its wellness_used)? */
+        fun usedHealth(messageId: String): Boolean = false
     }
 
     private val operator: String get() = operatorOf()
@@ -130,6 +137,11 @@ internal class ChatSpeech(
             }
             val voiceValue = voiceFor(operator)
             val config = TtsRepository.parseVoice(voiceValue)
+            // M7: a health reply is spoken only on the box; never sent to a cloud voice.
+            if (!WellnessChatRules.maySpeak(bubbles.usedHealth(messageId), config.provider)) {
+                bubbles.setGenerating(messageId, false, null)
+                return
+            }
             // B3: on-box voices go through the async queue when the
             // backend has it (404 -> direct /tts/batch fallback below).
             if (config.provider == TtsRepository.ON_BOX_PROVIDER &&
@@ -224,9 +236,11 @@ internal class ChatSpeech(
      * second tap retries.
      */
     fun speakForMessage(messageId: String, text: String) {
+        // M7: whether a health reply may be spoken depends on the voice, read below.
+        val usedHealth = bubbles.usedHealth(messageId)
         // Mark as generating (button turns red)
         bubbles.setGenerating(messageId, true, null)
-        Toast.makeText(context, "Generating speech...", Toast.LENGTH_SHORT).show()
+        if (!usedHealth) Toast.makeText(context, "Generating speech...", Toast.LENGTH_SHORT).show()
         // Keep alive in background for TTS generation
         try {
             val svcIntent = android.content.Intent(context, BackgroundTaskService::class.java).apply {
@@ -251,6 +265,14 @@ internal class ChatSpeech(
                 }
                 val voiceValue = voiceFor(operator)
                 val config = TtsRepository.parseVoice(voiceValue)
+                // M7: a health reply is spoken only on the box; never sent to a cloud voice.
+                if (!WellnessChatRules.maySpeak(usedHealth, config.provider)) {
+                    bubbles.setGenerating(messageId, false, null)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, WellnessChatRules.NOT_SPOKEN_MESSAGE, Toast.LENGTH_LONG).show()
+                    }
+                    return@launch
+                }
                 // B3: on-box voices go through the async queue when the
                 // backend has it — live chip on the bubble, short poll
                 // requests. 404 (pre-B1 backend) returns false and falls

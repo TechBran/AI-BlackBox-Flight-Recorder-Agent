@@ -323,6 +323,26 @@ object WellnessChatRules {
         LABEL_JUNK.replace(text, " ").split(Regex("\\s+")).filter { it.isNotEmpty() }.joinToString(" ")
             .take(60).trim().takeIf { it.isNotEmpty() }
 
+    // ── reading a reply aloud ──────────────────────────────────────────────────────────────
+
+    /** The box's on-box voice (Qwen3-TTS; TtsRepository.ON_BOX_PROVIDER): text it speaks never leaves the box. */
+    const val ON_BOX_VOICE = "qwen"
+
+    /**
+     * May a reply be read aloud with a voice of [ttsProvider] (the operator's "provider:voice"
+     * provider; "" is the box's default, whichever that is)? Always, unless the reply used the
+     * person's health data ([usedHealth]); then only with the on-box voice. Every other voice
+     * sends the text to a service: OpenAI, Google, ElevenLabs, or a "local" server the phone
+     * cannot tell is on the person's network. The health settings name which AI may see the
+     * data, never a voice, so this is default-deny (rules W19, W31; the bundled policy says a
+     * cloud provider sees health data only if it is ticked).
+     */
+    fun maySpeak(usedHealth: Boolean, ttsProvider: String?): Boolean =
+        !usedHealth || ttsProvider?.trim()?.lowercase(Locale.ROOT) == ON_BOX_VOICE
+
+    const val NOT_SPOKEN_MESSAGE = "Not read aloud: this reply has your health data, and your voice isn't on your " +
+        "BlackBox. Choose an on-box voice to hear replies like this."
+
     // ── masked turns and Show numbers ──────────────────────────────────────────────────────
 
     /** The box's mask glyph (mask.MASK): a health number the ledger does not keep. */
