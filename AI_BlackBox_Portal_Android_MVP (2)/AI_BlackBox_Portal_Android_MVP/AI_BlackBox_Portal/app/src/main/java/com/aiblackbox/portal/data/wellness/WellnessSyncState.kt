@@ -35,6 +35,8 @@ data class WellnessSyncState(
     @SerialName("last_periodic_run_ms") val lastPeriodicRunMs: Long = 0L,
     @SerialName("last_foreground_sync_ms") val lastForegroundSyncMs: Long = 0L,
     @SerialName("last_capabilities_ms") val lastCapabilitiesMs: Long = 0L,
+    /** The health permissions held when the last capability report went out (a change re-sends it). */
+    @SerialName("last_reported_grants") val lastReportedGrants: List<String> = emptyList(),
     @SerialName("last_reconcile_ms") val lastReconcileMs: Long = 0L,
     /** Earliest record the phone could read (ms), for the "Past data: from ..." line. */
     @SerialName("earliest_available_ms") val earliestAvailableMs: Long? = null,

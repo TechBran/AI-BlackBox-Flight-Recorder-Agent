@@ -111,8 +111,9 @@ object WellnessGraph {
     fun tailnetIps(): List<String> = TailnetAddress.localTailnetIpv4Candidates()
 
     /**
-     * Run the probe and send the capability report (counts only) when it is due: on
-     * enrollment, on app start, daily, and on a permission change ([force]).
+     * Run the probe and send the capability report (counts only) when it is due: daily, after
+     * each sync once the grants differ from the last report (a change made in Health Connect's
+     * own settings), and at once with [force] (a grant made in the app).
      */
     suspend fun pushCapabilities(context: Context, force: Boolean = false): CapabilityProbe.Result? {
         val app = context.applicationContext
@@ -120,14 +121,16 @@ object WellnessGraph {
         val client = client(app) ?: return null
         val st = state(app).load()
         val now = System.currentTimeMillis()
-        if (!force && now - st.lastCapabilitiesMs < CAPABILITIES_EVERY_MS) return null
+        // A grant added or withdrawn in Health Connect's own settings re-sends the report at once.
+        val grants = runCatching { gateway(app).grantedPermissions() }.getOrDefault(emptySet()).sorted()
+        if (!force && grants == st.lastReportedGrants && now - st.lastCapabilitiesMs < CAPABILITIES_EVERY_MS) return null
         val result = runCatching { probe(app).run() }.getOrNull() ?: return null
         applyProbe(app, result)
         val reply = client.capabilities(
             CapabilityProbe.toJson(result.report),
             OriginSigner(record.enrollmentId, record.k),
         )
-        if (reply.ok) state(app).update { it.copy(lastCapabilitiesMs = now) }
+        if (reply.ok) state(app).update { it.copy(lastCapabilitiesMs = now, lastReportedGrants = grants) }
         Log.i(TAG, "capability report sent (status=${reply.status}, origins=${result.report.origins.size})")
         return result
     }
