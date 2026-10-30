@@ -509,9 +509,20 @@ class Store:
         conn.execute("UPDATE epoch SET ended_at=? WHERE epoch=? AND ended_at IS NULL",
                      (ended_at, epoch))
 
+    @staticmethod
+    def _origin_key(origin: dict) -> tuple:
+        return (origin.get("package") or "", origin.get("device_type"),
+                origin.get("manufacturer"), origin.get("model"))
+
+    def find_origin(self, conn, origin: dict) -> Optional[int]:
+        """The id of an origin already saved, or None (nothing is written)."""
+        row = conn.execute(
+            "SELECT origin_id FROM origin WHERE package IS ? AND device_type IS ? "
+            "AND manufacturer IS ? AND model IS ?", self._origin_key(origin)).fetchone()
+        return int(row[0]) if row else None
+
     def ensure_origin(self, conn, origin: dict, now: int = 0) -> int:
-        key = (origin.get("package") or "", origin.get("device_type"),
-               origin.get("manufacturer"), origin.get("model"))
+        key = self._origin_key(origin)
         row = conn.execute(
             "SELECT origin_id FROM origin WHERE package IS ? AND device_type IS ? "
             "AND manufacturer IS ? AND model IS ?", key).fetchone()

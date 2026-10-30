@@ -259,18 +259,23 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                     def too_old(ts: int) -> bool:
                         return cutoff is not None and ts < cutoff
                     # An origin is saved (and its last-seen moved) only when a
-                    # row that passed the consent check names it: an app whose
-                    # every row was dropped leaves no trace in the sources.
+                    # row that is KEPT names it: it is resolved lazily, after
+                    # the consent, retention and shape checks, so an app whose
+                    # every row was dropped, or a group with no rows at all,
+                    # leaves no trace in the sources. An empty replace_day
+                    # group still clears the day for an origin already saved
+                    # (find_origin writes nothing).
                     declared = {o.key: o.model_dump() for o in batch.origins}
                     declared.setdefault(HC_MERGED, {"package": HC_MERGED})
                     ids: Dict[str, int] = {}
 
-                    def origin_id(key: str) -> Optional[int]:
+                    def origin_id(key: str) -> int:
                         if key not in ids:
-                            if key not in declared:
-                                return None
                             ids[key] = st.ensure_origin(conn, declared[key], now=now_ms)
                         return ids[key]
+
+                    def saved_origin(key: str) -> Optional[int]:
+                        return ids[key] if key in ids else st.find_origin(conn, declared[key])
 
                     def moved(day: str, before: int, after: int):
                         # The day's start and the day before's end moved.
@@ -327,8 +332,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if (kind == "hr") != (g.grain in ("1min", "5min")):
                             drop("bad_grain", len(g.rows))
                             continue
-                        oid = origin_id(g.origin)
-                        if oid is None:
+                        if g.origin not in declared:
                             drop("unknown_origin", len(g.rows))
                             continue
                         want = 5 if kind == "hr" else 2
@@ -359,13 +363,16 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                                 rows = [rows[i] for i in inside]
                                 flags = [flags[i] for i in inside]
                             note_long_day(g.replace_day, g.grain, rows)
-                            st.replace_bucket_day(
-                                conn, g.metric, g.grain, oid, epoch, g.replace_day,
-                                offsets.for_day(g.replace_day), rows, flags,
-                                next_offset_s=offsets.for_day(add_days(g.replace_day, 1)))
+                            oid = origin_id(g.origin) if rows else saved_origin(g.origin)
+                            if oid is not None:
+                                st.replace_bucket_day(
+                                    conn, g.metric, g.grain, oid, epoch, g.replace_day,
+                                    offsets.for_day(g.replace_day), rows, flags,
+                                    next_offset_s=offsets.for_day(add_days(g.replace_day, 1)))
                             dirty.add(g.replace_day)
-                        else:
-                            st.upsert_buckets(conn, g.metric, g.grain, oid, epoch, rows, flags)
+                        elif rows:
+                            st.upsert_buckets(conn, g.metric, g.grain, origin_id(g.origin), epoch,
+                                              rows, flags)
                         days = {offsets.day_of(r[0]) for r in rows}
                         if g.metric == "heart_rate":
                             # A day's evening heart rate belongs to the night that
@@ -381,8 +388,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if off(SESSION_CATEGORY.get(s.kind)):
                             drop("category_off")
                             continue
-                        oid = origin_id(s.origin)
-                        if oid is None:
+                        if s.origin not in declared:
                             drop("unknown_origin")
                             continue
                         if s.end > future or s.start > future:
@@ -391,6 +397,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if too_old(s.end):
                             drop("past_retention")
                             continue
+                        oid = origin_id(s.origin)
                         flag = 0
                         hours = (s.end - s.start) / 3_600_000
                         if s.end <= s.start or hours > SESSION_MAX_H[s.kind]:
@@ -439,8 +446,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if off(READING_CATEGORY.get(r.metric)):
                             drop("category_off")
                             continue
-                        oid = origin_id(r.origin)
-                        if oid is None:
+                        if r.origin not in declared:
                             drop("unknown_origin")
                             continue
                         if r.t > future:
@@ -449,6 +455,7 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                         if too_old(r.t):
                             drop("past_retention")
                             continue
+                        oid = origin_id(r.origin)
                         flag = _reading_flag(r.metric, r.v, r.v2)
                         note_record(r.t, r.offset_s)
                         day = offsets.day_of(r.t)

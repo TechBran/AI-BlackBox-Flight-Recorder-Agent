@@ -414,9 +414,9 @@ def test_a_golden_replays_through_the_real_ingest_route(box, name, bp):
     assert stored["buckets"] == want["buckets"]
     assert stored["sessions"] == want["sessions"]
     assert stored["readings"] == want["readings"]
-    declared = {_origin(batch, o["key"]) for o in batch["origins"]} | \
-        {_origin(batch, store.HC_MERGED)}
-    assert want["origins"] <= stored["origins"] <= declared
+    # Exactly the origins a kept row names: a declared origin whose rows were
+    # all dropped, or whose group was empty, is no source (ingest.py).
+    assert stored["origins"] == want["origins"]
     _assert_local_days(st, batch, on)
     _no_merged_source()
 
@@ -430,6 +430,25 @@ def test_a_golden_replays_through_the_real_ingest_route(box, name, bp):
     after = _counts(st)
     assert after == dict(before, ingest_log=before["ingest_log"] + 1)
     assert _stored(st) == stored
+
+
+def test_the_deletions_golden_alone_stores_no_origin(box):
+    """The deletions golden declares the watch and sends two heart-rate days
+    with no rows (and two deleted ids). Replayed alone at epoch 2, on a store
+    that never had a row from that watch, it keeps nothing, so it lists no
+    source: no origin row, nothing in a summary's sources."""
+    wire, batch = _golden("ingest_deletions.json")
+    assert batch["origins"] and all(not g["rows"] for g in batch["buckets"])
+    _rebind(box, 2)
+    r = _push(box, wire)
+    assert r.status_code == 200, r.text
+    assert (r.json()["accepted"], r.json()["dropped"]) == (0, 0)
+    st = _store()
+    assert _stored(st)["origins"] == set()
+    with st.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM origin").fetchone()[0] == 0
+    summary = api.summary(OPERATOR, "last_7_days", now_ms=NOW_MS)
+    assert summary["ok"] is True and summary["sources"] == []
 
 
 def test_blood_pressure_waits_for_its_consent(box):
@@ -505,9 +524,11 @@ def test_the_goldens_as_one_phone_s_life(box):
     r = _push(box, bp_wire)
     assert r.status_code == 200 and r.json()["dropped"] == len(bp["readings"])
     notices = r.json()["pending_notices"]
-    # WellnessOutbox.parseNotices reads {id, kind, title, body, created_at}.
+    # WellnessGraph.postNotices reads id, title and body of each notice
+    # (WellnessOutbox.parseNotices hands the objects on whole, and the
+    # phone's Json ignores keys it does not know).
     assert [n["id"] for n in notices] == [nid]
-    assert set(notices[0]) == {"id", "kind", "title", "body", "created_at"}
+    assert {"id", "title", "body"} <= set(notices[0])
     assert isinstance(r.json()["next_min_interval_s"], int)
 
     heart_before = {k: v for k, v in _stored(st)["buckets"].items() if k[0] == "heart_rate"}

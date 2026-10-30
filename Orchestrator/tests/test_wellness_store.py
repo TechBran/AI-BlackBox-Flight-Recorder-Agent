@@ -330,6 +330,45 @@ def test_a_flagged_multi_year_session_touches_one_day(tmp_path, monkeypatch):
     assert _time.monotonic() - t0 < 2.0
 
 
+def test_an_origin_is_saved_only_when_a_kept_row_names_it(st):
+    """Ingest resolves an origin on its first KEPT row (ingest.py): rows past
+    the clock, an empty group or an empty replace day list no source; an
+    empty replace day for an origin already saved still clears that day."""
+    from Orchestrator.wellness import ingest, schema
+    now = T0 + 12 * 3_600_000
+    late = now + 2 * 86_400_000
+    origins = [{"key": "w", "package": "com.example.watch", "device_type": "WATCH"},
+               {"key": "p", "package": "com.example.phone", "device_type": "PHONE"}]
+
+    def run(batch_id, **parts):
+        batch = {"schema": "bbx.wellness.ingest/1", "batch_id": batch_id,
+                 "enrollment_id": "en_0000000a", "epoch": 1, "origins": origins, **parts}
+        return ingest.process_batch(st, schema.IngestBatch.model_validate(batch),
+                                    enrollment_id="en_0000000a", epoch=1, now_ms=now)
+
+    def steps_today():
+        return st.buckets("steps", "1h", T0, T0 + 86_400_000)
+
+    res = run("b-dropped", buckets=[
+        {"metric": "steps", "grain": "1h", "origin": "w", "rows": [[late, 10.0]]},
+        {"metric": "steps", "grain": "1h", "origin": "p", "rows": []}],
+        sessions=[{"kind": "sleep", "hc_id": "s1", "origin": "w", "start": late,
+                   "end": late + 3_600_000, "offset_s": OFF, "stages": []}],
+        readings=[{"metric": "spo2", "hc_id": "r1", "origin": "p", "t": late,
+                   "offset_s": OFF, "v": 97.0}])
+    assert (res.accepted, res.dropped) == (0, 3)
+    assert st.origins() == {}
+    empty_day = {"metric": "steps", "grain": "1h", "origin": "w", "replace_day": DAY,
+                 "offset_s": OFF, "rows": []}
+    run("b-empty-day", buckets=[empty_day])
+    assert st.origins() == {}
+    run("b-kept", buckets=[dict(empty_day, rows=[[T0 + 3_600_000, 100.0]])])
+    [(oid, origin)] = st.origins().items()
+    assert origin["package"] == "com.example.watch" and len(steps_today()) == 1
+    run("b-cleared", buckets=[empty_day])
+    assert steps_today() == [] and list(st.origins()) == [oid]
+
+
 def test_the_span_ignores_flagged_rows(st):
     with st.write() as conn:
         st.set_day_offset(conn, DAY, OFF)
