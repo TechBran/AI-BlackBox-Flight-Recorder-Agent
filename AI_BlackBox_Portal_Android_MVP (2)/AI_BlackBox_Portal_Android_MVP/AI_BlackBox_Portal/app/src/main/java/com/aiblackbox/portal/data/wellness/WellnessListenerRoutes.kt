@@ -16,8 +16,11 @@ import kotlinx.serialization.json.Json
  * They run behind the listener's pre-body gate (tailnet peer, not this phone, the pairing
  * bearer, bounded body) and after `authorize()`, which already required the request operator
  * to equal [WellnessPort.bindOperator] (bind) or [WellnessPort.enrolledOperator] (sync,
- * unbind). This router re-checks nothing about the source; it validates the payload, and
- * for bind the live intent nonce. PURE over [WellnessPort] -> JVM-tested.
+ * unbind). One exception: an unbind on a phone that holds no enrollment passes (there is
+ * nothing to clear, and the box's best-effort unbind after an erase deserves its 200, not a
+ * 403). This router re-checks nothing about the source; it validates the payload, for bind
+ * the live intent nonce, and for sync/unbind that the body names the enrolled operator (a
+ * bind may have landed between authorize() and here). PURE over [WellnessPort] -> JVM-tested.
  */
 interface WellnessPort {
     /** The operator the live intent names, "" when none (bind is refused). */
@@ -93,6 +96,8 @@ fun routeWellness(method: String, path: String, body: String, port: WellnessPort
             if (path == WELLNESS_UNBIND && current == null)
                 return RemoteResponse(200, ROUTE_JSON.encodeToString(WellnessOk(ok = true, state = "not_set_up")))
             if (current == null) return err(409, "not_enrolled")
+            if (target.operator.trim() != current.operator)
+                return err(403, "operator not authorized for health on this device")
             // The box names the enrollment it means; a stale or missing id never clears or
             // nudges the current one.
             if (target.enrollmentId != current.enrollmentId) return err(409, "enrollment_mismatch")

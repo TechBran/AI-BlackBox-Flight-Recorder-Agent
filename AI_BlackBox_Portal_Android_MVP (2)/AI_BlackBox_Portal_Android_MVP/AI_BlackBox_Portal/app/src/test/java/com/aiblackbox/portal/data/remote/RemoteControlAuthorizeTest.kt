@@ -57,10 +57,34 @@ class RemoteControlAuthorizeTest {
     // ── authorize() ────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun `wellness routes are refused when no intent and no enrollment exist`() {
-        for (path in listOf(WELLNESS_BIND, WELLNESS_SYNC, WELLNESS_UNBIND)) {
+    fun `bind and sync are refused when no intent and no enrollment exist`() {
+        for (path in listOf(WELLNESS_BIND, WELLNESS_SYNC)) {
             assertEquals(path, 403, auth("POST", path, op)?.status)
         }
+    }
+
+    @Test
+    fun `an unbind on a phone with no enrollment reaches the router's idempotent 200`() {
+        // The box's best-effort unbind after an erase, to a phone that already cleared itself.
+        assertNull(auth("POST", WELLNESS_UNBIND, op))
+        val r = routeWellness("POST", WELLNESS_UNBIND, """{"operator":"$op","enrollment_id":"en_0badc0de"}""", port)
+        assertEquals(200, r.status)
+        assertTrue(r.json.contains("not_set_up"))
+        // Still fail-closed for a blank operator and for any other method.
+        assertEquals(403, auth("POST", WELLNESS_UNBIND, "")?.status)
+        assertEquals(403, auth("GET", WELLNESS_UNBIND, op)?.status)
+    }
+
+    @Test
+    fun `sync and unbind naming another operator than the enrolled one are refused by the router too`() {
+        // authorize() saw no enrollment, then a bind landed before the router ran.
+        val intent = binding.beginIntent(op)
+        routeWellness("POST", WELLNESS_BIND, bindBody(intent.nonce), port)
+        val body = """{"operator":"someone-else","enrollment_id":"en_0badc0de"}"""
+        assertEquals(403, routeWellness("POST", WELLNESS_UNBIND, body, port).status)
+        assertEquals(403, routeWellness("POST", WELLNESS_SYNC, body, port).status)
+        assertNotNull(binding.current())
+        assertEquals(0, synced)
     }
 
     @Test

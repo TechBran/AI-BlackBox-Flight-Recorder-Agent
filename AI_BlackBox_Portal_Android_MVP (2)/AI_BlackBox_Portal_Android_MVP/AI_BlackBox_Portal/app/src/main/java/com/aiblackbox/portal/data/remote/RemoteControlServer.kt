@@ -11,6 +11,7 @@ import com.aiblackbox.portal.overlay.navigationDedupKey
 import com.aiblackbox.portal.overlay.navigationRejectionReason
 import com.aiblackbox.portal.overlay.navigationTargetPackage
 import com.aiblackbox.portal.data.wellness.WELLNESS_ROUTE_PREFIX
+import com.aiblackbox.portal.data.wellness.WELLNESS_UNBIND
 import com.aiblackbox.portal.data.wellness.WellnessPort
 import com.aiblackbox.portal.data.wellness.routeWellness
 import com.aiblackbox.portal.data.wellness.wellnessOperatorFor
@@ -721,7 +722,9 @@ suspend fun handleActionRequest(
  *    deliberately not the chat-bound operator (rule E4: switching the app to another
  *    operator for a chat never re-routes health data). For `/wellness/bind` it is the
  *    operator the user chose when they started setup (the live intent). Fail-closed: no
- *    enrollment / no live intent (blank) rejects every method.
+ *    enrollment / no live intent (blank) rejects every method, except a POST
+ *    `/wellness/unbind` naming an operator on a phone with no enrollment: there is nothing
+ *    to clear, so the router answers the box's idempotent 200 instead of a 403 it would log.
  *
  * [sourceAdmitted] is the source decision; [RemoteControlServer] passes the verdict its peer
  * policy already reached in the pre-body gate, so both checks judge the peer the same way.
@@ -734,7 +737,9 @@ fun authorize(method: String, path: String, remoteIp: String,
     if (!sourceAdmitted)
         return RemoteResponse(403, JSON.encodeToString(ErrorBody("source not on tailnet")))
     if (path.startsWith(WELLNESS_ROUTE_PREFIX)) {
-        if (wellnessOperator.isBlank() || requestOperator != wellnessOperator)
+        val nothingToUnbind = path == WELLNESS_UNBIND && method.equals("POST", ignoreCase = true) &&
+            wellnessOperator.isBlank() && requestOperator.isNotBlank()
+        if (!nothingToUnbind && (wellnessOperator.isBlank() || requestOperator != wellnessOperator))
             return RemoteResponse(403, JSON.encodeToString(ErrorBody("operator not authorized for health on this device")))
     }
     val m = method.uppercase()

@@ -104,4 +104,16 @@ class RemoteControlWellnessSocketTest {
             post("/wellness/unbind", """{"operator":"$op","enrollment_id":"en_0badc0de"}"""))
         assertNull(binding.current())
     }
+
+    @Test fun unbind_on_a_phone_that_holds_no_enrollment_answers_200_end_to_end() {
+        assumeTrue(aliasesWork())
+        start()
+        assertNull(binding.current())
+        assertEquals("HTTP/1.1 200 OK",
+            post("/wellness/unbind", """{"operator":"$op","enrollment_id":"en_0badc0de"}"""))
+        // A blank operator is still refused, and the bearer is still required.
+        assertEquals("HTTP/1.1 403 Forbidden", post("/wellness/unbind", """{"enrollment_id":"en_0badc0de"}"""))
+        assertEquals("HTTP/1.1 401 Unauthorized",
+            post("/wellness/unbind", """{"operator":"$op","enrollment_id":"en_0badc0de"}""", bearer = null))
+    }
 }
