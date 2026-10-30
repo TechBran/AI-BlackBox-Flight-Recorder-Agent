@@ -8,11 +8,12 @@ Every mint used to write a full copy of the ledger into Archive/ (up to
 agent attachment lands in a Portal/uploads/sessions/<id>/ folder, and nothing
 ever called the upload sweep (the POST /upload/cleanup route existed,
 unscheduled). run_storage_maintenance() applies one pass: the scheduled copy,
-the archive retention, the upload sweep, the expired-artifact sweep and, once
-a day, the ledger check (Orchestrator/ledger_fsck.py) whose counts /health
-shows. startup.py runs it on a timer (startup_storage_maintenance, skipped
-under BLACKBOX_TESTING) and startup_check_index applies the same retention at
-boot.
+the archive retention, the upload sweep, the expired-artifact sweep, the
+health stores' retention ([wellness] detail_years, Orchestrator/wellness/
+store.py prune_all) and, once a day, the ledger check
+(Orchestrator/ledger_fsck.py) whose counts /health shows. startup.py runs it
+on a timer (startup_storage_maintenance, skipped under BLACKBOX_TESTING) and
+startup_check_index applies the same retention at boot.
 """
 from __future__ import annotations
 
@@ -79,10 +80,11 @@ def cleanup_old_session_files(max_age_days: int = SESSION_UPLOAD_MAX_AGE_DAYS,
 def run_storage_maintenance() -> Dict[str, Any]:
     """One maintenance pass: the scheduled ledger copy, archive retention
     with the free-space floor, the upload session sweep, the expired-artifact
-    sweep and the daily ledger check. Each step is independent; a failure is
-    logged and reported, never raised."""
+    sweep, the health stores' retention and the daily ledger check. Each step
+    is independent; a failure is logged and reported, never raised."""
     report: Dict[str, Any] = {"archive_copy": None, "archives": None,
-                              "upload_sessions_removed": None, "ledger_fsck": None, "errors": []}
+                              "upload_sessions_removed": None, "wellness": None,
+                              "ledger_fsck": None, "errors": []}
     try:
         report["archive_copy"] = volume.scheduled_archive_copy()
         if report["archive_copy"].get("copied"):
@@ -115,6 +117,12 @@ def run_storage_maintenance() -> Dict[str, Any]:
     except Exception as e:
         report["errors"].append(f"artifacts: {e}")
         print(f"[MAINTENANCE] Artifact cleanup failed: {e}")
+    try:
+        from Orchestrator.wellness import store as wellness_store
+        report["wellness"] = wellness_store.prune_all()      # logs its own counts
+    except Exception as e:
+        report["errors"].append(f"wellness retention: {type(e).__name__}")
+        print(f"[MAINTENANCE] Health retention failed: {type(e).__name__}")
     try:
         if volume.ledger_fsck_due():
             from Orchestrator.ledger_fsck import summary

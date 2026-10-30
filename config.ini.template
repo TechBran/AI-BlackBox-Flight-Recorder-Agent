@@ -237,3 +237,9 @@ enabled = true
 # only; leave it unset on a box people use.
 # simulator = false
 # simulator_port = 8765
+# detail_years = N keeps each person's detailed health data (5-minute heart
+# rate, hourly steps, sleep sessions, readings) N years; daily and nightly
+# summaries are kept either way. Unset keeps everything until it is erased.
+# The hourly maintenance pass applies it, read fresh. Detail it removed is not
+# brought back by a longer setting later.
+# detail_years = 2

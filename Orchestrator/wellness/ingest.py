@@ -21,6 +21,10 @@ batch was in flight is already off; one turned back on starts with the next
 push (nothing dropped is kept for later). A workout is activity, so with
 heart off it is kept without the heart rate it carries.
 
+Retention: once [wellness] detail_years has pruned a store, rows older than
+its detail cutoff are dropped ("past_retention"); those days are frozen
+(store.py).
+
 Zone offsets (store.py has the day model): a bucket group's offset_s is the
 offset at its day's midnight and is stored as the day's; a session or reading
 carries the offset at its own time, which fills a day nobody stated yet or,
@@ -251,6 +255,10 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                 else:
                     st.record_epoch(conn, epoch, enrollment_id, device_id, model, now_ms)
                     offsets = st.offsets(conn)
+                    cutoff = st.detail_cutoff(conn)
+
+                    def too_old(ts: int) -> bool:
+                        return cutoff is not None and ts < cutoff
                     ids = {}
                     for o in batch.origins:
                         ids[o.key] = st.ensure_origin(conn, o.model_dump(), now=now_ms)
@@ -331,6 +339,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             if row[0] > future:
                                 drop("future")
                                 continue
+                            if too_old(row[0]):
+                                drop("past_retention")
+                                continue
                             rows.append([int(row[0])] + list(row[1:]))
                             flags.append(_bucket_flag(g.metric, g.grain, row))
                         if g.replace_day:
@@ -364,6 +375,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             continue
                         if s.end > future or s.start > future:
                             drop("future")
+                            continue
+                        if too_old(s.end):
+                            drop("past_retention")
                             continue
                         flag = 0
                         hours = (s.end - s.start) / 3_600_000
@@ -419,6 +433,9 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             continue
                         if r.t > future:
                             drop("future")
+                            continue
+                        if too_old(r.t):
+                            drop("past_retention")
                             continue
                         flag = _reading_flag(r.metric, r.v, r.v2)
                         note_record(r.t, r.offset_s)

@@ -29,21 +29,34 @@ file when erase unlinks it.
 Only open_store(op_key) (create=True) ever creates the file. Every connection
 opens it with SQLite's mode=rw, so a store that erase unlinked is never
 brought back by a late writer or reader: they get StoreGone instead.
+
+Retention (spec §3.6, decision D7; Store.prune, prune_all, run hourly by
+Orchestrator/maintenance.py): with [wellness] detail_years set, buckets,
+sessions and readings older than that are deleted and the rollups, coverage,
+baselines and digests stay. The first day whose detail is kept is the
+"detail horizon" (meta); the days before it are frozen: nothing rebuilds
+them from the little detail left, and ingest drops rows for them
+("past_retention"). The horizon only moves forward. The ingest log rolls over
+at 90 days and the delivered log at 400, whatever the setting.
 """
 from __future__ import annotations
 
 import bisect
 import contextlib
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from Orchestrator.wellness import paths
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 DAY_MS = 86_400_000
@@ -97,6 +110,11 @@ CREATE INDEX IF NOT EXISTS delivered_turn ON delivered(turn_key);
 
 SIDECARS = ("-wal", "-shm", "-journal")
 
+# Retention (spec §3.6): the logs roll over whatever detail_years says.
+INGEST_LOG_KEEP_DAYS = 90
+DELIVERED_KEEP_DAYS = 400
+META_DETAIL_HORIZON = "detail_horizon"
+
 _LOCKS: Dict[str, threading.RLock] = {}
 _INITIALIZED: Set[str] = set()      # store files this process has applied the DDL to
 _LOCKS_GUARD = threading.Lock()
@@ -113,6 +131,10 @@ def write_lock(op_key: str) -> threading.RLock:
 
 def new_op_key() -> str:
     return secrets.token_hex(8)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 # ------------------------------------------------------------------ time
@@ -146,6 +168,16 @@ def add_days(day: str, n: int) -> str:
 def day_range(first: str, last: str) -> List[str]:
     a, b = date.fromisoformat(first), date.fromisoformat(last)
     return [(a + timedelta(days=i)).isoformat() for i in range((b - a).days + 1)]
+
+
+def detail_horizon_day(today: str, years: int) -> str:
+    """The first local day a `years` retention keeps: the same date `years`
+    earlier (29 February falls back to the 28th)."""
+    d = date.fromisoformat(today)
+    try:
+        return d.replace(year=d.year - years).isoformat()
+    except ValueError:
+        return d.replace(year=d.year - years, day=28).isoformat()
 
 
 class Offsets:
@@ -636,6 +668,55 @@ class Store:
                      "status, dropped) VALUES (?,?,?,?,?,?,?)",
                      (batch_id, received_at, epoch, n_rows, n_deleted, status, _dumps(dropped)))
 
+    # -- retention --------------------------------------------------------------
+
+    def detail_horizon(self, conn: Optional[sqlite3.Connection] = None) -> Optional[str]:
+        """The first local day whose detail is kept, once retention has pruned
+        (None: everything is kept). The days before it are frozen."""
+        if conn is None:
+            return self.meta_get(META_DETAIL_HORIZON)
+        row = conn.execute("SELECT value FROM meta WHERE key=?",
+                           (META_DETAIL_HORIZON,)).fetchone()
+        return _loads(row[0]) if row else None
+
+    def detail_cutoff(self, conn: sqlite3.Connection) -> Optional[int]:
+        """The instant before which no detail is kept: the start of the day
+        before the horizon (the horizon's night needs that evening)."""
+        horizon = self.detail_horizon(conn)
+        if horizon is None:
+            return None
+        return self.offsets(conn).bounds(add_days(horizon, -1))[0]
+
+    def prune(self, now_ms: int, detail_years: Optional[int]) -> Dict[str, int]:
+        """Apply retention once. Returns counts of rows removed."""
+        counts = dict.fromkeys(("buckets", "sessions", "readings", "ingest_log", "delivered"), 0)
+        with self.write() as conn:
+            counts["ingest_log"] = conn.execute(
+                "DELETE FROM ingest_log WHERE received_at<?",
+                (now_ms - INGEST_LOG_KEEP_DAYS * DAY_MS,)).rowcount
+            counts["delivered"] = conn.execute(
+                "DELETE FROM delivered WHERE ts<?",
+                (now_ms - DELIVERED_KEEP_DAYS * DAY_MS,)).rowcount
+            if not detail_years:
+                return counts
+            offsets = self.offsets(conn)
+            old = self.detail_horizon(conn)
+            horizon = detail_horizon_day(offsets.day_of(now_ms), int(detail_years))
+            if old is not None and old > horizon:
+                horizon = old              # a longer setting cannot bring detail back
+            cutoff = offsets.bounds(add_days(horizon, -1))[0]
+            counts["buckets"] = conn.execute("DELETE FROM bucket WHERE ts<?",
+                                             (cutoff,)).rowcount
+            conn.execute("DELETE FROM stage WHERE (epoch, hc_id) IN "
+                         "(SELECT epoch, hc_id FROM session WHERE end_ts<?)", (cutoff,))
+            counts["sessions"] = conn.execute("DELETE FROM session WHERE end_ts<?",
+                                              (cutoff,)).rowcount
+            counts["readings"] = conn.execute("DELETE FROM reading WHERE ts<?",
+                                              (cutoff,)).rowcount
+            if horizon != old:
+                self.meta_set(META_DETAIL_HORIZON, horizon, conn=conn)
+        return counts
+
     def ingest_stats(self) -> dict:
         with self.read() as conn:
             n, rows, last = conn.execute("SELECT COUNT(*), COALESCE(SUM(n_rows), 0), "
@@ -837,6 +918,44 @@ def _effective(rows: List[dict], offsets: Offsets, ts_key: str, key: str = "metr
         if r["epoch"] > best.get(k, -1):
             best[k] = r["epoch"]
     return [r for r, day in zip(rows, days) if r["epoch"] == best[(day, r.get(key))]]
+
+
+_FROM_CONFIG = object()
+
+
+def prune_all(now_ms: Optional[int] = None, detail_years=_FROM_CONFIG) -> Dict[str, int]:
+    """The retention pass over every store file in data/wellness/ (the
+    operator's, a detached one, one no enrollment names). Logs one line of
+    counts when it removed anything; never a value or an op_key."""
+    if now_ms is None:
+        now_ms = _now_ms()
+    if detail_years is _FROM_CONFIG:
+        from Orchestrator import config
+        detail_years = config.wellness_detail_years()
+    total = dict.fromkeys(("stores", "buckets", "sessions", "readings", "ingest_log",
+                           "delivered"), 0)
+    d = paths.data_dir()
+    if not d.is_dir():
+        return total
+    for p in sorted(d.iterdir()):
+        if not (p.is_file() and p.suffix == ".db" and paths.valid_op_key(p.stem)):
+            continue
+        try:
+            counts = Store(p.stem).init(create=False).prune(now_ms, detail_years)
+        except StoreGone:
+            continue                     # erased while the pass ran
+        except sqlite3.Error as e:
+            logger.warning("[WELLNESS] retention skipped a store: %s", type(e).__name__)
+            continue
+        total["stores"] += 1
+        for k, v in counts.items():
+            total[k] += v
+    if any(v for k, v in total.items() if k != "stores"):
+        logger.info("[WELLNESS] retention stores=%d buckets=%d sessions=%d readings=%d "
+                    "ingest_log=%d delivered=%d", total["stores"], total["buckets"],
+                    total["sessions"], total["readings"], total["ingest_log"],
+                    total["delivered"])
+    return total
 
 
 def open_store(op_key: str, create: bool = True) -> Store:

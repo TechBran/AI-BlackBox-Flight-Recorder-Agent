@@ -34,6 +34,9 @@ touches, and nothing else).
 
 Local times (07:00, 03:00-14:00, the bedtime) are wall-clock times read
 through the store's Offsets, so a 23- or 25-hour day keeps them.
+
+Days before the store's detail horizon (retention pruned their detail) are
+frozen: recompute neither rebuilds nor drops them.
 """
 from __future__ import annotations
 
@@ -444,6 +447,11 @@ def recompute(store: Store, dirty_days: Iterable[str], *, now_ms: int,
     if not dirty:
         return {"days": 0, "baselines": 0}
     with store.write() as conn:
+        horizon = store.detail_horizon(conn)
+        if horizon is not None:
+            dirty = [d for d in dirty if d >= horizon]
+            if not dirty:
+                return {"days": 0, "baselines": 0}
         offsets = store.offsets(conn)
         origins = {r["origin_id"]: dict(r) for r in conn.execute("SELECT * FROM origin")}
         span = store.data_span(conn)
@@ -454,6 +462,8 @@ def recompute(store: Store, dirty_days: Iterable[str], *, now_ms: int,
                 conn.execute("DELETE FROM coverage_day WHERE local_day=?", (d,))
             return {"days": 0, "baselines": 0}
         first, last = span
+        if horizon is not None and first < horizon:
+            first = horizon                # the margin day before it is frozen too
         done: Set[str] = set()
         modes: Dict[str, Optional[str]] = {}
 

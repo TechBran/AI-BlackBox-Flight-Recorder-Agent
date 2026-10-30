@@ -202,6 +202,24 @@ def wellness_simulator_port() -> int:
     return port if 1 <= port <= 65535 else 8765
 
 
+WELLNESS_DETAIL_YEARS_MAX = 100
+
+
+def wellness_detail_years() -> "typing.Optional[int]":
+    """[wellness] detail_years (decision D7): keep each operator's buckets,
+    sessions and readings this many years; rollups and coverage stay. Unset,
+    empty, unreadable, or anything but a whole number from 1 to 100 means
+    keep forever (a typo never deletes health data)."""
+    cfg = _wellness_section()
+    if cfg is None:
+        return None
+    raw = (cfg.get("wellness", "detail_years", fallback="") or "").strip()
+    if not raw.isdigit():
+        return None
+    years = int(raw)
+    return years if 1 <= years <= WELLNESS_DETAIL_YEARS_MAX else None
+
+
 AUDIO_ENGINE  = CFG.get("audio","engine",fallback="auto").strip().lower()
 # Quality-first fallback (matches config.ini.template): the box default for every
 # client now that the Portal and Android no longer pin their own OpenAI model.
