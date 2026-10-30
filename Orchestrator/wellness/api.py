@@ -2,7 +2,8 @@
 §10 "generous once consented" deltas). Wave 2 wraps each in a ToolVault
 executor that runs the gate first and passes the categories it allows.
 
-  sources()                      what feeds the store; no health values
+  sources()                      what feeds the store, and whether the box's
+                                 disk is encrypted; no health values
   summary(period, categories)    every consented metric for a period, with its
                                  usual range, coverage and the notable sessions
   series(metric, range|start/end, granularity, stat)   up to 365 days, <= 120 points
@@ -37,7 +38,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from Orchestrator.wellness import catalog, coverage as cov, enroll, rollups, store as store_mod
+from Orchestrator.wellness import catalog, coverage as cov, enroll, fde, rollups, \
+    store as store_mod
 from Orchestrator.wellness.store import add_days, day_range
 
 CHARS_PER_TOKEN = 4
@@ -838,6 +840,7 @@ def sources(operator: str, *, now_ms: Optional[int] = None, delivery: Optional[D
         "sync_mode": "background" if catalog.PERMISSION_BACKGROUND in granted
         else "when BlackBox is open",
         "providers_allowed": ctx.record.get("providers_allowed") or [],
+        "fde": fde.status(),
         "samsung_only": "Sleep score, Energy Score, stress and ECG stay in Samsung Health; "
                         "BlackBox can't read them yet."})
     return _finish(ctx, env, tool, {}, [], delivery, budget_tokens)

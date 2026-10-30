@@ -52,7 +52,8 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
-from Orchestrator.wellness import (api, catalog, enroll, erase, ingest, origin_proof, schema)
+from Orchestrator.wellness import (api, catalog, enroll, erase, fde, ingest, origin_proof,
+                                   schema)
 from Orchestrator.wellness import store as store_mod
 
 logger = logging.getLogger(__name__)
@@ -194,7 +195,8 @@ def _minimal_status(operator: str) -> dict:
 def full_status(operator: str, *, now_ms: Optional[int] = None) -> dict:
     """The settings view. `troubles` is the list of trouble codes (spec §3.5's
     vocabulary, e.g. "stale_sync", "permission_revoked:sleep");
-    `trouble_details` carries the same troubles with their wording."""
+    `trouble_details` carries the same troubles with their wording; `fde`
+    is whether the box's disk is encrypted (wellness/fde.py)."""
     now_ms = _now_ms() if now_ms is None else now_ms
     rec = enroll.get_enrollment(operator) or {}
     out = _minimal_status(operator)
@@ -223,6 +225,7 @@ def full_status(operator: str, *, now_ms: Optional[int] = None) -> dict:
         "replace_pending": bool(rec.get("pending")),
         "policy_version": catalog.POLICY_VERSION,
         "disclosures_count": disclosures,
+        "fde": fde.status(),
     })
     return out
 
@@ -233,7 +236,7 @@ def _store_view(st, now_ms: int, wear: dict, sync: dict) -> None:
     if st is None:
         return
     add_days = store_mod.add_days
-    today = enroll.iso(now_ms)[:10]
+    today = st.offsets().day_of(now_ms)        # the local day, not the UTC date
     days = st.coverage_days(add_days(today, -7), today)
     if days:
         wear["hr_mode"] = days[max(days)].get("hr_mode")
@@ -519,10 +522,17 @@ def wellness_disclosures(request: Request, raw: RawBody = Depends(_capped(SMALL_
         return _json(403, {"error": "not_allowed"})
     st = enroll.store_for(signed.record, create=False)
     try:
-        rows = st.disclosures(limit=200) if st is not None else []
-        offset = st.offsets().latest() if st is not None else 0
+        rows = disclosure_log(st) if st is not None else []
     except store_mod.StoreGone:
-        rows, offset = [], 0
-    return {"disclosures": [{"time": api.local_iso(r["ts"], offset), "surface": r["surface"],
-                             "provider": r["provider"], "model": r["model"], "tool": r["tool"],
-                             "categories": r["categories"]} for r in rows]}
+        rows = []
+    return {"disclosures": rows}
+
+
+def disclosure_log(st) -> list:
+    """The newest 200 deliveries, each time shown with the offset of its own
+    day (may raise StoreGone)."""
+    offsets = st.offsets()
+    return [{"time": api.local_iso(r["ts"], offsets.offset_at(r["ts"])),
+             "surface": r["surface"], "provider": r["provider"], "model": r["model"],
+             "tool": r["tool"], "categories": r["categories"]}
+            for r in st.disclosures(limit=200)]
