@@ -21,6 +21,7 @@ from Orchestrator.secret_redaction import redact
 from Orchestrator.browser.dispatch import resolve_backend
 from Orchestrator.onboarding import custom_servers
 from Orchestrator import config as _config
+from Orchestrator.wellness import access as wellness_access, turn as wellness_turn
 
 from Orchestrator.routes.chat.context import (
     _checked_operator,
@@ -160,11 +161,15 @@ class StreamRequest:
     location: Optional[dict]      # M1 per-turn location ride-along
 
 
-def _resolve_stream_request(body: dict):
+def _resolve_stream_request(body: dict, signed=None):
     """The StreamRequest for a POST /chat/stream body, or the 400 JSONResponse.
 
     Stamps the request-scoped origin device (M3) and the turn's carried
-    location (M1) as it goes, in the order the route always did."""
+    location (M1) as it goes, in the order the route always did, and last
+    the turn's WellnessTurn (M7), once the media auto-route and the model
+    resolution have settled who will read the answer. ``signed`` is the
+    request's verified X-BlackBox-Origin (the enrolled phone's device key;
+    wellness_access.origin_from_request), the only credential a turn holds."""
     messages = body.get("messages", [])
     provider = body.get("provider") or _config.DEFAULT_PROVIDER
     model = body.get("model")
@@ -222,6 +227,13 @@ def _resolve_stream_request(body: dict):
         # resolver /chat, cron and SMS use); a retired Claude id -> its
         # successor. An unknown provider falls through to Gemini below.
         model = _config.resolve_default_model(provider, model)
+    # M7: the turn's health-data context, request-scoped like the origin device
+    # (the context build's and the tool loop's threads copy it). It carries the
+    # turn key the delivered rows and the mask join on (turn.current()).
+    wellness_turn.stamp(wellness_access.request_turn(
+        operator=operator, provider=provider, model=model, signed=signed,
+        origin_device_id=body.get("origin_device_id"),
+        declared=body.get(wellness_access.DECLARED_KEY)))
     return StreamRequest(messages=messages, provider=provider, model=model, operator=operator,
                          guard=guard, cu_session_id=cu_session_id, cu_device_id=cu_device_id,
                          location=turn_location)
@@ -279,7 +291,7 @@ async def chat_stream_post(request: Request):
     """
     try:
         body = await request.json()
-        req = _resolve_stream_request(body)
+        req = _resolve_stream_request(body, await wellness_access.origin_from_request(request))
         if isinstance(req, JSONResponse):
             return req
 

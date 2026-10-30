@@ -15,6 +15,7 @@ from Orchestrator.startup import ChatIn
 from Orchestrator.config import set_current_operator
 from Orchestrator.models import TaskType
 from Orchestrator.tasks import create_task
+from Orchestrator.wellness import access as wellness_access
 
 from Orchestrator.routes.chat.context import _checked_operator
 
@@ -26,6 +27,9 @@ from Orchestrator.routes.chat.context import _checked_operator
 async def chat_async(request: Request):
     """Async chat endpoint - creates a task and returns task ID immediately"""
     try:
+        # M7: a verified X-BlackBox-Origin (the enrolled phone's device key,
+        # over the exact body bytes) is read before the body is parsed.
+        signed = await wellness_access.origin_from_request(request)
         # Parse request
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
@@ -62,6 +66,15 @@ async def chat_async(request: Request):
         # request would be gone by then. inp_dict carries origin_device_id into
         # result_data and tasks.stamp_origin_device() stamps it on the worker,
         # unconditionally, right before the provider dispatch that reads it.
+
+        # M7: the same holds for the WellnessTurn: the worker stamps it
+        # (wellness_access.task_turn). A verified request reaches the worker
+        # only as a one-use in-memory grant; a grant field the client sent is
+        # dropped, so nothing in a body can claim a credential.
+        inp_dict.pop(wellness_access.GRANT_KEY, None)
+        grant = wellness_access.issue_grant(signed, active_operator)
+        if grant:
+            inp_dict[wellness_access.GRANT_KEY] = grant
 
         # Create async task
         task = create_task(

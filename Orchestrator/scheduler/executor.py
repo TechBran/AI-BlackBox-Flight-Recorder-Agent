@@ -385,6 +385,11 @@ async def execute_cron_job(job: Dict[str, Any]) -> str:
         "provider": provider,
         "model": resolved_model,
         "operator": operator,
+        # M7: a cron turn says so, so the health gate treats it as one: only a
+        # wellness template job created from the enrolled phone (M7.3) may
+        # read health data, never an ordinary job (Orchestrator/wellness/access).
+        "wellness_surface": "cron",
+        "cron_job_id": job.get("id"),
     }
 
     # ------------------------------------------------------------------

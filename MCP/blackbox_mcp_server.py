@@ -1253,7 +1253,10 @@ async def call_tool(name: str, arguments: dict[str, Any]):
                 payload = {
                     "operator": operator,
                     "messages": [{"role": "user", "content": message}],
-                    "provider": provider
+                    "provider": provider,
+                    # An MCP turn says so: health data is never read for an
+                    # MCP client in v1, household mode or not (spec §4.5).
+                    "wellness_surface": "mcp",
                 }
                 if model:
                     payload["model"] = model

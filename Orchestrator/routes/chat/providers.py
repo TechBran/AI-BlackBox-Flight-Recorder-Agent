@@ -36,6 +36,7 @@ from Orchestrator.tools.tool_registry import (
     get_gemini_rest_tools,
 )
 from Orchestrator.config import TOOLVAULT_ENABLED
+from Orchestrator.wellness import access as wellness_access
 
 from Orchestrator.routes.chat.context import (
     _ORIGIN_DEVICE_ID,
@@ -152,11 +153,16 @@ def _get_tools(provider: str, prompt: str = "", group: str = "chat") -> list:
     """Get tools for an API call — dynamic (ToolVault) or static (legacy).
 
     When TOOLVAULT_ENABLED=true, uses semantic search to inject only
-    the tools relevant to this specific prompt.
+    the tools relevant to this specific prompt. The injection gets the
+    turn's ToolContext (wellness_access.tool_context: the stamped turn's
+    operator and surface, this request's origin device, ``provider``), which
+    is what the operator-scoped tools (health data) are decided on; the
+    static fallback never carries them.
     """
     if TOOLVAULT_ENABLED and prompt.strip():
         from Orchestrator.toolvault.injector import inject_for_prompt
-        tools, _instructions = inject_for_prompt(prompt, provider, group)
+        ctx = wellness_access.tool_context(provider, origin_device_id=_ORIGIN_DEVICE_ID.get())
+        tools, _instructions = inject_for_prompt(prompt, provider, group, ctx=ctx)
         _inject_cache["prompt"] = prompt
         _inject_cache["provider"] = provider
         _inject_cache["group"] = group

@@ -35,6 +35,7 @@ from Orchestrator.media import get_recent_media_artifacts
 from Orchestrator.behavioral_core import PERSONA_PREF_KEY
 from Orchestrator.providers.common import _last_user_msg
 from Orchestrator.config import TOOLVAULT_ENABLED
+from Orchestrator.wellness import access as wellness_access
 
 
 # -----------------------------------------------------------------------------
@@ -477,13 +478,22 @@ def build_streaming_context(messages: list, operator: str, provider: str = "open
     except Exception:
         pass
 
-    # Build system prompt — TOOLVAULT_ENABLED injects dynamic tool instructions
+    # Build system prompt — TOOLVAULT_ENABLED injects dynamic tool instructions.
+    # The injection gets the turn's ToolContext (the stamped WellnessTurn's
+    # operator and surface, the origin device, this provider): with a wellness
+    # tool offered, the instructions carry the WELLNESS RULES and the
+    # operator's instinct prompt; for an enrolled operator on a provider their
+    # health data is not shared with, the one "not shared with this AI" line
+    # (toolvault injector -> Orchestrator/wellness/access.instructions).
     from Orchestrator.tasks import build_core_system_prompt
     if TOOLVAULT_ENABLED:
         from Orchestrator.toolvault.injector import inject_for_prompt
         user_text_sp = _last_user_msg(messages)
         if user_text_sp:
-            _, tool_instructions = inject_for_prompt(user_text_sp, provider or "openai")
+            _, tool_instructions = inject_for_prompt(
+                user_text_sp, provider or "openai",
+                ctx=wellness_access.tool_context(provider or "openai",
+                                                 origin_device_id=_ORIGIN_DEVICE_ID.get()))
             system_prompt = build_core_system_prompt(tool_instructions, operator=operator)
         else:
             system_prompt = build_core_system_prompt("", operator=operator)

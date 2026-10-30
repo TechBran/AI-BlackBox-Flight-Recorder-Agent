@@ -50,6 +50,7 @@ from Orchestrator.media_relocation import relocate_reference_images
 from Orchestrator.image_providers import IMAGE_PROVIDERS, DEFAULT_IMAGE_PROVIDER, OPENAI_IMAGE_MODEL, XAI_IMAGE_MODEL
 from Orchestrator.reply_envelope import unwrap_reply_envelope
 from Orchestrator import tool_outcomes
+from Orchestrator.wellness import access as wellness_access, turn as wellness_turn
 from Orchestrator.turn_persistence import MintGate, persist_turn_and_maybe_mint_blocking
 # process_chat_task's MintGate.of(this module) also reads perform_mint,
 # should_create_checkpoint and the AUTO_ENABLE / ON_RED / ON_YELLOW /
@@ -871,6 +872,10 @@ def process_task(task: Task):
         # worker's: no status write, and its cancel bookkeeping stays with the route.
         print(f"[WORKER] Skipping {task.task_type} task {task.task_id} (handled by async route)")
         return
+    # M7: a pooled worker thread never carries a health-data turn into a task
+    # (Computer Use, CLI agents, media, checkpoints: never); a chat task stamps
+    # its own (process_chat_task).
+    wellness_turn.clear()
     try:
         update_task(task.task_id, status=TaskStatus.PROCESSING, progress=10)
         # A task cancelled while queued (PENDING) never runs; one cancelled at
@@ -2244,6 +2249,9 @@ def process_chat_task(task: Task):
         # turn whose tools failed from one that worked. Fresh every task: pooled
         # worker threads are reused (same reason as the origin stamp above).
         _tool_log = tool_outcomes.begin()
+        # M7: no WellnessTurn until this turn stamps its own, below (pooled
+        # worker threads are reused: same reason as the two above).
+        wellness_turn.clear()
 
         if not inp.messages:
             raise Exception("The 'messages' field is required and cannot be empty.")
@@ -2302,6 +2310,15 @@ def process_chat_task(task: Task):
         if cu_fallback:
             provider = "anthropic"
             print("[AUTO-ROUTE] Switched from computer-use to anthropic (non-streaming fallback)")
+
+        # M7: this turn's WellnessTurn, for the provider that runs it (re-pointed
+        # at the resolved model below). An SMS or peer turn is "sms" (never), a
+        # cron or MCP turn what it declares, a turn POST /chat verified the
+        # enrolled phone's (wellness_access.task_turn). The worker holds the
+        # turn key in-process for the mask (turn.current().turn_key).
+        wellness_turn.stamp(wellness_access.task_turn(
+            inp_dict, active_operator, provider,
+            None if provider_switched else (inp.model or None)))
 
         update_task(task.task_id, progress=20)
 
@@ -2370,7 +2387,14 @@ def process_chat_task(task: Task):
             _user_msg = _last_user_msg(inp.messages)
             if _user_msg:
                 from Orchestrator.toolvault.injector import inject_for_prompt
-                _, tool_instructions = inject_for_prompt(_user_msg, inp.provider or DEFAULT_PROVIDER)
+                from Orchestrator.routes.chat_routes import _ORIGIN_DEVICE_ID
+                # The turn's ToolContext (the stamped WellnessTurn, the origin
+                # device, the provider that runs): what the health-data tools,
+                # their rules and the not-shared line are decided on.
+                _, tool_instructions = inject_for_prompt(
+                    _user_msg, inp.provider or DEFAULT_PROVIDER,
+                    ctx=wellness_access.tool_context(provider,
+                                                     origin_device_id=_ORIGIN_DEVICE_ID.get()))
                 dynamic_core = build_core_system_prompt(tool_instructions, operator=active_operator)
             else:
                 dynamic_core = build_core_system_prompt("", operator=active_operator)
@@ -2405,6 +2429,9 @@ def process_chat_task(task: Task):
                 if _discovered:
                     selected_model = custom_servers.qualify(_custom_server.get("alias", ""), _discovered[0])
         else: raise Exception(f"unknown provider: {provider}")
+        _wt = wellness_turn.current()
+        if _wt is not None:
+            wellness_turn.stamp(_wt.with_route(provider, selected_model))
 
         with state_lock:
             # The turn's provenance and usage are recorded with the turn
@@ -2707,6 +2734,7 @@ def process_chat_task(task: Task):
                    progress=0)
     finally:
         tool_outcomes.end()
+        wellness_turn.clear()
 
 # -----------------------------------------------------------------------------
 # Helpers

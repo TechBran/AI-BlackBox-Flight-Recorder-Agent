@@ -38,6 +38,7 @@ from Orchestrator.tools.blackbox_tools import execute_tool
 from Orchestrator.toolvault import meta_tool
 from Orchestrator.toolvault.context import ON_DEVICE_CALLER
 from Orchestrator.utils.operators import InvalidOperatorName, validate_operator
+from Orchestrator.wellness import access as wellness_access, turn as wellness_turn
 
 # The MCP remote gateway (MCP/blackbox_mcp_server.py) REUSES POST /local/tools/execute
 # to run the FULL ToolVault catalog for frontier models (locked decision,
@@ -92,6 +93,15 @@ LOCAL_MODELS = [
 # Reason string returned when the provider is not available for the operator —
 # the picker shows this when there is no verified device binding.
 _LOCAL_UNAVAILABLE_REASON = "no verified on-device model"
+
+
+def _stamp_on_device_turn(operator: str, signed):
+    """Stamp an on-device turn's WellnessTurn (M7) and return the token that
+    clears it: surface on_device, provider "local", a fresh turn key, the
+    credential only when ``signed`` is this operator's enrolled phone."""
+    return wellness_turn.stamp(wellness_access.request_turn(
+        operator=operator, provider="local", model=None, signed=signed,
+        surface=wellness_turn.SURFACE_ON_DEVICE))
 
 
 def build_local_models_response(operator: Optional[str]) -> dict:
@@ -320,6 +330,12 @@ async def local_turn_prepare(request: Request):
     # semantic retrieval for an empty user_text).
     prompt = body.get("prompt") or ""
 
+    # M7: the turn's WellnessTurn (surface on_device, provider "local"; the
+    # credential is a verified X-BlackBox-Origin of this operator's enrolled
+    # phone). The retrieval and injection threads copy it. In v1 the on-device
+    # model is offered no wellness tool: build_injected_tools discovers with no
+    # ToolContext and /local/tools/execute refuses (caller "local").
+    token = _stamp_on_device_turn(operator.strip(), await wellness_access.origin_from_request(request))
     try:
         # Lean LOCAL profile (tools-only posture): we NO LONGER push memory into the
         # phone's small window. RECENT and KEYWORD blocks are off, RECENT MEDIA is off
@@ -372,6 +388,8 @@ async def local_turn_prepare(request: Request):
     except Exception as e:
         print(f"[LOCAL PROVIDER] turn/prepare failed: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+    finally:
+        wellness_turn.clear(token)
 
 
 # ---------------------------------------------------------------------------
@@ -423,11 +441,17 @@ async def local_turn_complete(request: Request):
     # state/mint/task deps; importing it at module top here would create a cycle.
     from Orchestrator.routes.chat_routes import persist_local_turn_and_mint
 
-    result = await persist_local_turn_and_mint(
-        operator, prompt, final_response,
-        tool_transcript=body.get("tool_transcript"),
-        provenance=body.get("provenance"),
-    )
+    # M7: the on-device turn's WellnessTurn while it is recorded (the
+    # [TOOLS USED] mask reads turn.current()); see local_turn_prepare.
+    token = _stamp_on_device_turn(operator, await wellness_access.origin_from_request(request))
+    try:
+        result = await persist_local_turn_and_mint(
+            operator, prompt, final_response,
+            tool_transcript=body.get("tool_transcript"),
+            provenance=body.get("provenance"),
+        )
+    finally:
+        wellness_turn.clear(token)
     if result.get("error"):
         return JSONResponse({"success": False, "error": result["error"]}, status_code=500)
     return {
