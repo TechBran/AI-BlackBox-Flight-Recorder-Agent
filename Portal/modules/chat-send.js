@@ -2568,7 +2568,9 @@ export async function send() {
         // turn gets them from its wellness_used frames. Absent, nothing changes.
         const wellness = wellnessFromReply(reply);
         if (wellness && wellness.wellness_used && !wellness.wellness_used.source_label) {
-            wellness.wellness_used.source_label = lastSourceLabel() || null;
+            // The label of the turn's own operator (the poll can outlast an
+            // operator switch), else "your phone".
+            wellness.wellness_used.source_label = lastSourceLabel(payload.operator) || null;
         }
 
         localStorage.setItem("bb_last_response", JSON.stringify({

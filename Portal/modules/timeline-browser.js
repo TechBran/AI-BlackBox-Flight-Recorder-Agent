@@ -319,6 +319,9 @@ export async function openSnapshotById(snapId) {
             toastError('Snapshot ' + id + ' not found in volume');
             return false;
         }
+        // A signed read for an operator no longer selected is dropped (see
+        // showTimelineDetail).
+        if (detail.signedFor && detail.signedFor !== getOperator()) return false;
         await showTimelineDetail(detail);
         return true;
     } catch (e) {
@@ -489,6 +492,14 @@ export async function showTimelineDetail(snapshot) {
             console.error('[TIMELINE] Failed to load snapshot', snapshot.snapId, e);
         }
         if (request !== detailRequestSeq) return;  // another snapshot was opened meanwhile
+        // The operator changed while a signed read was in flight: that read
+        // was for whoever was selected when it went out, never for whoever
+        // is selected now (readFor and toggleNumbers re-check the same way
+        // after their await). Nothing of it is shown or kept.
+        if (detail && detail.signedFor && detail.signedFor !== getOperator()) {
+            closeSnapshotPopup({ clear: true });
+            return;
+        }
         if (!detail) {
             popupBody.innerHTML = '<div class="timeline-loading">This snapshot could not be loaded</div>';
             toastError('Snapshot ' + snapshot.snapId + ' could not be loaded');
@@ -515,7 +526,9 @@ function closeSnapshotPopup({ clear = false } = {}) {
     const popupBody = $("snapshotPopupBody");
     closeWellnessNumbersIn(popupBody);
     if (popup) popup.classList.add('hide');
-    if (clear && popupBody) popupBody.replaceChildren();
+    // A signed read (the owner's masked turn) never stays in the page once
+    // its popup is closed, hidden or not: the next open renders afresh.
+    if ((clear || popupSignedFor) && popupBody) popupBody.replaceChildren();
     popupSignedFor = null;
 }
 

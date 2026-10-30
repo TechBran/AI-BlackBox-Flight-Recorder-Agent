@@ -709,9 +709,10 @@ export function wellnessRefsOf(entry) {
 }
 
 // The box's WELLNESS gauge line (Orchestrator/wellness/redact.py _GAUGE_RE)
-// and a ref in it (api.new_ref: "w-<day>-" and 4, or after collisions 8, hex).
+// and a ref in it (api.new_ref: "w-<day>-" and 8, or after collisions 16, hex;
+// older deliveries carry 4; the app accepts 4 to 16 the same way).
 const GAUGE_LINE = /^WELLNESS: ([^\n]+?) · values not recorded[ \t]*$/m;
-const GAUGE_REF = /^w-\d{8}-(?:[0-9a-f]{4}|[0-9a-f]{8})$/;
+const GAUGE_REF = /^w-\d{8}-[0-9a-f]{4,16}$/;
 
 /** A snapshot's header GAUGES block ("GAUGES" up to the blank line), or ''. */
 function gaugesBlock(text) {

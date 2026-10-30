@@ -317,3 +317,51 @@ test("timeline-browser.js writes the popup with escaped markup only", () => {
         }
     }
 });
+
+// ── An operator switch while a signed read is in flight ─────────────────────
+
+const ITEM = () => ({ snapId: SNAP, operator: ME, timestamp: "2026-10-29T11:20:00Z", type: "normal", preview: "", content: null });
+const switchTo = (operator) => {
+    state.setOperator(operator);
+    window.dispatchEvent(new CustomEvent("bbx:operator-changed", { detail: { operator } }));
+};
+
+test("an operator switch while the signed read is in flight drops it: the popup closes empty, nothing is kept", async (t) => {
+    reset(t);
+    installChannel(fakeChannel({ delayMs: 50 }));       // the app takes 50 ms to sign
+    box();
+    const item = ITEM();
+    const p = tl.showTimelineDetail(item);
+    await settle(10);
+    switchTo("other-human");
+    await p;
+    assert.equal(popup().classList.contains("hide"), true);
+    assert.equal(body().textContent.trim(), "");
+    assert.equal(body().querySelector(".wellness-show-numbers"), null);
+    assert.equal(item.content, null);
+});
+
+test("the same through a SNAP-id link: the read is dropped and the link reports nothing opened", async (t) => {
+    reset(t);
+    installChannel(fakeChannel({ delayMs: 50 }));
+    box();
+    const p = tl.openSnapshotById(SNAP);
+    await settle(10);
+    switchTo("other-human");
+    assert.equal(await p, false);
+    assert.equal(popup().classList.contains("hide"), true);
+    assert.equal(body().textContent.trim(), "");
+});
+
+test("closing a popup that showed a signed read empties it, so a later operator switch finds nothing", async (t) => {
+    reset(t);
+    installChannel(fakeChannel());
+    box();
+    assert.equal(await open(), true);
+    await waitFor(() => body().textContent.includes("how did I sleep?"), "the owner's turn");
+    document.getElementById("btnCloseSnapshotPopup").click();
+    assert.equal(popup().classList.contains("hide"), true);
+    assert.equal(body().textContent.trim(), "");
+    switchTo("other-human");
+    assert.equal(body().textContent.trim(), "");
+});

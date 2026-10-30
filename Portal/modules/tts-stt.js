@@ -297,7 +297,6 @@ function _queueSleep(ms, signal) {
     });
 }
 
-/** Fire-and-forget server-side cancel for a queue task. */
 // M7 (rules W26, W31, W32): the box refuses to voice a text that recalls the
 // operator's health results (POST /tts, /tts/batch, /tts/queue: 403
 // {"error": "wellness_text"}). That answer is final: the speaker says why,
@@ -308,6 +307,7 @@ function wellnessSpeechRefused() {
     return err;
 }
 
+/** Fire-and-forget server-side cancel for a queue task. */
 function cancelTtsQueueTask(taskId) {
     try {
         fetch(`/tts/task/${encodeURIComponent(taskId)}/cancel`,
