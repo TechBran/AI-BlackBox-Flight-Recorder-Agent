@@ -91,6 +91,36 @@ def test_end_to_end(sim_box):
                       "enrolled": False}
 
 
+def test_the_sim_reads_a_snapshot_as_the_phone_does(sim_box, isolated_stores, monkeypatch):
+    """`fossil` signs GET /fossil/snapshot/{id}?operator=... with the device
+    key: the owner's wellness turn comes back with its gauge and refs; the
+    same read unsigned shows it hidden; the text itself is never printed."""
+    from Orchestrator.tests.wellness_ledger_support import ledger_box, mint_turn
+    t, state, port = sim_box["t"], sim_box["state"], sim_box["port"]
+    SIM.register(t, state, operator=OPERATOR, ip=SIM_IP, port=port,
+                 pairing_file=paths.sim_pairing_path())
+    assert SIM.enroll(t, state, operator=OPERATOR, ip=SIM_IP, port=port,
+                      capability_report=FX.load("continuous_120")["capabilities"]
+                      )["status"] == 200
+    ledger_box(isolated_stores.root, monkeypatch)
+    sid = mint_turn(OPERATOR, "how did I sleep? I felt awful", "You slept [·].",
+                    wellness={"categories": ["sleep"], "labels": ["night of 2026-10-22"],
+                              "refs": ["w-20261028-0a0a"]})
+    signed = SIM.fossil(t, state, snap_id=sid)
+    assert signed["status"] == 200 and signed["snap_id"] == sid and not signed["hidden"]
+    assert signed["wellness_gauge"].startswith("WELLNESS: sleep · night of 2026-10-22 · ref ")
+    assert signed["refs"] == ["w-20261028-0a0a"] and signed["error"] is None
+    unsigned = SIM.fossil(t, state, snap_id=sid, signed=False)
+    assert unsigned["status"] == 200 and unsigned["hidden"] and unsigned["wellness_gauge"] is None
+    assert unsigned["refs"] == []
+    assert "awful" not in json.dumps(signed) + json.dumps(unsigned)
+    mismatch = SIM.fossil(t, state, snap_id=sid, operator="other-human")
+    assert mismatch["status"] == 400 and mismatch["error"] == "operator_mismatch"
+    assert SIM.exit_code("fossil", mismatch) == 1 and SIM.exit_code("fossil", signed) == 0
+    assert SIM.fossil(t, SIM.State(isolated_stores.root / "empty"), snap_id=sid) == \
+        {"status": 0, "error": "not_enrolled"}
+
+
 def test_simulator_mode_is_off_by_default(sim_box):
     t, state, port = sim_box["t"], sim_box["state"], sim_box["port"]
     SIM.register(t, state, operator=OPERATOR, ip=SIM_IP, port=port,

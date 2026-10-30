@@ -21,6 +21,7 @@ a phone ONLY while config.ini has
     python3 scripts/wellness_sim_phone.py nudge-wait     # wait for the box's /wellness/sync
     python3 scripts/wellness_sim_phone.py chat --prompt "How did I sleep last night?"
     python3 scripts/wellness_sim_phone.py settings --providers anthropic
+    python3 scripts/wellness_sim_phone.py fossil --snap SNAP-20261030-0001 [--unsigned]
     python3 scripts/wellness_sim_phone.py unregister
 
 Subcommands:
@@ -64,6 +65,12 @@ Subcommands:
               signature (rule W21). Prints the signed status's providers_allowed,
               categories and local_only before and after, so a cloud tick for
               the evals is scriptable and undoable.
+  fossil      one GET /fossil/snapshot/{id}?operator=..., SIGNED with the device
+              key the way the app's Timeline and the Portal inside it read a
+              snapshot (--unsigned: as any other caller). Prints the status,
+              the WELLNESS gauge line and its refs (an owner's signed read of a
+              wellness turn) or hidden: true (anyone else, or unsigned); never
+              the snapshot text itself. `chat --save` prints the snap_id.
   unregister  removes the registry device, the sim pairing row and the state.
 
 State (the key, the enrollment, the intent nonce) lives in --state-dir,
@@ -444,6 +451,43 @@ def status(transport, state: State, operator: Optional[str] = None) -> Tuple[int
     return status_code, body
 
 
+HIDDEN = "[wellness conversation · not shared]"
+
+
+def _gauge(content: str) -> Optional[str]:
+    """The snapshot's WELLNESS gauge line, or None (none, or hidden)."""
+    for line in content.splitlines():
+        if line.startswith("WELLNESS: ") and line.rstrip().endswith(" · values not recorded"):
+            return line.rstrip()
+    return None
+
+
+def fossil(transport, state: State, *, snap_id: str, signed: bool = True,
+           operator: Optional[str] = None) -> dict:
+    """GET /fossil/snapshot/{id}?operator=..., signed with the device key the
+    way the app's Timeline and the Portal inside it read a snapshot (unsigned
+    with signed=False): {status, snap_id, wellness_gauge, refs, hidden,
+    error}. The owner's signed read of a wellness turn shows its gauge and
+    refs; an unsigned one shows the turn hidden. The snapshot text itself is
+    not printed (it holds the operator's own words)."""
+    signer = _signer(state) if signed else None
+    if signed and signer is None:
+        return {"status": 0, "error": "not_enrolled"}
+    op = operator or state.load().get("operator") or ""
+    path = (f"/fossil/snapshot/{urllib.parse.quote(snap_id, safe='')}?"
+            + urllib.parse.urlencode({"operator": op}))
+    code, _, body = _call(transport, "GET", path, signed=signer)
+    content = body.get("content") if isinstance(body.get("content"), str) else ""
+    gauge = _gauge(content)
+    refs = []
+    for part in (gauge or "").split(" · "):
+        if part.startswith("ref "):
+            refs = [r.strip() for r in part[4:].split(",") if r.strip() and r.strip() != "…"]
+    return {"status": code, "snap_id": body.get("snap_id"), "wellness_gauge": gauge,
+            "refs": refs, "hidden": HIDDEN in content,
+            "error": body.get("error") or (body.get("detail") if code >= 400 else None)}
+
+
 def nudge_wait(state: State, *, timeout_s: float, ip: str, port: int) -> Optional[float]:
     before = len(state.load().get("syncs") or [])
     server = None if _listening(ip, port) else start_listener(state, ip, port)
@@ -689,14 +733,20 @@ def build_parser() -> argparse.ArgumentParser:
                     help="'My Google key is on a paid plan'")
     st.add_argument("--instinct-prompt", default=None,
                     help='the health instinct prompt ("" = back to the default)')
+    fo = sub.add_parser("fossil", help="read one snapshot as the phone does (signed GET "
+                                        "/fossil/snapshot/{id})")
+    fo.add_argument("--snap", required=True, metavar="SNAP_ID")
+    fo.add_argument("--operator", default=None)
+    fo.add_argument("--unsigned", action="store_true", help="read it without the device key")
     sub.add_parser("unregister")
     return p
 
 
 def exit_code(cmd: str, out) -> int:
-    """Non-zero when the box refused: a settings change or a chat turn that
-    did not come back 200 (the cloud tick's restore must not fail quietly)."""
-    if cmd in ("settings", "chat") and isinstance(out, dict):
+    """Non-zero when the box refused: a settings change, a chat turn or a
+    snapshot read that did not come back 200 (the cloud tick's restore must
+    not fail quietly)."""
+    if cmd in ("settings", "chat", "fossil") and isinstance(out, dict):
         return 0 if out.get("status") == 200 and not out.get("error") else 1
     return 0
 
@@ -744,6 +794,9 @@ def main(argv=None) -> int:
                    model=args.model, save=args.save)
     elif args.cmd == "settings":
         out = settings(transport, state, operator=args.operator, **settings_kwargs(args))
+    elif args.cmd == "fossil":
+        out = fossil(transport, state, snap_id=args.snap, signed=not args.unsigned,
+                     operator=args.operator)
     else:
         unregister(transport, state, pairing_file)
         out = {"unregistered": True}
