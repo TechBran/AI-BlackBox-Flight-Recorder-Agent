@@ -81,36 +81,51 @@ def test_vectors_cover_the_required_shapes():
     """Every vector carries the contract's keys plus body_b64, the exact bytes
     that were signed: a gzip body is not text, so body_utf8 holds its
     decompressed JSON and content_encoding says it was sent compressed. For
-    every other vector body_b64 is the UTF-8 of body_utf8."""
+    every other vector body_b64 is the UTF-8 of body_utf8. request_target is
+    the path a client asks for (query included) and `path` the same without
+    the query; the set has a request with a query and one whose method is
+    spelled in lower case."""
     vectors = json.loads(VECTORS.read_text(encoding="utf-8"))
-    assert len(vectors) == 6
     for v in vectors:
         assert {"k_b64url", "enr", "ts", "nonce", "method", "path", "body_utf8",
-                "expected_sig", "body_b64", "content_encoding"} == set(v)
+                "expected_sig", "body_b64", "content_encoding", "request_target",
+                "canonical"} == set(v)
         raw = base64.b64decode(v["body_b64"])
         if v["content_encoding"] == "gzip":
             assert gzip.decompress(raw) == v["body_utf8"].encode("utf-8")
         else:
             assert v["content_encoding"] is None
             assert raw == v["body_utf8"].encode("utf-8")
+        assert v["request_target"].split("?", 1)[0] == v["path"] and "?" not in v["path"]
     bodies = [v["body_utf8"] for v in vectors]
     assert "" in bodies                                       # an empty body
     assert any(any(ord(c) > 127 for c in b) for b in bodies)  # unicode
     assert sum(v["content_encoding"] == "gzip" for v in vectors) == 1
-    assert {v["method"] for v in vectors} >= {"GET", "POST", "PUT"}
+    assert {v["method"].upper() for v in vectors} >= {"GET", "POST", "PUT"}
+    assert any("?" in v["request_target"] for v in vectors)   # a query string
+    assert any(v["method"] != v["method"].upper() for v in vectors)  # "get"
 
 
 def test_every_vector_verifies_and_reproduces():
+    """Each vector's signature is reproduced over its path and over its
+    request target (the query is not signed), its canonical string is the
+    box's, and verify_request accepts it however the client spelled the
+    method and the target."""
     for v in json.loads(VECTORS.read_text(encoding="utf-8")):
         body = base64.b64decode(v["body_b64"])
         key = op.decode_key(v["k_b64url"])
-        assert op.sign(key, v["enr"], v["ts"], v["nonce"], v["method"], v["path"], body) \
-            == v["expected_sig"], v
+        for target in (v["path"], v["request_target"]):
+            assert op.sign(key, v["enr"], v["ts"], v["nonce"], v["method"], target, body) \
+                == v["expected_sig"], v
+        assert op.canonical(v["enr"], v["ts"], v["nonce"], v["method"], v["request_target"],
+                            body).decode("utf-8") == v["canonical"]
         header = op.format_header(v["enr"], v["ts"], v["nonce"], v["expected_sig"])
-        verified = op.verify_request(header, v["method"], v["path"], body,
-                                     lookup_key=lambda enr, k=key: k, now=v["ts"],
-                                     nonces=op.NonceCache())
-        assert verified.enrollment_id == v["enr"]
+        for method, target in ((v["method"], v["path"]), (v["method"].upper(), v["path"]),
+                               (v["method"].lower(), v["request_target"])):
+            verified = op.verify_request(header, method, target, body,
+                                         lookup_key=lambda enr, k=key: k, now=v["ts"],
+                                         nonces=op.NonceCache())
+            assert verified.enrollment_id == v["enr"]
 
 
 # ------------------------------------------------------------ verification

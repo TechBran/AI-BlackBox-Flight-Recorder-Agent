@@ -9,7 +9,9 @@
     "body_utf8": "",
     "body_b64": "",
     "content_encoding": null,
-    "expected_sig": "12359e201028626f0b0183c7a55e92aa45e505aafa9c4ba4afe9de8af91c904d"
+    "expected_sig": "12359e201028626f0b0183c7a55e92aa45e505aafa9c4ba4afe9de8af91c904d",
+    "request_target": "/wellness/status",
+    "canonical": "v1|en_00000001|1793000000|bf56b981bc41ebc0428ab719d684df76|GET|/wellness/status|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
   {
     "k_b64url": "0dU2-Rjodpw5g4-fQSPpVyBHqsHy6U6vjlQvp29DFOc",
@@ -21,7 +23,9 @@
     "body_utf8": "{\"phone\":{\"manufacturer\":\"samsung\",\"model\":\"SM-TEST\",\"device_name\":\"Test phone\",\"sdk_int\":36,\"app_version\":\"1.0\"},\"reported_at\":\"2026-10-28T12:00:00Z\"}",
     "body_b64": "eyJwaG9uZSI6eyJtYW51ZmFjdHVyZXIiOiJzYW1zdW5nIiwibW9kZWwiOiJTTS1URVNUIiwiZGV2aWNlX25hbWUiOiJUZXN0IHBob25lIiwic2RrX2ludCI6MzYsImFwcF92ZXJzaW9uIjoiMS4wIn0sInJlcG9ydGVkX2F0IjoiMjAyNi0xMC0yOFQxMjowMDowMFoifQ==",
     "content_encoding": null,
-    "expected_sig": "cd45163c7fb72825af47fda0feb573730ac6d3abf218f486dbbd11c400f710ec"
+    "expected_sig": "cd45163c7fb72825af47fda0feb573730ac6d3abf218f486dbbd11c400f710ec",
+    "request_target": "/wellness/capabilities",
+    "canonical": "v1|en_00000002|1793000061|2bbc97c3edf286f440aba69499a77b65|POST|/wellness/capabilities|352d0aa1aa3f8b2e70a7ae51cb09b99f6d7cec0702bf2ea9cb13bd734067c492"
   },
   {
     "k_b64url": "AiRozH8H5TpWpvqQcvw6x1fb81I4MCB95YDP8ufLn38",
@@ -33,7 +37,9 @@
     "body_utf8": "{\"label\":\"Montre connectée — Ärzte ✓ 心拍\",\"n\":1}",
     "body_b64": "eyJsYWJlbCI6Ik1vbnRyZSBjb25uZWN0w6llIOKAlCDDhHJ6dGUg4pyTIOW/g+aLjSIsIm4iOjF9",
     "content_encoding": null,
-    "expected_sig": "356cde98f93ae07da00bc67777789a06da1c4126867bf12789d28947f61e2ebd"
+    "expected_sig": "356cde98f93ae07da00bc67777789a06da1c4126867bf12789d28947f61e2ebd",
+    "request_target": "/wellness/ingest",
+    "canonical": "v1|en_00000003|1793000122|c3f55121d8152f824ec9abec665dd047|POST|/wellness/ingest|04686b14966805431ea4f9f2bb36a73739c19240388faf63668e13861c75c225"
   },
   {
     "k_b64url": "y9i9Bnhyolr4my_qvFF7vYiyXK7c6S_cXjrKF4wmYlE",
@@ -45,7 +51,9 @@
     "body_utf8": "{\"batch_id\":\"vector-gzip-0001\",\"buckets\":[],\"deleted_ids\":[],\"enrollment_id\":\"en_00c0ffee\",\"epoch\":1,\"origins\":[],\"readings\":[],\"schema\":\"bbx.wellness.ingest/1\",\"sessions\":[],\"window\":{\"from\":\"2026-10-27T11:00:00Z\",\"to\":\"2026-10-27T12:00:00Z\",\"type\":\"changes\"}}",
     "body_b64": "H4sIAAAAAAACA12OQY7CMAxF7+J1C04XM1LOMSsQQm3y20akSZUECoO4+xhRJDSSN9/Pz/aduraY8egsabrAlJjq4dfNNTMrqqg7mxNKJr0/VGThUWBleG0gpOj9hFBeCxCOzIb7HhAXczQjaVVRTG5wYZUSWuvCsKZsRkytuF133SzwPiDnjXDksn1+kCW7+JYXF2xcSN+pT3ESreHmq1ZcN98/SmlmqZ1YJf5jzQe7zRBqxvZ5hR6PP5cFXkoFAQAA",
     "content_encoding": "gzip",
-    "expected_sig": "3961c50028db6bc567723eb081ddc6680c17a250592d86b93c3ef61c5e6a6ea3"
+    "expected_sig": "3961c50028db6bc567723eb081ddc6680c17a250592d86b93c3ef61c5e6a6ea3",
+    "request_target": "/wellness/ingest",
+    "canonical": "v1|en_00c0ffee|1793000183|7a4df40ff150ea1f3a19c2be416ae330|POST|/wellness/ingest|642ee88304ab7730b1a879f6bbcf3495d4253ac8a5c60f0e4249c8cdd68c389c"
   },
   {
     "k_b64url": "7dseUjiquz6y0o9YSWWtlziC7SI6E9ychidMGiGUZ2g",
@@ -57,7 +65,9 @@
     "body_utf8": "{\"operator\":\"wellness-fixture\",\"categories\":{\"blood_pressure\":\"ask\"}}",
     "body_b64": "eyJvcGVyYXRvciI6IndlbGxuZXNzLWZpeHR1cmUiLCJjYXRlZ29yaWVzIjp7ImJsb29kX3ByZXNzdXJlIjoiYXNrIn19",
     "content_encoding": null,
-    "expected_sig": "6824a1816b559c8ec8027f57e6ab3e55e423106ff82b7380feb5fdf19df2443b"
+    "expected_sig": "6824a1816b559c8ec8027f57e6ab3e55e423106ff82b7380feb5fdf19df2443b",
+    "request_target": "/wellness/settings",
+    "canonical": "v1|en_00000005|1793000244|8fc1c53559aff1495184ee309021271b|PUT|/wellness/settings|ad4b25c9826ab02d3f91bf35a452b454c0554ff009cb5b99ba0b4207f3d71d08"
   },
   {
     "k_b64url": "34-2fzDIz8A9qIUfSJ2vmzIjFnszh6_mfAXGp97V64c",
@@ -69,6 +79,36 @@
     "body_utf8": "",
     "body_b64": "",
     "content_encoding": null,
-    "expected_sig": "3a3fc48b76031a4685515e375ba9aec37f1ddc8ff291bceebfc464e60d573df3"
+    "expected_sig": "3a3fc48b76031a4685515e375ba9aec37f1ddc8ff291bceebfc464e60d573df3",
+    "request_target": "/wellness/ref/w-20261028-ab12",
+    "canonical": "v1|en_00000006|1793000305|ef6f5233bf83837e36693a79ca9a5ab0|GET|/wellness/ref/w-20261028-ab12|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "k_b64url": "7uGTywYW5WiObdhUvbsqPLoG-RgEvblNGKBmNIQR4IE",
+    "enr": "en_00000007",
+    "ts": 1793000366,
+    "nonce": "44cfca500c2f7bf28c8fa051973f0f2a",
+    "method": "GET",
+    "path": "/fossil/snapshot/SNAP-20261028-0001",
+    "body_utf8": "",
+    "body_b64": "",
+    "content_encoding": null,
+    "expected_sig": "eda51ee7129bdcfc6afdb7db33c1a2f8ac22a58f21f29523ce8a17dcdeb646bc",
+    "request_target": "/fossil/snapshot/SNAP-20261028-0001?operator=wellness-fixture",
+    "canonical": "v1|en_00000007|1793000366|44cfca500c2f7bf28c8fa051973f0f2a|GET|/fossil/snapshot/SNAP-20261028-0001|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "k_b64url": "V1hdpB9E8Izoj07LmS5biAWf0kSLhRf2tl5dJUnscR0",
+    "enr": "en_00000008",
+    "ts": 1793000427,
+    "nonce": "1fda193622b4c6e96076c3b264d07757",
+    "method": "get",
+    "path": "/wellness/disclosures",
+    "body_utf8": "",
+    "body_b64": "",
+    "content_encoding": null,
+    "expected_sig": "70d6a9c58f1aaf1dd5ac138095a4d96f6fa6674b142c5e5f917744bb3ce2ea49",
+    "request_target": "/wellness/disclosures",
+    "canonical": "v1|en_00000008|1793000427|1fda193622b4c6e96076c3b264d07757|GET|/wellness/disclosures|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   }
 ]
