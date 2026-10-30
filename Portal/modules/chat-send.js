@@ -1703,10 +1703,16 @@ export async function sendStreamingChat(messages, provider, model, operator) {
     finalizeStreamingBubble(bubble, fullResponse, fullThinking, { wellness: wellnessUsed !== null });
 
     // Trigger Auto-TTS after response is complete (if enabled)
-    // This generates a single TTS call for the full response
+    // This generates a single TTS call for the full response. Never for a
+    // reply a wellness tool fed: its text would go to the voice service, which
+    // the health consent does not name (rules W26, W31; chat-bubbles.js).
     if (window.autoTTSEnabled && window.triggerAutoTTS && fullResponse) {
-        console.log('[STREAM] Response complete, triggering Auto-TTS');
-        window.triggerAutoTTS(fullResponse, bubble);
+        if (wellnessUsed !== null) {
+            console.log('[STREAM] Response complete; Auto-TTS skipped (a health-data reply)');
+        } else {
+            console.log('[STREAM] Response complete, triggering Auto-TTS');
+            window.triggerAutoTTS(fullResponse, bubble);
+        }
     }
 
     return {

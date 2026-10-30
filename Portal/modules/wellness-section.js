@@ -25,7 +25,8 @@
  * disk-encryption line, and, when opened, "Who saw my health data" from a
  * signed GET /wellness/disclosures. Changing any of it stays on the phone
  * (narrowing from the Portal is M7.3). An unsigned read (no bridge, an older
- * app without wellnessSign, or a null from it) shows the four fields only.
+ * app without wellnessSign, or a null from it) shows the four fields only, and
+ * so does a signed read the box refuses (it is read again, once, unsigned).
  * originProof / withOriginProof are the one signing path the chat uses too:
  * a fresh proof per request, over the sha256 of the exact UTF-8 body bytes.
  *
@@ -78,6 +79,12 @@ const SURFACE_LABELS = {
     cron: 'scheduled', voice: 'voice', on_device: 'on-device AI',
 };
 const FDE_METHODS = { luks: 'LUKS', 'dm-crypt': 'dm-crypt' };
+// What GET /wellness/status answers a proof it cannot verify (enroll.verify_signed_request):
+// 401 bad_signature (an enrollment this box does not know, a stale key, a phone
+// clock off by more than 2 min), 409 owner_changed, 410 revoked / source_moved.
+// The box refuses a bad proof rather than downgrading it, and the phone only
+// learns of it on its next push, so the card reads again unsigned meanwhile.
+const SIGNED_REFUSALS = new Set([401, 409, 410]);
 const TEXT_MAX = 300;
 const INSTINCT_MAX = 2000;      // the box's own cap on the instinct prompt
 const TROUBLES_MAX = 12;
@@ -493,7 +500,8 @@ function renderSigned(e, view) {
         const card = node('div', 'wellness-trouble');
         card.append(node('p', 'wellness-trouble-title', t.title));
         if (t.body) card.append(node('p', 'wellness-trouble-body', t.body));
-        if (t.fix) card.append(node('p', 'wellness-trouble-fix', `On your phone: ${t.fix}`));
+        // The fix names where it is done ("Open BlackBox on your phone").
+        if (t.fix) card.append(node('p', 'wellness-trouble-fix', `To fix: ${t.fix}`));
         return card;
     }));
     q('.wellness-uses').replaceChildren(...view.categories.map((c) => node('li', '',
@@ -638,15 +646,19 @@ export function initWellnessSection({ intervalMs = WELLNESS_POLL_MS, timers = nu
         return answer;
     }
 
-    /** One status read for `operator`; false when the operator changed under it. */
-    async function readFor(operator) {
+    /**
+     * One status read for `operator`; false when the operator changed under it.
+     * @param {string} operator
+     * @param {{unsigned?: boolean}} [opts] - unsigned: never ask the app for a proof
+     */
+    async function readFor(operator, { unsigned = false } = {}) {
         const path = `/wellness/status?operator=${encodeURIComponent(operator)}`;
         const init = { cache: 'no-store' };
         // Inside the app: signed by the phone, so the box answers with the
         // settings view when this is its enrolled operator. Only a read that
         // went out signed may show it.
         let signed = false;
-        if (wellnessSigner()) {
+        if (!unsigned && wellnessSigner()) {
             const proof = await originProof('GET', path);
             if (operator !== getOperator()) return false;
             if (proof) {
@@ -660,6 +672,12 @@ export function initWellnessSection({ intervalMs = WELLNESS_POLL_MS, timers = nu
         } catch (err) {
             if (operator !== getOperator()) return false;
             const code = err && err.status;
+            // A proof the box would not take (a retired or unknown key, a
+            // phone clock off, the phone given to someone else) is no reason
+            // to show less than a desktop browser does: the same read, once,
+            // unsigned, drawn as the four-field card (its state names the
+            // trouble, e.g. ownership_changed or revoked).
+            if (signed && SIGNED_REFUSALS.has(code)) return readFor(operator, { unsigned: true });
             if (code === 404) {
                 renderMessage(UNAVAILABLE, UNAVAILABLE.note);
                 return true;

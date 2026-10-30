@@ -16,7 +16,7 @@ import { speakToBubble, setLastAssistantText } from './tts-stt.js';
 import { updateHintsVisibility } from './help-hints.js';
 import { scrollToBottomIfNeeded } from './ui-setup.js';
 import {
-    ORIGIN_HEADER, wellnessSigner, originProof, parseWellnessTime, providerLabel, lastSourceLabel,
+    ORIGIN_HEADER, wellnessSigner, originProof, parseWellnessTime, providerLabel,
 } from './wellness-section.js';
 
 // =============================================================================
@@ -520,8 +520,13 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
         }
     }
 
+    // A reply the box masked live (POST /chat masks a health turn's reply
+    // and sends no wellness_used frame) is a health reply: never read aloud.
+    const maskedHealth = newContentString.includes(WELLNESS_MASK);
+    if (maskedHealth) markWellnessReply(thinkingBubble);
+
     // Trigger Auto-TTS if enabled
-    if (window.triggerAutoTTS && textContentForActions) {
+    if (window.triggerAutoTTS && textContentForActions && !maskedHealth) {
         window.triggerAutoTTS(textContentForActions, thinkingBubble);
     }
 }
@@ -540,6 +545,13 @@ export function updateThinkingBubble(thinkingBubble, newContent) {
 // delivered envelope) and the display strings show in a private in-page
 // panel that is never saved and closes on navigation. Everything here is
 // built with createElement / textContent.
+//
+// Such a reply is never read aloud from the Portal: its text (values
+// included) would go to the voice service, a destination the health consent
+// does not name (a cloud TTS provider; on-box voices write the audio under
+// Portal/uploads), so a local-only category could reach the cloud (rules W26,
+// W31). chat-send.js skips auto-TTS for it, and the speak buttons of its
+// bubble (reply and reasoning) only say why.
 
 /** The ledger's placeholder for a masked health value (Orchestrator/wellness/mask.py MASK). */
 export const WELLNESS_MASK = '[·]';
@@ -644,8 +656,9 @@ export function formatAsOf(iso, { now = Date.now(), locale, timeZone } = {}) {
 /**
  * The footer under a reply a wellness tool fed:
  * "Used your health data · <source> · as of <time> · <provider>". The source is
- * the label the turn recorded, else `sourceLabel` (the Health card's last
- * status), else "your phone". It never carries a health value.
+ * the label the turn recorded (chat-send.js: the Health card's last status for
+ * the turn's operator), else `sourceLabel`, else "your phone". It never
+ * carries a health value.
  * @param {*} used - The turn's wellness_used
  * @param {{sourceLabel?: ?string, now?: number, locale?: string, timeZone?: string}} [opts]
  * @returns {string} '' for a frame with no usable ref
@@ -893,14 +906,56 @@ async function toggleNumbers(footer, refs, button) {
     renderNumbers(panel, results);
 }
 
+/** What a speak button of a health reply says instead of speaking. */
+export const WELLNESS_SPEECH_OFF = "Health replies aren't read aloud: the voice service would get your health data.";
+
+// A health reply's bubble (and its streaming reasoning panel) carries this.
+const WELLNESS_MARK = 'wellness';
+let _speechGuardBound = false;
+
+/** True for an element inside a health reply's bubble or reasoning panel. */
+export function isWellnessReply(el) {
+    return !!(el && typeof el.closest === 'function' && el.closest('[data-wellness="1"]'));
+}
+
+// One capture listener for the page: it runs before every speak handler
+// (the buttons' own onclick, chat-send's delegated reasoning control) and
+// stops the click when the control belongs to a health reply.
+function guardWellnessSpeech(e) {
+    const target = e.target;
+    const control = target && typeof target.closest === 'function'
+        && target.closest('.speak-btn, [data-bubble-action="thinking-speak"]');
+    if (!control || !isWellnessReply(control)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    toast(WELLNESS_SPEECH_OFF);
+}
+
+function bindSpeechGuard() {
+    if (_speechGuardBound || typeof document === 'undefined') return;
+    _speechGuardBound = true;
+    document.addEventListener('click', guardWellnessSpeech, true);
+}
+
+/** Mark a health reply's bubble (and its floating reasoning panel) so it is never spoken. */
+function markWellnessReply(bubble) {
+    bindSpeechGuard();
+    bubble.dataset[WELLNESS_MARK] = '1';
+    if (bubble._floatingPanel && bubble._floatingPanel.dataset) bubble._floatingPanel.dataset[WELLNESS_MARK] = '1';
+}
+
 /**
  * Give an assistant bubble its health footer (a turn with wellness_used) and,
  * inside the app, Show numbers (a masked turn with a ref). Idempotent; an
  * entry without the fields (every reply before M7, every other turn) is left
- * exactly as it was.
+ * exactly as it was. A reply with either field is marked as a health reply
+ * (data-wellness="1"): its speak buttons do not speak.
  * @param {HTMLElement} bubble - The assistant bubble
  * @param {Object} entry - The history entry: {content, wellness_ref?, wellness_used?}
- * @param {{sourceLabel?: ?string}} [opts] - The source label (default: the Health card's last status)
+ * @param {{sourceLabel?: ?string}} [opts] - The source label when the turn
+ *   recorded none (default: none, so "your phone"; the chat history is one
+ *   store for every operator, so the label of whoever is selected now is
+ *   never borrowed)
  * @returns {?HTMLElement} The footer, or null when there is none
  */
 export function decorateWellnessBubble(bubble, entry, opts = {}) {
@@ -913,12 +968,13 @@ export function decorateWellnessBubble(bubble, entry, opts = {}) {
     }
     const used = normalizeWellnessUsed(entry.wellness_used);
     const refs = wellnessRefsOf(entry);
+    if (used || refs.length > 0) markWellnessReply(bubble);
     const offerNumbers = refs.length > 0 && isMaskedHealthTurn(entry.content, refs[0]) && !!wellnessSigner();
     if (!used && !offerNumbers) return null;
 
     const footer = wellnessNode('div', 'wellness-footer');
     if (used) {
-        const sourceLabel = opts.sourceLabel !== undefined ? opts.sourceLabel : lastSourceLabel();
+        const sourceLabel = opts.sourceLabel !== undefined ? opts.sourceLabel : null;
         footer.append(wellnessNode('span', 'wellness-footer-text', formatWellnessFooter(used, { sourceLabel })));
     }
     if (offerNumbers) {

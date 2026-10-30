@@ -73,7 +73,10 @@ export function makeSnapshotsClickable(container, options = {}) {
         const regex = /\b(SNAP-(?:\d{8}-)?\d+)\b/gi;
 
         if (regex.test(text)) {
-            console.log('[SNAP-CLICK] Found SNAP pattern in text:', text.substring(0, 100));
+            // The node's length, never its text: it is a reply or its
+            // reasoning (health values included), and the app's WebView
+            // console goes to logcat.
+            console.log('[SNAP-CLICK] Found SNAP pattern in a text node,', text.length, 'chars');
             snapCount++;
             regex.lastIndex = 0;
 

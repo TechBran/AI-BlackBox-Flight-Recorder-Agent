@@ -11,7 +11,9 @@
 // the disclosure log from a signed GET /wellness/disclosures. Every string
 // stays text. A null from the bridge, or no bridge at all (a desktop
 // browser), is an unsigned request and the four-field card of
-// wellness-section.test.mjs, whatever the reply carries.
+// wellness-section.test.mjs, whatever the reply carries. A signed read the
+// box refuses (401, 409, 410: it refuses a proof it cannot verify rather than
+// downgrading it) is read again, once, unsigned: never less than a desktop.
 //
 // Run: bash scripts/run_web_tests.sh
 import test from "node:test";
@@ -39,6 +41,7 @@ const HEADER = "X-BlackBox-Origin";
 
 const state = await import("../../Portal/modules/state-management.js");
 const wellness = await import("../../Portal/modules/wellness-section.js");
+const bubbles = await import("../../Portal/modules/chat-bubbles.js");
 
 const $ = (id) => document.getElementById(id);
 const flush = async () => {
@@ -115,13 +118,18 @@ const DISCLOSURES = [
       tool: "wellness_series", categories: ["activity"] },
 ];
 
-// The scripted box and the app's bridge.
-const box = { status: SIGNED, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200 };
+// The scripted box and the app's bridge. `refuseSigned` ({code, body}) is the
+// box's answer to a status read that carries a proof (wellness_routes.wellness_status
+// returns the refusal; an unsigned read gets box.status).
+const box = { status: SIGNED, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200, refuseSigned: null };
 const calls = [];
 globalThis.fetch = window.fetch = (url, opts = {}) => {
     const u = String(url);
     calls.push({ url: u, method: opts.method || "GET", headers: { ...(opts.headers || {}) } });
-    if (u.startsWith("/wellness/status")) return reply(box.status, box.statusCode);
+    if (u.startsWith("/wellness/status")) {
+        if (box.refuseSigned && opts.headers && opts.headers[HEADER]) return reply(box.refuseSigned.body, box.refuseSigned.code);
+        return reply(box.status, box.statusCode);
+    }
     if (u.startsWith("/wellness/disclosures")) return reply({ disclosures: box.disclosures }, box.disclosuresCode);
     if (u.startsWith("/devices/mesh")) return reply({ devices: [] });
     return Promise.reject(new TypeError("offline"));
@@ -162,7 +170,7 @@ function shownText(root) {
 
 async function setup(t, { status = SIGNED, bridge = fakeBridge(), operator = ME } = {}) {
     calls.length = 0;
-    Object.assign(box, { status, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200 });
+    Object.assign(box, { status, statusCode: 200, disclosures: DISCLOSURES, disclosuresCode: 200, refuseSigned: null });
     await closeMenu();
     state.setOperator(operator);
     if (bridge) window.AndroidBridge = bridge; else delete window.AndroidBridge;
@@ -204,7 +212,8 @@ test("the signed settings view: what BlackBox may use, where it may go, troubles
     assert.match(text, /lan-box/);
     assert.match(text, /Health data hasn't synced recently/);
     assert.match(text, /Your phone hasn't sent health data since 07:10\./);
-    assert.match(text, /Open BlackBox on your phone/);
+    assert.match(text, /To fix: Open BlackBox on your phone/);
+    assert.doesNotMatch(text, /On your phone: Open BlackBox on your phone/, "the fix already says where");
     assert.match(text, /Disk encryption: on \(LUKS\)/);
     const instinct = signedBlock().querySelector(".wellness-instinct");
     assert.ok(instinct, "the instinct prompt is shown");
@@ -429,4 +438,103 @@ test("originProof: the bridge's value, or null for anything that is not a header
     window.AndroidBridge = fakeBridge({ sign: () => null });
     const base = { "Content-Type": "application/json" };
     assert.equal(await wellness.withOriginProof(base, "POST", "/chat", "{}"), base, "unsigned: the same headers object");
+});
+
+// ── A refused proof is never less than a desktop ───────────────────────────
+
+const REFUSALS = {
+    "401 bad_signature (a key this box does not know, a phone clock off)": {
+        refusal: { code: 401, body: { error: "bad_signature" } },
+        minimal: { state: "active", source_label: "Fixture Phone (SM-TEST1)", last_sync: "2026-10-29T11:48:00Z", enrolled: true },
+        chip: "Active", says: /Fixture Phone \(SM-TEST1\)/,
+    },
+    "409 owner_changed": {
+        refusal: { code: 409, body: { error: "owner_changed" } },
+        minimal: { state: "ownership_changed", source_label: "Fixture Phone (SM-TEST1)", last_sync: "2026-10-29T11:48:00Z", enrolled: false },
+        chip: "Needs attention", says: /no longer assigned to you in Devices/,
+    },
+    "410 revoked": {
+        refusal: { code: 410, body: { error: "revoked" } },
+        minimal: { state: "revoked", source_label: null, last_sync: null, enrolled: false },
+        chip: "Disconnected", says: /Health is disconnected/,
+    },
+    "410 source_moved (Use for health picked another phone)": {
+        refusal: { code: 410, body: { error: "source_moved" } },
+        minimal: { state: "active", source_label: "Other Fixture Phone (SM-TEST2)", last_sync: "2026-10-29T11:50:00Z", enrolled: true },
+        chip: "Active", says: /Other Fixture Phone \(SM-TEST2\)/,
+    },
+};
+
+for (const [name, c] of Object.entries(REFUSALS)) {
+    test(`a signed read the box refuses (${name}) is read again unsigned: the desktop's card, no signed view`, async (t) => {
+        const { bridge } = await setup(t, { status: c.minimal });
+        box.refuseSigned = c.refusal;
+        await openMenu();
+        await waitFor(() => statusCalls().length === 2, "the unsigned re-read");
+        const [first, second] = statusCalls();
+        assert.ok(first.headers[HEADER], "the first read went out signed");
+        assert.deepEqual(second.headers, {}, "the re-read carries no proof");
+        assert.equal(second.url, first.url);
+        assert.equal(bridge.signed.length, 1, "the app is asked once");
+        assert.equal($("wellnessStateChip").textContent, c.chip);
+        const text = shownText($("wellnessSection"));
+        assert.match(text, c.says);
+        assert.doesNotMatch(text, /not available for this operator/i);
+        assert.ok(!signedBlock() || signedBlock().hidden, "an unsigned answer never shows the settings view");
+    });
+}
+
+test("a refused re-read is the refusal: no loop, 'not available for this operator'", async (t) => {
+    await setup(t);
+    box.refuseSigned = { code: 401, body: { error: "bad_signature" } };
+    box.status = { error: "invalid_operator" };
+    box.statusCode = 400;
+    await openMenu();
+    await waitFor(() => /not available for this operator/i.test(shownText($("wellnessSection"))), "the refusal");
+    await flush();
+    assert.equal(statusCalls().length, 2, "one signed read, one unsigned, no more");
+});
+
+test("a refusal that is not about the proof (400) is not read again", async (t) => {
+    await setup(t);
+    box.status = { error: "invalid_operator" };
+    box.statusCode = 400;
+    await openMenu();
+    await waitFor(() => /not available for this operator/i.test(shownText($("wellnessSection"))), "the refusal");
+    await flush();
+    assert.equal(statusCalls().length, 1);
+});
+
+test("the next poll signs again after a refused proof (the phone may have re-enrolled)", async (t) => {
+    const { timers, bridge } = await setup(t, { status: REFUSALS["401 bad_signature (a key this box does not know, a phone clock off)"].minimal });
+    box.refuseSigned = { code: 401, body: { error: "bad_signature" } };
+    await openMenu();
+    await waitFor(() => statusCalls().length === 2, "the unsigned re-read");
+    box.refuseSigned = null;
+    box.status = SIGNED;
+    await timers.advance(wellness.WELLNESS_POLL_MS);
+    await waitFor(() => statusCalls().length === 3, "the next poll");
+    assert.ok(statusCalls()[2].headers[HEADER], "signed again");
+    assert.equal(bridge.signed.length, 2);
+    await waitFor(() => signedBlock() && !signedBlock().hidden, "the settings view");
+});
+
+// ── The chat footer never borrows the selected operator's phone ────────────
+
+test("a footer with no recorded source says 'your phone', even when the card knows a phone", async (t) => {
+    await setup(t);
+    await openMenu();
+    assert.equal(wellness.lastSourceLabel(ME), "Fixture Phone (SM-TEST1)", "the card has a label for the selected operator");
+    // A turn from earlier (this operator's or another's: the chat history is one
+    // store) that recorded no source label.
+    const bubble = document.createElement("div");
+    bubble.className = "bubble assistant";
+    const used = { ref: "w-20261029-7f3a", categories: ["sleep"], as_of: "2026-10-29T07:10-04:00",
+        provider: "anthropic", provider_label: "Anthropic", source_label: null };
+    const footer = bubbles.decorateWellnessBubble(bubble, { content: "You slept well.", wellness_ref: used.ref, wellness_used: used });
+    assert.match(footer.textContent, /^Used your health data · your phone · /);
+    assert.ok(!footer.textContent.includes("Fixture Phone"));
+    const recorded = bubbles.decorateWellnessBubble(bubble, { content: "You slept well.", wellness_ref: used.ref,
+        wellness_used: { ...used, source_label: "Recorded Phone" } });
+    assert.match(recorded.textContent, /^Used your health data · Recorded Phone · /);
 });

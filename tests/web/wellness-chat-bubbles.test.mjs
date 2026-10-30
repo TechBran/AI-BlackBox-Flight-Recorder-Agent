@@ -10,6 +10,8 @@
 //    signs GET /wellness/ref/{ref}); the numbers show in a private in-page
 //    panel that is never saved and closes on navigation; 403/404 are
 //    "Not available".
+//  * A health reply is never read aloud: its bubble (and its streaming
+//    reasoning panel) is marked, and its speak buttons only say why.
 //
 // The fixture numbers are the synthetic wellness-fixture operator's
 // (Orchestrator/tests/wellness_support.py): sleeping HR 47.3, steps 12345.
@@ -32,6 +34,7 @@ const state = await import("../../Portal/modules/state-management.js");
 const {
     formatWellnessFooter, formatAsOf, normalizeWellnessUsed, mergeWellnessUsed, isMaskedHealthTurn,
     wellnessRefsOf, refPanel, decorateWellnessBubble, closeWellnessNumbers, appendBubble, WELLNESS_MASK,
+    WELLNESS_SPEECH_OFF, isWellnessReply,
 } = bubbles;
 const { ORIGIN_HEADER, providerLabel } = await import("../../Portal/modules/wellness-section.js");
 
@@ -199,6 +202,56 @@ test("decorateWellnessBubble is idempotent and leaves an old entry alone", (t) =
     decorateWellnessBubble(bubble, { content: "plain", wellness_ref: REF, wellness_used: USED });
     decorateWellnessBubble(bubble, { content: "plain", wellness_ref: REF, wellness_used: USED });
     assert.equal(bubble.querySelectorAll(".wellness-footer").length, 1);
+});
+
+// ── Never read aloud ───────────────────────────────────────────────────────
+
+test("a health reply's bubble is marked (and its floating reasoning panel); an old reply is not", (t) => {
+    reset(t);
+    const old = appendBubble("assistant", "An answer from before M7.");
+    decorateWellnessBubble(old, { role: "assistant", content: "An answer from before M7." });
+    assert.equal(old.dataset.wellness, undefined);
+    assert.equal(isWellnessReply(old.querySelector(".speak-btn")), false);
+
+    const live = appendBubble("assistant", "Your sleeping heart rate was 47 bpm.");
+    live._floatingPanel = document.createElement("div");
+    decorateWellnessBubble(live, { content: "", wellness_used: USED });   // as the stream's frame does
+    assert.equal(live.dataset.wellness, "1");
+    assert.equal(live._floatingPanel.dataset.wellness, "1", "the reasoning panel that streams outside the bubble");
+    assert.equal(isWellnessReply(live.querySelector(".speak-btn")), true);
+
+    const refOnly = appendBubble("assistant", "Your sleeping heart rate was [·] bpm.");
+    decorateWellnessBubble(refOnly, { content: "Your sleeping heart rate was [·] bpm.", wellness_ref: REF });
+    assert.equal(refOnly.dataset.wellness, "1", "a ref alone is a health reply too");
+    decorateWellnessBubble(live, { content: "x" });
+    assert.equal(live.dataset.wellness, "1", "once a health reply, always one");
+});
+
+test("a health reply's speak buttons never reach their handler; an ordinary reply's do", (t) => {
+    reset(t);
+    const heard = [];
+    const make = (entry) => {
+        const bubble = appendBubble("assistant", entry.content);
+        const speak = bubble.querySelector(".speak-btn");
+        speak.onclick = () => heard.push(entry.content);
+        const reasoning = document.createElement("button");
+        reasoning.dataset.bubbleAction = "thinking-speak";
+        reasoning.addEventListener("click", () => heard.push(`reasoning: ${entry.content}`));
+        bubble.appendChild(reasoning);
+        decorateWellnessBubble(bubble, entry);
+        return { speak, reasoning };
+    };
+    const health = make({ content: "Your sleeping heart rate was 47 bpm.", wellness_ref: REF, wellness_used: USED });
+    const plain = make({ content: "Hello." });
+    document.getElementById("toast").textContent = "";
+    for (const el of [health.speak, health.speak.querySelector("path") || health.speak, health.reasoning]) {
+        el.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    }
+    assert.deepEqual(heard, []);
+    assert.equal(document.getElementById("toast").textContent, WELLNESS_SPEECH_OFF);
+    plain.speak.click();
+    plain.reasoning.click();
+    assert.deepEqual(heard, ["Hello.", "reasoning: Hello."]);
 });
 
 // ── Show numbers ───────────────────────────────────────────────────────────

@@ -16,7 +16,10 @@
 //    body; null means unsigned; a desktop browser sends what it always did.
 //  * A wellness reply's "response ready" notification and the stream's debug
 //    log carry no reply text (the app posts notifications natively and its
-//    WebView console goes to logcat).
+//    WebView console goes to logcat), nor does the snapshot-id linker's log.
+//  * A wellness reply is never read aloud: auto-TTS skips it and the speak
+//    buttons of its bubble (reply and reasoning) do not speak (the voice
+//    service is a destination the health consent does not name, W26/W31).
 //
 // The fixture numbers are the synthetic wellness-fixture operator's.
 //
@@ -42,6 +45,7 @@ window.__model = "";
 const chat = await import("../../Portal/modules/chat-send.js");
 const { send, renderHistory } = chat;
 const { setHistoryData, getHistoryData } = await import("../../Portal/modules/state-management.js");
+const { WELLNESS_SPEECH_OFF } = await import("../../Portal/modules/chat-bubbles.js");
 
 const WT = "wt_0123456789abcdef";
 const REF = "w-20261029-7f3a";
@@ -394,4 +398,151 @@ test("the stream's debug log carries no reply text once a wellness tool answered
     assert.ok(logged.some((l) => l.includes("[STREAM DEBUG] Event type: content")), "the events are still logged");
     const leaks = logged.filter((l) => l.includes("12,345"));
     assert.deepEqual(leaks, []);
+});
+
+test("the snapshot-id linker logs no reply or reasoning text (a wellness reply citing a snapshot)", async (t) => {
+    reset(t);
+    const logged = [];
+    const originals = {};
+    for (const level of ["log", "info", "debug", "warn"]) {
+        originals[level] = console[level];
+        console[level] = (...args) => logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    }
+    t.after(() => Object.assign(console, originals));
+    const content = "Compared with SNAP-20261028-9001, your steps today: 12,345 steps.";
+    // The box's order: the tool answers (wellness_used), then the model reasons over it and replies.
+    const sse = frame("stream_start", { provider: "anthropic", model: "m-1", wellness_turn: WT })
+        + frame("tool_start", "wellness_summary")
+        + frame("tool_result", "wellness_summary: health data read")
+        + frame("wellness_used", USED)
+        + frame("thinking_start", {})
+        + frame("thinking", "Per SNAP-20261028-9001 the user walked 12,345 steps.")
+        + frame("thinking_end", {})
+        + frame("content", content)
+        + frame("done", { content })
+        + frame("stream_end", { status: "ok" });
+    stubFetch([["/chat/stream", () => sseResponse(sse)], ["/chat/save", () => json({})]]);
+    await sendText("steps today?");
+    await settle();
+    assert.ok(document.querySelector("#history .clickable-snapshot"), "the id was linked (the linker ran)");
+    renderHistory();                                  // and again from local history
+    await settle();
+    Object.assign(console, originals);
+    assert.ok(logged.some((l) => l.includes("[SNAP-CLICK] Found SNAP pattern")), "the linker still logs that it found one");
+    assert.deepEqual(logged.filter((l) => l.includes("12,345")), []);
+});
+
+// ── A health reply is never read aloud ─────────────────────────────────────
+
+const ttsCalls = (calls) => calls.filter((c) => c.url.startsWith("/tts"));
+// The voice service, scripted to fail fast (the positive controls only need
+// to see that a request went out).
+const TTS_ROUTES = [["/tts/catalog", () => json({}, 404)], ["/tts/queue", () => json({}, 404)],
+    ["/tts/batch", () => json({ detail: "no voice in this test" }, 500)]];
+const ordinarySse = (content = "Hello there.") => frame("stream_start", { model: "m-1" }) + frame("content", content)
+    + frame("done", { content }) + frame("stream_end", {});
+
+function click(el) {
+    el.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+}
+
+test("auto-TTS never gets a health reply; an ordinary reply still goes to it", async (t) => {
+    reset(t);
+    const spoken = [];
+    const saved = { enabled: window.autoTTSEnabled, trigger: window.triggerAutoTTS };
+    window.autoTTSEnabled = true;
+    window.triggerAutoTTS = (text) => spoken.push(text);
+    t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
+    window.AndroidBridge = fakeBridge();                // the credentialed WebView, where health replies arrive
+    stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})]]);
+    await sendText("how did I sleep?");
+    assert.deepEqual(spoken, [], "the health reply is not handed to auto-TTS");
+    stubFetch([["/chat/stream", () => sseResponse(ordinarySse())], ["/chat/save", () => json({})]]);
+    await sendText("hi");
+    assert.deepEqual(spoken, ["Hello there."], "an ordinary reply still is");
+});
+
+test("the speak button of a live health reply does not speak: no voice request, it says why", async (t) => {
+    reset(t);
+    const calls = stubFetch([["/chat/stream", () => sseResponse(wellnessSse())], ["/chat/save", () => json({})], ...TTS_ROUTES]);
+    await sendText("how did I sleep?");
+    const bubble = document.querySelector("#history .bubble.assistant");
+    assert.equal(bubble.dataset.wellness, "1", "marked as a health reply");
+    const speak = bubble.querySelector(".speak-btn");
+    assert.ok(speak, "the button is still there");
+    click(speak.querySelector("svg") || speak);         // a tap lands on the icon
+    click(speak);
+    await settle();
+    assert.deepEqual(ttsCalls(calls), []);
+    assert.equal(document.getElementById("toast").textContent, WELLNESS_SPEECH_OFF);
+    assert.ok(!WELLNESS_SPEECH_OFF.includes("47"));
+});
+
+test("from local history, a health reply's speak buttons (reply and reasoning) do not speak", async (t) => {
+    reset(t);
+    const calls = stubFetch([...TTS_ROUTES]);
+    setHistoryData([
+        { role: "user", content: "how did I sleep?" },
+        { role: "assistant", content: REPLY, wellness_ref: REF, wellness_used: USED },
+        { role: "assistant", content: REPLY, thinking: "The tool said 47 bpm.", wellness_ref: REF, wellness_used: USED },
+    ]);
+    renderHistory();
+    await settle();
+    const [plain, reasoned] = document.querySelectorAll("#history .bubble.assistant");
+    click(plain.querySelector(".speak-btn"));
+    click(reasoned.querySelector(".speak-btn"));
+    click(reasoned.querySelector('[data-bubble-action="thinking-speak"]'));
+    await settle();
+    assert.deepEqual(ttsCalls(calls), []);
+});
+
+test("an ordinary reply's speak button still speaks (the guard's positive control)", async (t) => {
+    reset(t);
+    const calls = stubFetch([["/chat/stream", () => sseResponse(ordinarySse())], ["/chat/save", () => json({})], ...TTS_ROUTES]);
+    await sendText("hi");
+    const bubble = document.querySelector("#history .bubble.assistant");
+    assert.equal(bubble.dataset.wellness, undefined);
+    click(bubble.querySelector(".speak-btn"));
+    const until = Date.now() + 5000;
+    while (!ttsCalls(calls).some((c) => c.url === "/tts/batch") && Date.now() < until) await settle(5);
+    assert.ok(ttsCalls(calls).some((c) => c.url === "/tts/batch"), "the voice service was asked");
+    await settle();
+});
+
+test("an ordinary reply's reasoning still speaks from local history (positive control)", async (t) => {
+    reset(t);
+    const calls = stubFetch([...TTS_ROUTES]);
+    setHistoryData([{ role: "assistant", content: "Hello.", thinking: "Say hello." }]);
+    renderHistory();
+    await settle();
+    click(document.querySelector('#history .bubble.assistant [data-bubble-action="thinking-speak"]'));
+    const until = Date.now() + 5000;
+    while (!ttsCalls(calls).some((c) => c.url === "/tts/batch") && Date.now() < until) await settle(5);
+    assert.ok(ttsCalls(calls).some((c) => c.url === "/tts/batch"), "the voice service was asked");
+    await settle();
+});
+
+test("a /chat reply the box masked live is never read aloud; an ordinary /chat reply still is", async (t) => {
+    reset(t);
+    const spoken = [];
+    const saved = { enabled: window.autoTTSEnabled, trigger: window.triggerAutoTTS };
+    window.autoTTSEnabled = true;
+    window.triggerAutoTTS = (text) => spoken.push(text);
+    t.after(() => { window.autoTTSEnabled = saved.enabled; window.triggerAutoTTS = saved.trigger; });
+    window.AndroidBridge = fakeBridge();
+    const fallback = (reply) => [
+        ["/chat/stream", () => json({ detail: "busy" }, 503)],
+        ["/tasks/status", () => json({ status: "completed", result_data: { reply } })],
+        ["/chat", () => json({ task_id: "t-1" })],
+        ["/health", () => json({})],
+    ];
+    stubFetch(fallback("Your sleeping heart rate was [·] bpm, a little below your usual."));
+    await sendText("how did I sleep?");   // send() awaits the 1 s task poll
+    const masked = [...document.querySelectorAll("#history .bubble.assistant")].at(-1);
+    assert.ok(masked.textContent.includes("[·]"), "the masked reply is shown");
+    assert.equal(masked.dataset.wellness, "1", "and marked as a health reply");
+    assert.deepEqual(spoken, []);
+    stubFetch(fallback("Fallback reply."));
+    await sendText("hi");
+    assert.deepEqual(spoken.map((x) => x.trim()), ["Fallback reply."]);
 });
