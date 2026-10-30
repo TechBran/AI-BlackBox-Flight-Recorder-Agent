@@ -113,8 +113,15 @@ def ran(tmp_path_factory):
                 printed = io.StringIO()
                 with contextlib.redirect_stdout(printed):
                     turns = _chat_turns(mp, root, client, now)
+                    # Wave 3b: the saved turn read back as the phone reads it
+                    # (signed), and the reply handed to the box to speak.
+                    read = SIM.fossil(t, state, snap_id=turns["saved"]["snap_id"])
+                    spoken = client.post("/tts/batch", json={
+                        "text": REPLY, "provider": "openai", "voice": "alloy",
+                        "operator": OPERATOR})
         yield {"root": root, "records": records, "before": before, "after": after,
-               "key": key, "envs": envs, "printed": printed.getvalue(), **turns}
+               "key": key, "envs": envs, "printed": printed.getvalue(), "read": read,
+               "spoken": (spoken.status_code, spoken.json()), **turns}
     finally:
         logging.getLogger().removeHandler(handler)
         logging.getLogger().setLevel(old_level)
@@ -273,6 +280,20 @@ def test_no_sentinel_in_what_the_embedder_received(ran):
 def test_no_sentinel_in_the_worker_task_row(ran):
     worker = ran["worker"]
     assert not _hits(json.dumps(worker.result_data) + str(worker.reasoning_text))
+
+
+def test_the_wave_3b_paths_ran_inside_the_scan(ran):
+    """The scans above also cover the signed ledger read (the saved turn read
+    back as the phone reads it: its gauge, no value), the speech guard (the
+    reply refused before any voice ran) and the worker's wellness_used keys
+    in tasks.db (refs and names only)."""
+    read = ran["read"]
+    assert read["status"] == 200 and read["wellness_gauge"] and not read["hidden"]
+    assert read["refs"]
+    assert ran["spoken"][0] == 403 and ran["spoken"][1]["error"] == "wellness_text"
+    data = ran["worker"].result_data
+    assert data["wellness_used"]["ref"] == data["wellness_refs"][-1]
+    assert data["wellness_ref"] == data["wellness_refs"][0]
 
 
 def test_boot_hook_resecures(ran):
