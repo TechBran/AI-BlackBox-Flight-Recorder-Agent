@@ -19,6 +19,7 @@ a phone ONLY while config.ini has
     python3 scripts/wellness_sim_phone.py capabilities
     python3 scripts/wellness_sim_phone.py serve          # the listener alone, foreground
     python3 scripts/wellness_sim_phone.py nudge-wait     # wait for the box's /wellness/sync
+    python3 scripts/wellness_sim_phone.py chat --prompt "How did I sleep last night?"
     python3 scripts/wellness_sim_phone.py unregister
 
 Subcommands:
@@ -43,6 +44,13 @@ Subcommands:
   capabilities, status    the signed capability report / the signed status.
   serve, nudge-wait       the listener: /wellness/bind, /wellness/sync,
               /wellness/unbind, /notify (pairing bearer), GET /healthz.
+  chat        one POST /chat/stream turn SIGNED with the device key (the way
+              the app's chat will sign it), so the box offers the wellness_*
+              tools as it would on the enrolled phone. Prints the reply, the
+              tools that ran and the UI-only wellness_used frames. --provider
+              and --model as the chat clients send them (default: the box's).
+              The reply is the operator's own health data: it goes to this
+              terminal only.
   unregister  removes the registry device, the sim pairing row and the state.
 
 State (the key, the enrollment, the intent nonce) lives in --state-dir,
@@ -440,6 +448,50 @@ def nudge_wait(state: State, *, timeout_s: float, ip: str, port: int) -> Optiona
             server.server_close()
 
 
+def _sse_events(text: str) -> list:
+    """[(event, data)] of an SSE body (comment frames dropped)."""
+    out = []
+    for block in text.split("\n\n"):
+        event, data = None, None
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event = line[7:]
+            elif line.startswith("data: "):
+                data = line[6:]
+        if event:
+            try:
+                out.append((event, json.loads(data) if data is not None else None))
+            except ValueError:
+                out.append((event, data))
+    return out
+
+
+def chat(transport, state: State, *, prompt: str, provider: Optional[str] = None,
+         model: Optional[str] = None, operator: Optional[str] = None) -> dict:
+    """One signed /chat/stream turn: {status, reply, tools, wellness_used, error}."""
+    signer = _signer(state)
+    if signer is None:
+        return {"status": 0, "error": "not_enrolled"}
+    st = state.load()
+    body = {"messages": [{"role": "user", "content": prompt}],
+            "operator": operator or st.get("operator") or "", "origin_device_id": st.get("ip")}
+    if provider:
+        body["provider"] = provider
+    if model:
+        body["model"] = model
+    data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json",
+               "X-BlackBox-Origin": origin_header(signer["key"], signer["enrollment_id"],
+                                                  "POST", "/chat/stream", data)}
+    code, _, payload = transport.request("POST", "/chat/stream", data, headers)
+    events = _sse_events(payload.decode("utf-8", "replace"))
+    return {"status": code,
+            "reply": "".join(d for e, d in events if e == "content" and isinstance(d, str)),
+            "tools": [d for e, d in events if e == "tool_start"],
+            "wellness_used": [d for e, d in events if e == "wellness_used"],
+            "error": next((d for e, d in events if e == "error"), None)}
+
+
 def unregister(transport, state: State, pairing_file: Path) -> None:
     st = state.load()
     _call(transport, "DELETE", f"/devices/{st.get('device_id') or DEVICE_ID}")
@@ -486,6 +538,10 @@ def main(argv=None) -> int:
     sub.add_parser("serve")
     n = sub.add_parser("nudge-wait")
     n.add_argument("--timeout", type=float, default=120.0)
+    ch = sub.add_parser("chat")
+    ch.add_argument("--prompt", required=True)
+    ch.add_argument("--provider", default=None)
+    ch.add_argument("--model", default=None)
     sub.add_parser("unregister")
     args = p.parse_args(argv)
 
@@ -523,6 +579,9 @@ def main(argv=None) -> int:
     elif args.cmd == "nudge-wait":
         at = nudge_wait(state, timeout_s=args.timeout, ip=ip, port=port)
         out = {"nudged": at is not None}
+    elif args.cmd == "chat":
+        out = chat(transport, state, prompt=args.prompt, provider=args.provider,
+                   model=args.model)
     else:
         unregister(transport, state, pairing_file)
         out = {"unregistered": True}
