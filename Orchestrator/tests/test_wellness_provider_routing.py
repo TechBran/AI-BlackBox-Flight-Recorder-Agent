@@ -20,7 +20,8 @@ import pytest
 from Orchestrator.tests.test_wellness_chat_e2e import (  # noqa: F401 - enrolled_phone is a fixture
     QUESTION, SIM, _events, enrolled_phone)
 from Orchestrator.tests.wellness_agent_support import (  # noqa: F401 - agent_box is a fixture
-    LAN_ALIAS, WELLNESS_TOOLS, agent_box, edit_record, make_turn, stamped, stub_retrieval)
+    FX, LAN_ALIAS, WELLNESS_TOOLS, agent_box, edit_record, make_turn, sentinel_hits, stamped,
+    stub_retrieval)
 from Orchestrator.tests.wellness_support import ENR, OPERATOR, roster
 from Orchestrator.wellness import access, catalog, enroll, turn as turn_mod
 
@@ -217,6 +218,21 @@ def test_gemini_reads_health_data_when_google_is_really_allowed(enrolled_phone, 
     assert (row["provider"], row["tool"]) == ("google", "wellness_summary")
     [frame] = [d for e, d in events if e == "wellness_used"]
     assert frame["provider"] == "google" and frame["ref"] == row["ref"]
+
+
+def test_the_gemini_loop_never_logs_the_answer_to_a_health_tool(enrolled_phone, monkeypatch,
+                                                                 capsys):
+    """After a tool call the Gemini stream logs each part it reads; the answer
+    to a health tool quotes values, so the log carries the text's length only."""
+    edit_record(providers_allowed=["google"], google_paid_key_confirmed=True)
+    answer = f"You took {FX.SENTINEL_STRINGS[2]} steps that day."
+    gem, events = _gemini_turn(enrolled_phone, monkeypatch, "google", answer=answer)
+    assert answer in json.dumps([d for e, d in events if e == "content"])
+    assert len(_rows()) == 1
+    out = capsys.readouterr()
+    printed = out.out + out.err
+    assert "[GEMINI-STREAM] Iter 1 part:" in printed
+    assert not sentinel_hits(printed), sentinel_hits(printed)
 
 
 # ------------------------------------------------------------------ the loop's own provider

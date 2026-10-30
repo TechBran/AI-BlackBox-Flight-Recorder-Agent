@@ -351,10 +351,15 @@ async def stream(messages: List[Dict], model: str, operator: str, env: ProviderE
                                     # Collect all parts for potential tool execution
                                     response_parts.append(part)
 
-                                    # Log every part for debugging
+                                    # Log every part for debugging: its keys and the
+                                    # text's LENGTH, never the text. After a tool call
+                                    # the text is the answer to the tool's result,
+                                    # which can quote a health value (M7: no value in
+                                    # the journal), as the OpenAI-compatible loops do.
                                     part_keys = list(part.keys())
                                     if iteration > 0:
-                                        print(f"[GEMINI-STREAM] Iter {iteration} part: {part_keys}, text={part.get('text','')[:80] if 'text' in part else 'N/A'}, thought={part.get('thought','')}", flush=True)
+                                        text_len = len(part.get('text') or '') if 'text' in part else 'N/A'
+                                        print(f"[GEMINI-STREAM] Iter {iteration} part: {part_keys}, text_len={text_len}, thought={part.get('thought','')}", flush=True)
 
                                     # Handle thinking/thought content
                                     if part.get("thought"):
