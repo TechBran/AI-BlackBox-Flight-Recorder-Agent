@@ -674,6 +674,11 @@ class PortalActivity : AppCompatActivity() {
         web.evaluateJavascript(
             "(function(){try{return localStorage.getItem('bbx_operator')}catch(e){return null}})()"
         ) { raw ->
+            // The page may have changed while the script ran: a pick read off any other page is no pick.
+            if (!isPortalPage()) {
+                answer(null)
+                return@evaluateJavascript
+            }
             val portalOperator = OperatorResolver.fromJsResult(raw)
             lifecycleScope.launch {
                 val value = withContext(Dispatchers.IO) {
