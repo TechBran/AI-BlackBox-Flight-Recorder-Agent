@@ -107,7 +107,9 @@ def test_disclosures_and_refs_need_the_phone(box):
     log = box.get("/wellness/disclosures", signed=True).json()["disclosures"]
     assert len(log) == 1 and log[0]["provider"] == "local" and log[0]["tool"] == \
         "wellness_summary"
-    assert set(log[0]) == {"time", "surface", "provider", "model", "tool", "categories"}
+    assert set(log[0]) == {"time", "surface", "surface_label", "provider", "model", "tool",
+                           "categories"}
+    assert (log[0]["surface"], log[0]["surface_label"]) == ("android", "BlackBox app")
     assert box.get(f"/wellness/ref/{env['ref']}").status_code == 401
     ref = box.get(f"/wellness/ref/{env['ref']}", signed=True).json()
     assert ref["payload"]["ref"] == env["ref"]

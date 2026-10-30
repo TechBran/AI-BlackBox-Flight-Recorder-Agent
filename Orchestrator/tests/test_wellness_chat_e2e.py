@@ -217,6 +217,27 @@ def test_a_signed_turn_reads_health_data_and_an_unsigned_one_does_not(enrolled_p
     assert not sentinel_hits(printed), sentinel_hits(printed)
 
 
+def test_the_in_app_portal_s_signed_turn_is_its_own_row_in_the_disclosure_log(enrolled_phone):
+    """A /chat/stream turn the app's bridge signed for the Portal inside it
+    carries "wellness_surface": "portal_webview": it is offered the tools as
+    the phone is, and "Who saw my health data" names the Portal in the app,
+    apart from the native chat. The label on an unsigned body is ignored
+    (no credential, no tools, no row)."""
+    events = _chat(enrolled_phone, signed=True, extra={"wellness_surface": "portal_webview"})
+    assert [d for e, d in events if e == "wellness_used"]
+    [row] = _store().disclosures()
+    assert row["surface"] == "portal_webview"
+    st = enrolled_phone["state"].load()
+    header = SIM.origin_header(st["key"], st["enrollment_id"], "GET", "/wellness/disclosures", b"")
+    log = enrolled_phone["client"].get("/wellness/disclosures",
+                                       headers={"X-BlackBox-Origin": header}).json()["disclosures"]
+    assert [(r["surface"], r["surface_label"]) for r in log] == \
+        [("portal_webview", "Portal in the app")]
+    events = _chat(enrolled_phone, signed=False, extra={"wellness_surface": "portal_webview"})
+    assert not [d for e, d in events if e == "wellness_used"]
+    assert len(_store().disclosures()) == 1
+
+
 def test_post_chat_hands_a_verified_request_to_its_worker_as_a_grant(enrolled_phone,
                                                                      monkeypatch):
     import Orchestrator.routes.chat_routes as cr

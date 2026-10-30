@@ -339,6 +339,15 @@ def _declared(value) -> Optional[str]:
     return value if isinstance(value, str) and value in turn_mod.DECLARABLE_SURFACES else None
 
 
+# Where on the enrolled phone a CREDENTIALED turn says it comes from: the
+# Portal inside the app signs through the app's bridge with the phone's own
+# key, so its proof is the phone's; the label only tells the disclosure log
+# ("Who saw my health data") which screen asked. It narrows a credentialed
+# android turn and nothing else: without a valid proof it is ignored, and it
+# never adds a credential.
+CREDENTIALED_LABELS = frozenset({turn_mod.SURFACE_PORTAL_WEBVIEW})
+
+
 def request_turn(*, operator: str, provider: Optional[str], model: Optional[str],
                  signed=None, origin_device_id: Optional[str] = None,
                  declared: Optional[str] = None, surface: Optional[str] = None,
@@ -347,8 +356,10 @@ def request_turn(*, operator: str, provider: Optional[str], model: Optional[str]
 
     The credential is the verified origin proof of THIS operator's enrolled
     phone and nothing else. A ``declared`` surface (cron, mcp, ...) can only
-    narrow. A Computer Use turn is a CU agent's (never). ``surface`` names
-    the entry point when it is not a chat client (on_device)."""
+    narrow; "portal_webview" (CREDENTIALED_LABELS) relabels a credentialed
+    phone turn and is ignored on any other. A Computer Use turn is a CU
+    agent's (never). ``surface`` names the entry point when it is not a chat
+    client (on_device)."""
     credential = signed is not None and getattr(signed, "operator", None) == operator
     surface_id = getattr(signed, "enrollment_id", None) if credential else None
     if provider == "computer-use":
@@ -357,7 +368,8 @@ def request_turn(*, operator: str, provider: Optional[str], model: Optional[str]
         surface, credential, surface_id = _declared(declared), False, None
     elif surface is None:
         if credential:
-            surface = turn_mod.SURFACE_ANDROID
+            surface = declared if isinstance(declared, str) and declared in CREDENTIALED_LABELS \
+                else turn_mod.SURFACE_ANDROID
         else:
             surface = turn_mod.SURFACE_ANDROID if origin_device_id else turn_mod.SURFACE_PORTAL
     return turn_mod.WellnessTurn(operator=operator, surface=surface, credential_ok=credential,
@@ -400,8 +412,9 @@ def task_turn(inp: dict, operator: str, provider: Optional[str],
               model: Optional[str]) -> turn_mod.WellnessTurn:
     """The WellnessTurn for a queued /chat turn (tasks.process_chat_task): an
     inbound SMS or a peer turn is "sms" (never), a cron or MCP turn is what it
-    declares, a turn POST /chat verified is the enrolled phone's, anything
-    else is an uncredentialed Portal or app turn."""
+    declares, a turn POST /chat verified is the enrolled phone's (the Portal
+    inside the app's when its body says "portal_webview"), anything else is
+    an uncredentialed Portal or app turn."""
     inp = inp if isinstance(inp, dict) else {}
     grant = inp.get(GRANT_KEY)
     if inp.get("sms_mode") or inp.get("sms_peer"):
@@ -413,7 +426,8 @@ def task_turn(inp: dict, operator: str, provider: Optional[str],
     enrollment_id = redeem_grant(grant, operator)
     signed = _Granted(operator, enrollment_id) if enrollment_id else None
     return request_turn(operator=operator, provider=provider, model=model, signed=signed,
-                        origin_device_id=inp.get("origin_device_id"))
+                        origin_device_id=inp.get("origin_device_id"),
+                        declared=inp.get(DECLARED_KEY))
 
 
 @dataclasses.dataclass(frozen=True)

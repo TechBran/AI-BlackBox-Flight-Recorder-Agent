@@ -475,3 +475,66 @@ def test_a_client_cannot_forge_a_grant_or_a_credential(sites, monkeypatch):
                             declared="android")
     assert t.surface == "portal" and not t.credential_ok
     assert LAN_ALIAS
+
+
+def test_the_in_app_portal_labels_its_signed_turns_and_nothing_else(sites, monkeypatch):
+    """The Portal inside the app signs through the app's bridge and says so:
+    "wellness_surface": "portal_webview" turns a credentialed phone turn into
+    that surface (credential and enrollment id kept, offered as before, so
+    "Who saw my health data" can tell the two screens apart). Without a valid
+    proof for the body's operator the label is ignored; it never adds a
+    credential, and the other declarations still narrow."""
+    def turn(**kw):
+        return access.request_turn(operator=kw.pop("operator", OPERATOR),
+                                   provider=kw.pop("provider", "anthropic"), model=None, **kw)
+
+    def shape(t):
+        return t.surface, t.credential_ok, t.surface_id
+
+    label = "portal_webview"
+    assert shape(turn(signed=SIGNED, declared=label)) == (label, True, ENR)
+    assert shape(turn(declared=label)) == ("portal", False, None)
+    assert shape(turn(declared=label, origin_device_id="100.100.7.7")) == ("android", False, None)
+    assert shape(turn(operator=OTHER, signed=SIGNED, declared=label)) == ("portal", False, None)
+    assert shape(turn(signed=SIGNED, declared=["portal_webview"])) == ("android", True, ENR)
+    assert shape(turn(signed=SIGNED, declared="portal")) == ("android", True, ENR)
+    assert shape(turn(provider="computer-use", signed=SIGNED, declared=label)) == \
+        ("cu_agent", False, None)
+    assert shape(turn(signed=SIGNED, declared=label, surface=turn_mod.SURFACE_ON_DEVICE)) == \
+        (turn_mod.SURFACE_ON_DEVICE, True, ENR)
+    for narrowing in ("cron", "mcp", "system"):
+        assert shape(turn(signed=SIGNED, declared=narrowing)) == (narrowing, False, None)
+
+    # All three offering sites treat it as the phone's own turn.
+    webview = turn(signed=SIGNED, declared=label)
+    out = _offered_everywhere(monkeypatch, "anthropic", turn=webview,
+                              inp={**_grant(), access.DECLARED_KEY: label})
+    for site, (names, _system) in out.items():
+        assert "wellness_summary" in set(names) & set(WELLNESS_TOOLS), site
+    # The worker: the grant plus the label, the label alone.
+    seen = _run_worker(monkeypatch, {**_grant(), access.DECLARED_KEY: label}, "anthropic")
+    assert shape(seen["turn"]) == (label, True, ENR)
+    seen = _run_worker(monkeypatch, {access.DECLARED_KEY: label}, "anthropic")
+    assert shape(seen["turn"]) == ("portal", False, None)
+    assert not seen["tools"] & set(WELLNESS_TOOLS)
+
+
+def test_the_stream_route_stamps_the_in_app_portal_s_label(sites):
+    """/chat/stream reads the same body field (_resolve_stream_request)."""
+    import contextvars
+
+    from Orchestrator.routes.chat.stream import _resolve_stream_request
+    body = {"messages": [{"role": "user", "content": PROMPT}], "provider": "anthropic",
+            "operator": OPERATOR, access.DECLARED_KEY: "portal_webview"}
+
+    def stamped_by(signed):
+        def run():
+            _resolve_stream_request(dict(body), signed)
+            return turn_mod.current()
+        return contextvars.copy_context().run(run)
+
+    t = stamped_by(SIGNED)
+    assert (t.surface, t.credential_ok, t.surface_id) == ("portal_webview", True, ENR)
+    t = stamped_by(None)
+    assert (t.surface, t.credential_ok) == ("portal", False)
+    assert turn_mod.current() is None

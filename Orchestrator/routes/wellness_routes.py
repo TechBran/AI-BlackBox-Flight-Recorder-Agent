@@ -548,11 +548,25 @@ def wellness_disclosures(request: Request, raw: RawBody = Depends(_capped(SMALL_
     return {"disclosures": rows}
 
 
+# "Who saw my health data": where each delivery was asked from, in the words
+# the Portal's Health section uses (wellness-section.js SURFACE_LABELS), so
+# the native app and the in-app Portal show the same row. The Portal inside
+# the app (portal_webview, a turn its bridge signed and labelled) reads
+# apart from the native chat.
+SURFACE_LABELS = {"android": "BlackBox app", "portal_webview": "Portal in the app",
+                  "portal": "Portal", "cron": "scheduled", "voice": "voice",
+                  "on_device": "on-device AI"}
+OTHER_SURFACE_LABEL = "another surface"
+
+
 def disclosure_log(st) -> list:
     """The newest 200 deliveries, each time shown with the offset of its own
-    day (may raise StoreGone)."""
+    day (may raise StoreGone). `surface` is the stored id, `surface_label`
+    its words (SURFACE_LABELS)."""
     offsets = st.offsets()
     return [{"time": api.local_iso(r["ts"], offsets.offset_at(r["ts"])),
-             "surface": r["surface"], "provider": r["provider"], "model": r["model"],
+             "surface": r["surface"],
+             "surface_label": SURFACE_LABELS.get(r["surface"], OTHER_SURFACE_LABEL),
+             "provider": r["provider"], "model": r["model"],
              "tool": r["tool"], "categories": r["categories"]}
             for r in st.disclosures(limit=200)]
