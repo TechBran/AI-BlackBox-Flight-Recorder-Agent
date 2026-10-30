@@ -13,7 +13,8 @@ text is masked:
      clock times;
   2. every member of V, and every number (digits or words) within 3 tokens of
      a health unit or noun (bpm, beats, steps, mmHg, SpO2, %, kg, lb, kcal, ml,
-     oz, °F/°C, HRV, ms, breaths, and h/hours/min near sleep or exercise words)
+     oz, °F/°C, HRV, ms, breaths, h/hours/min near sleep or exercise words,
+     and a count of awakenings: "times" near a wake word, "wake-ups")
      becomes "[·]";
   3. the [REASONING] block becomes "[REASONING omitted: wellness turn]".
 
@@ -294,7 +295,15 @@ pasos presión presion arterial sistólica sistolica diastólica diastolica oxí
 saturación saturacion peso caloría calorías caloria calorias respiración respiracion
 respiraciones temperatura grado grados kilómetro kilómetros kilometro kilometros metros
 reposo glucosa
+wake-up wake-ups wakeup wakeups awakening awakenings despertares
 """.split())
+# A count of awakenings has no unit word ("you woke up 3 times", "te
+# despertaste 3 veces"): "times" / "veces" is one only within reach of a wake
+# word (a Spanish one is any form of despertar). A tally elsewhere ("I called
+# 3 times") stays readable.
+_TALLY_WORDS = frozenset({"times", "veces"})
+_WAKE_WORDS = frozenset({"woke", "wake", "wakes", "waking", "awake", "awoke", "awoken",
+                         "awakened"})
 _TIME_WORDS = frozenset("""
 h hr hrs hour hours min mins minute minutes am pm hora horas minuto minutos
 """.split())
@@ -336,8 +345,13 @@ def _is_number_word(word: str) -> bool:
     return all(p in _NUMBER_WORDS for p in parts) and bool(parts)
 
 
+def _is_wake_word(low: str) -> bool:
+    return low in _WAKE_WORDS or low.startswith("despert")
+
+
 def _unit_rule_spans(text: str) -> List[Tuple[int, int]]:
     toks = []
+    wakes = []
     for m in _TOKEN_RE.finditer(text):
         kind = m.lastgroup
         low = m.group(0).lower()
@@ -346,12 +360,16 @@ def _unit_rule_spans(text: str) -> List[Tuple[int, int]]:
         elif kind == "pct":
             cls = "unit"
         elif kind == "word":
+            if _is_wake_word(low):
+                wakes.append(len(toks))
             if _is_number_word(low):
                 cls = "num"
             elif low in _UNIT_WORDS:
                 cls = "unit"
             elif low in _TIME_WORDS:
                 cls = "time"
+            elif low in _TALLY_WORDS:
+                cls = "tally"
             elif low in _CONTEXT_WORDS:
                 cls = "context"
             elif low in _JOINERS:
@@ -365,7 +383,8 @@ def _unit_rule_spans(text: str) -> List[Tuple[int, int]]:
         return []
     contexts = [i for i, t in enumerate(toks) if t[0] == "context"]
     units = [i for i, t in enumerate(toks) if t[0] == "unit" or (
-        t[0] == "time" and any(abs(i - c) <= CONTEXT_DISTANCE for c in contexts))]
+        t[0] == "time" and any(abs(i - c) <= CONTEXT_DISTANCE for c in contexts)) or (
+        t[0] == "tally" and any(abs(i - w) <= CONTEXT_DISTANCE for w in wakes))]
     if not units:
         return []
     # Runs of number tokens ("twelve thousand three hundred and forty-five",

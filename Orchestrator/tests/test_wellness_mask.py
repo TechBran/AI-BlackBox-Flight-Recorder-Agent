@@ -871,3 +871,38 @@ def test_metre_values_are_in_v_as_kilometres():
     # Small metre values (a 40 m elevation) and other units gain nothing.
     assert not {f for f in mask.value_set([{"unit": "m", "value": 40.0}]) if "." in f}
     assert "0.4" not in mask.value_set([{"metric": "steps", "unit": "steps", "value": 412.0}])
+
+
+def test_a_count_of_awakenings_is_masked_by_the_unit_rule():
+    """E1 found the ledger keeps "you woke up 3 times": no unit word marks a
+    count of awakenings. "times" / "veces" counts as one within reach of a
+    wake word, and the nouns (wake-ups, awakenings, despertares) are units of
+    their own. A tally with no wake word stays readable."""
+    cases = {
+        "You woke up 3 times last night.": "You woke up [·] times last night.",
+        "There were 3 wake-ups after midnight.": "There were [·] wake-ups after midnight.",
+        "You were awake 3 times overnight.": "You were awake [·] times overnight.",
+        "You had four awakenings.": "You had [·] awakenings.",
+        "Te despertaste 3 veces anoche.": "Te despertaste [·] veces anoche.",
+        "Tuviste 3 despertares.": "Tuviste [·] despertares.",
+        # The glyph is still one number token: "[·] and 3" stays one phrase.
+        "You woke [·] and 3 times on the nights after.": "You woke [·] times on the nights after.",
+    }
+    for text, expected in cases.items():
+        assert mask.mask_text(text, frozenset()) == expected, text
+    for keep in ("I called the office 3 times today.", "Retry the build 3 times.",
+                 "Lo intenté 3 veces.", "Wake me at 7 for the 3 meetings."):
+        assert mask.mask_text(keep, frozenset()) == keep, keep
+
+
+def test_the_grounding_check_sees_the_awakenings_the_mask_masks():
+    """evals.grounding's candidates are the mask's: every count of awakenings
+    the unit rule now masks is a health number to A1 (offending when no
+    result of the turn carries it), and it is counted once."""
+    from Orchestrator.wellness import evals
+    for text in ("You woke up 14 times last night.", "There were 14 wake-ups.",
+                 "You were awake 14 times.", "Te despertaste 14 veces anoche.",
+                 "Tuviste 14 despertares.", "You had fourteen awakenings."):
+        assert "[·]" in mask.mask_text(text, frozenset()), text
+        assert len(evals.grounding(text).offending) == 1, text
+    assert evals.grounding("I called the office 14 times.").ok

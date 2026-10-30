@@ -7,8 +7,8 @@ a live box, Orchestrator/tests/test_wellness_evals.py against a temp one.
   grounding(reply, envelopes)    A1: every number next to a health unit or noun
                                  (digits, words, durations, clock times) is one
                                  the turn's results carried. The candidates are
-                                 the numbers mask.py's unit rule masks (plus a
-                                 count of awakenings, "woke up 4 times"), and
+                                 the numbers mask.py's unit rule masks (a count
+                                 of awakenings, "woke up 4 times", included), and
                                  the turn's value set V is mask.value_set(), so
                                  A1 and the mask agree on what a health number
                                  is. A count the results carry (coverage, the
