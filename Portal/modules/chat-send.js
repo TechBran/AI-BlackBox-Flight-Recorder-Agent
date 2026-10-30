@@ -12,7 +12,8 @@ import { parseSseStream } from './sse.js';
 import { getHistoryData, setHistoryData, saveHistory, getOperator, OPERATOR_REQUIRED_MESSAGE } from './state-management.js';
 import { renderMarkdown, addCopyButtonsToCodeBlocks } from './markdown-renderer.js';
 import { makeSnapshotsClickable, applySyntaxHighlighting } from './timeline-browser.js';
-import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml } from './chat-bubbles.js';
+import { addBubble, appendBubble, attachRetryChip, createAnimatedThinkingBubble, updateThinkingBubble, addDownloadButtonToImage, escapeHtml, decorateWellnessBubble, mergeWellnessUsed } from './chat-bubbles.js';
+import { wellnessSigner, withOriginProof, lastSourceLabel } from './wellness-section.js';
 import { updateHintsVisibility } from './help-hints.js';
 import { speakToBubble, setLastAssistantText, speakThinkingContent } from './tts-stt.js';
 import { handleFileUpload, handleSessionFileUpload, getAttachedFiles, clearAttachedFiles, renderPreviews } from './file-upload.js';
@@ -42,6 +43,14 @@ let _cuTasks = [];
 let _cuQueueAppendMode = false;
 /** True when an SSE stream is actively consuming CU events — blocks poller from adding duplicates */
 let _cuStreamActive = false;
+
+/**
+ * The turn key /chat/stream's stream_start names for an operator with a health
+ * store ("wt_" + 16 hex, Orchestrator/wellness/turn.py). /chat/save gets it
+ * back and masks exactly that turn's health results; anything else is not
+ * echoed, and the box then masks against every recent result (the safe way).
+ */
+const WELLNESS_TURN_KEY = /^[A-Za-z0-9_-]{1,64}$/;
 
 // =============================================================================
 // Helper Functions
@@ -917,14 +926,18 @@ export function markThinkingComplete(bubble) {
  * @param {HTMLElement} bubble - Bubble element
  * @param {string} fullResponse - Full response text
  * @param {string} fullThinking - Full thinking text
+ * @param {{wellness?: boolean}} [opts] - wellness: a health-data tool fed this reply
  */
-export function finalizeStreamingBubble(bubble, fullResponse, fullThinking) {
+export function finalizeStreamingBubble(bubble, fullResponse, fullThinking, { wellness = false } = {}) {
     console.log('[FINALIZE] finalizeStreamingBubble called, response length:', fullResponse?.length);
 
     if (fullResponse && fullResponse.length > 0) {
         const responsePreview = fullResponse.substring(0, 50).replace(/\n/g, ' ');
+        // A reply a wellness tool fed can carry health values, and inside the
+        // app this is a native notification (title and body, lock screen
+        // included): it says only that the reply is ready (rule W33).
         showNotification("\uD83D\uDCAC AI Response Ready", {
-            body: responsePreview + (fullResponse.length > 50 ? '...' : ''),
+            body: wellness ? 'Your reply is ready.' : responsePreview + (fullResponse.length > 50 ? '...' : ''),
             tag: "chat-complete",
             operator: getOperator()
         });
@@ -1147,6 +1160,11 @@ export async function sendStreamingChat(messages, provider, model, operator) {
     // The turn's token usage: the LAST 'usage' event wins (Android parity,
     // ChatViewModel's onMeta), sent to /chat/save as {prompt, completion}.
     let usage = null;
+    // M7 ledger rule (spec §3.7): the turn key stream_start names (echoed to
+    // /chat/save) and the turn's UI-only wellness_used frames, merged (the
+    // reply's wellness_ref and its "Used your health data" footer).
+    let wellnessTurn = null;
+    let wellnessUsed = null;
 
     // NOTE: We no longer use streaming TTS (real-time sentence-by-sentence).
     // Auto-TTS now waits for the complete response and generates a single TTS call.
@@ -1184,11 +1202,16 @@ export async function sendStreamingChat(messages, provider, model, operator) {
     };
 
     const handleEvent = (eventType, eventData) => {
+        // Once a wellness tool answered, this turn's text can carry health
+        // values, and the app's WebView console goes to logcat: the events are
+        // logged without their payloads from then on.
+        const quiet = wellnessUsed !== null;
         try {
             const data = JSON.parse(eventData);
 
             // Debug: Log ALL event types received
-            console.log(`[STREAM DEBUG] Event type: ${eventType}`, typeof data === 'string' ? data.substring(0, 100) : data);
+            console.log(`[STREAM DEBUG] Event type: ${eventType}`,
+                quiet ? `(${String(eventData).length} chars)` : (typeof data === 'string' ? data.substring(0, 100) : data));
 
             switch (eventType) {
                 case 'stream_start':
@@ -1202,7 +1225,24 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                         provenance = data.provenance;
                         console.log('[STREAM] Provenance:', provenance);
                     }
+                    if (typeof data.wellness_turn === 'string' && WELLNESS_TURN_KEY.test(data.wellness_turn)) {
+                        wellnessTurn = data.wellness_turn;
+                    }
                     break;
+
+                case 'wellness_used': {
+                    // UI-only, like The Signal (never a prompt, never the
+                    // ledger): a wellness tool answered with health data. The
+                    // reply being built keeps the ref (the history scrub, Show
+                    // numbers) and gets the "Used your health data" footer.
+                    const merged = mergeWellnessUsed(wellnessUsed, data);
+                    if (merged) {
+                        if (!merged.source_label) merged.source_label = lastSourceLabel() || null;
+                        wellnessUsed = merged;
+                        decorateWellnessBubble(bubble, { content: '', wellness_used: wellnessUsed });
+                    }
+                    break;
+                }
 
                 case 'thinking_start':
                     thinkingStarted = true;
@@ -1551,7 +1591,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                     break;
 
                 case 'done':
-                    console.log('[STREAM] Done:', data);
+                    console.log('[STREAM] Done:', quiet ? '(payload not logged: a health-data turn)' : data);
                     if (data.thinking) {
                         fullThinking = _cuQueueAppendMode
                             ? (fullThinking + '\n\n' + data.thinking)
@@ -1599,9 +1639,17 @@ export async function sendStreamingChat(messages, provider, model, operator) {
                     break;
             }
         } catch (e) {
-            console.warn('[STREAM] Parse error:', e, eventData);
+            console.warn('[STREAM] Parse error:', e, quiet ? '' : eventData);
         }
     };
+
+    // Inside the BlackBox Android app the request is signed by the phone over
+    // the exact body bytes (spec §6.3), so the box knows the enrolled phone
+    // asked; a fresh proof per turn. Anywhere else (or a null from the app)
+    // the request is exactly what it always was.
+    const streamHeaders = wellnessSigner()
+        ? await withOriginProof({ "Content-Type": "application/json" }, 'POST', '/chat/stream', body)
+        : { "Content-Type": "application/json" };
 
     try {
         armStallWatchdog(); // covers a server that never answers or never sends a first chunk
@@ -1609,7 +1657,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         try {
             response = await fetch("/chat/stream", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: streamHeaders,
                 body: body,
                 signal: controller.signal
             });
@@ -1652,7 +1700,7 @@ export async function sendStreamingChat(messages, provider, model, operator) {
     }
 
     // Finalize the bubble first
-    finalizeStreamingBubble(bubble, fullResponse, fullThinking);
+    finalizeStreamingBubble(bubble, fullResponse, fullThinking, { wellness: wellnessUsed !== null });
 
     // Trigger Auto-TTS after response is complete (if enabled)
     // This generates a single TTS call for the full response
@@ -1668,6 +1716,8 @@ export async function sendStreamingChat(messages, provider, model, operator) {
         cuLog: cuLog,
         errorText: streamErrorText,
         usage: usage,
+        wellnessTurn: wellnessTurn,   // echoed to /chat/save (null: not a health-store operator)
+        wellnessUsed: wellnessUsed,   // the reply's wellness_ref / footer (null: no health data used)
         bubbleEl: bubble  // lets send() remove/convert an error-only stream's empty bubble
     };
 }
@@ -1972,13 +2022,18 @@ export function renderHistory() {
             }
         }
 
-        // Check if this assistant message has thinking/reasoning or CU content
+        // Check if this assistant message has thinking/reasoning or CU content.
+        // A reply a wellness tool fed gets its footer back (and, inside the
+        // app, Show numbers when its text is the masked copy); an entry without
+        // the fields renders exactly as before.
         if (b.role === 'assistant' && (b.thinking || b.cuLog)) {
             console.log('[History] Restoring message with thinking/CU content');
             const bubbleWithThinking = createBubbleWithThinking(b.content, b.thinking, b.cuLog);
             hist.appendChild(bubbleWithThinking);
+            decorateWellnessBubble(bubbleWithThinking, b);
         } else {
             const bubble = appendBubble(b.role, b.content);
+            if (b.role === 'assistant' && bubble) decorateWellnessBubble(bubble, b);
             // Restore the retry affordance on user turns whose send failed
             if (b.role === 'user' && b.failed && bubble) {
                 if (b.sendKey) bubble.dataset.sendKey = b.sendKey;
@@ -2413,6 +2468,10 @@ export async function send() {
         } else {
             headers['Content-Type'] = 'application/json';
             requestBody = JSON.stringify(payload);
+            // Inside the app: signed over the exact body, as /chat/stream is. A
+            // multipart body (attachments) cannot be hashed before the browser
+            // builds it, so that turn goes unsigned.
+            if (wellnessSigner()) headers = await withOriginProof(headers, 'POST', '/chat', requestBody);
         }
 
         const r = await fetch("/chat", {
@@ -2599,6 +2658,13 @@ async function saveStreamedTurn(txt, result) {
     if (result.cuLog && result.cuLog.length > 0) {
         updatedHistoryData[updatedHistoryData.length - 1].cuLog = result.cuLog;
     }
+    // A reply a wellness tool fed: its ref (the delivered row behind it) and
+    // the frame for its footer. The Portal never sends earlier turns to the
+    // model, so neither ever leaves this browser in a /chat/stream request.
+    if (result.wellnessUsed) {
+        updatedHistoryData[updatedHistoryData.length - 1].wellness_ref = result.wellnessUsed.ref;
+        updatedHistoryData[updatedHistoryData.length - 1].wellness_used = result.wellnessUsed;
+    }
     setHistoryData(updatedHistoryData);
     saveHistory();
     setLastAssistantText(result.response);
@@ -2619,7 +2685,11 @@ async function saveStreamedTurn(txt, result) {
                 reasoning: result.thinking || "",
                 provenance: result.provenance || {},
                 model: window.__model || "",
-                tokens: saveTokens(result.usage)
+                tokens: saveTokens(result.usage),
+                // The turn key stream_start named: the box masks exactly this
+                // turn's health results in the ledger. Absent, the body is
+                // what it always was.
+                ...(result.wellnessTurn ? { wellness_turn: result.wellnessTurn } : {})
             })
         });
         const saveResult = await saveResponse.json();
@@ -2670,6 +2740,9 @@ async function saveStreamedTurn(txt, result) {
                             finalHistoryData[lastAssistantIndex].content = saveResult.modified_response;
                             setHistoryData(finalHistoryData);
                             saveHistory();
+                            // A wellness turn's modified text is the masked copy:
+                            // inside the app it now offers Show numbers.
+                            decorateWellnessBubble(lastChild, finalHistoryData[lastAssistantIndex]);
                         }
                     }
                 }

@@ -3,6 +3,9 @@
  * (modules/wellness-section.js) and the Devices section's health controls,
  * "Use for health" and the owner-only "Health source" badge
  * (modules/devices-section.js). Mirrors the Devices section's look.
+ * Inside the Android app the card also shows the signed settings view,
+ * read-only (#wellnessSigned); the chat's "Used your health data" footer and
+ * the Show numbers panel (modules/chat-bubbles.js) live at the end.
  */
 
 .wellness-section {
@@ -113,6 +116,69 @@
     font-size: 13px;
 }
 
+/* ── The signed settings view (inside the app; read-only) ────────────────── */
+.wellness-signed {
+    margin: 8px 0 0;
+    padding-top: 8px;
+    border-top: 1px dashed var(--neutral-300);
+}
+.wellness-subhead {
+    margin: 10px 0 4px;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--neutral-700);
+}
+.wellness-list {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12.5px;
+    color: var(--text);
+    line-height: 1.5;
+}
+.wellness-trouble {
+    margin: 0 0 6px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255, 196, 0, 0.35);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 196, 0, 0.06);
+    font-size: 12.5px;
+    line-height: 1.4;
+}
+.wellness-trouble p { margin: 0; }
+.wellness-trouble-title { font-weight: var(--font-semibold); color: var(--text); }
+.wellness-trouble-body,
+.wellness-trouble-fix { color: var(--muted); }
+.wellness-fde {
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+}
+.wellness-instinct,
+.wellness-disclosures {
+    margin-top: 8px;
+    font-size: 12.5px;
+}
+.wellness-instinct summary,
+.wellness-disclosures summary {
+    cursor: pointer;
+    color: var(--text);
+}
+.wellness-instinct-text {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--muted);
+    line-height: 1.45;
+}
+.wellness-disclosure-rows { margin-top: 6px; overflow-wrap: anywhere; }
+.wellness-muted { color: var(--muted); list-style: none; margin-left: -18px; }
+.wellness-signed-note {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+}
+
 /* ── Devices: health controls on the operator's own rows ─────────────────── */
 .device-wellness-row {
     display: flex;
@@ -148,3 +214,41 @@
 }
 .device-wellness-use:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
 .device-wellness-use:disabled { opacity: 0.55; cursor: progress; }
+
+/* ── Chat: "Used your health data" and Show numbers ─────────────────────── */
+.wellness-footer {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--muted);
+}
+.wellness-footer-text { min-width: 0; overflow-wrap: anywhere; }
+.wellness-show-numbers {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.wellness-show-numbers:hover { color: var(--text); }
+.wellness-numbers {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--neutral-150);
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+.wellness-numbers-title { margin: 0 0 4px; font-weight: var(--font-semibold); }
+.wellness-numbers-lines { margin: 0 0 6px; padding-left: 18px; }
+.wellness-numbers-note { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
