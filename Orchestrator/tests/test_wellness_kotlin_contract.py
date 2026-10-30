@@ -690,11 +690,6 @@ def test_the_box_serves_the_policy_this_test_reads():
     assert wellness_routes.POLICY_PATH.resolve() == BOX_POLICY.resolve()
 
 
-@pytest.mark.xfail(not POLICY_SHA.exists(), strict=True,
-                   reason="At this base the phone's res/raw/health_privacy.md is wave 1's draft "
-                          "and the box's copy is H1b's edit (both say Version 2026-10-29). Unit "
-                          "A2 syncs the phone copy to the box's and writes policy_sha256.txt, "
-                          "which lifts this mark; a sync without that file fails it loudly.")
 def test_the_phone_shows_the_policy_the_box_serves():
     """WellnessRationaleActivity renders the bundled copy; GET
     /wellness/privacy-policy serves the box's. A person must consent to the
@@ -703,9 +698,8 @@ def test_the_phone_shows_the_policy_the_box_serves():
 
 
 def test_the_policy_hash_literal_is_the_box_copy():
-    if not POLICY_SHA.exists():
-        pytest.skip("policy_sha256.txt is written by the Android PolicyHashTest's unit (A2); "
-                    "only the literal check waits for it")
+    assert POLICY_SHA.exists(), ("the Android PolicyHashTest's hash file is gone: the policy "
+                                 "check would otherwise go quiet while the copies drift")
     found = re.search(r"\b[0-9a-fA-F]{64}\b", POLICY_SHA.read_text(encoding="utf-8"))
     assert found, "policy_sha256.txt holds no SHA-256 hex digest"
     assert found.group(0).lower() == hashlib.sha256(_lf(BOX_POLICY.read_bytes())).hexdigest()

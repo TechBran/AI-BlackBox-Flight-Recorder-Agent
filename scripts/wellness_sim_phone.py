@@ -647,6 +647,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("register")
     r.add_argument("--operator", required=True)
+    r.add_argument("--device-id", default=DEVICE_ID,
+                   help="the device record's id (a second simulated phone on the same box needs "
+                        "its own, or it would take over the first one's operator assignment)")
     e = sub.add_parser("enroll")
     e.add_argument("--operator", required=True)
     e.add_argument("--replace", action="store_true")
@@ -711,7 +714,7 @@ def main(argv=None) -> int:
     out: object
     if args.cmd == "register":
         out = register(transport, state, operator=args.operator, ip=ip, port=port,
-                       pairing_file=pairing_file)
+                       pairing_file=pairing_file, device_id=args.device_id)
     elif args.cmd == "enroll":
         out = enroll(transport, state, operator=args.operator,
                      capability_report=load_fixture(args.fixture)["capabilities"],
