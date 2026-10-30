@@ -8,8 +8,14 @@ operator's name, and the whole store is erased with one unlink (plus its
 sidecars).
 
 Times are Unix milliseconds (UTC). A row's local day comes from the zone
-offset the phone sent for that day (meta "tzoff:<day>"); a day with none uses
-the nearest day that has one.
+offsets the phone sent (meta "tzoff:<day>": the offset at that day's local
+midnight); a day with none uses the nearest earlier day that has one. A day
+runs from its own midnight to the next day's, so a spring-forward day is 23
+hours and a fall-back day 25 (Offsets). A bucket group's offset is the one at
+the start of its day and is authoritative; a session or reading carries the
+offset at its own time, which only fills a day nobody has stated yet, or,
+when it differs from its day's, says the zone changed inside that day (the
+next day's offset).
 
 The effective-epoch rule: a re-enrolled phone (a new epoch) re-sends history,
 so for each local day and metric every reader keeps only the rows of the
@@ -41,7 +47,13 @@ from Orchestrator.wellness import paths
 
 SCHEMA_VERSION = 1
 DAY_MS = 86_400_000
+HOUR_MS = 3_600_000
 HC_MERGED = "hc_merged"
+# Inside a day whose two offsets differ (a DST change, or travel), a
+# wall-clock time before 02:00 reads on the day's first offset and a later
+# one on the second: the US and central-European changes happen at 02:00
+# local, and nothing BlackBox computes sits between 01:00 and 03:00.
+ZONE_SWITCH_MIN = 120
 
 DDL = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT) STRICT;
@@ -105,12 +117,22 @@ def new_op_key() -> str:
 
 # ------------------------------------------------------------------ time
 
-def day_bounds(day: str, offset_s: int) -> Tuple[int, int]:
-    """[start, end) of a local day in Unix ms, for a zone offset in seconds."""
-    d = date.fromisoformat(day)
-    midnight = datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp()
-    start = int((midnight - offset_s) * 1000)
-    return start, start + DAY_MS
+_EPOCH = date(1970, 1, 1)
+
+
+def _midnight_ms(day: str) -> int:
+    """00:00 UTC of a calendar day, in Unix ms."""
+    return (date.fromisoformat(day) - _EPOCH).days * DAY_MS
+
+
+def day_bounds(day: str, offset_s: int, next_offset_s: Optional[int] = None) -> Tuple[int, int]:
+    """[start, end) of a local day in Unix ms: from its midnight at `offset_s`
+    to the next day's midnight at `next_offset_s` (the next day's offset; the
+    same when omitted, which is a 24-hour day)."""
+    m = _midnight_ms(day)
+    start = m - int(offset_s) * 1000
+    nxt = offset_s if next_offset_s is None else next_offset_s
+    return start, max(start, m + DAY_MS - int(nxt) * 1000)
 
 
 def local_day(ts_ms: int, offset_s: int) -> str:
@@ -127,11 +149,15 @@ def day_range(first: str, last: str) -> List[str]:
 
 
 class Offsets:
-    """The per-day zone offsets of one store, with nearest-day fallback."""
+    """The per-day zone offsets of one store (the offset at each day's local
+    midnight), with nearest-earlier-day fallback. A day ends where the next
+    one starts, so the days tile the timeline across a zone change."""
 
     def __init__(self, by_day: Dict[str, int]):
         self.by_day = dict(by_day)
         self._days = sorted(self.by_day)
+        self._bounds: Dict[str, Tuple[int, int]] = {}
+        self._hit: Optional[Tuple[int, int, str]] = None
 
     def for_day(self, day: str) -> int:
         if day in self.by_day:
@@ -142,21 +168,70 @@ class Offsets:
         near = self._days[i - 1] if i > 0 else self._days[0]
         return self.by_day[near]
 
+    def knows(self, day: str) -> bool:
+        return day in self.by_day
+
     def set(self, day: str, offset_s: int) -> None:
         """Record a day's offset in this view (store.set_day_offset persists it)."""
         if day not in self.by_day:
             bisect.insort(self._days, day)
         self.by_day[day] = int(offset_s)
+        self._bounds.clear()
+        self._hit = None
 
     def latest(self) -> int:
         return self.by_day[self._days[-1]] if self._days else 0
 
-    def day_of(self, ts_ms: int) -> str:
-        guess = local_day(ts_ms, self.latest())
-        return local_day(ts_ms, self.for_day(guess))
-
     def bounds(self, day: str) -> Tuple[int, int]:
-        return day_bounds(day, self.for_day(day))
+        b = self._bounds.get(day)
+        if b is None:
+            b = self._bounds[day] = day_bounds(day, self.for_day(day),
+                                               self.for_day(add_days(day, 1)))
+        return b
+
+    def day_of(self, ts_ms: int) -> str:
+        hit = self._hit
+        if hit is not None and hit[0] <= ts_ms < hit[1]:
+            return hit[2]
+        day = local_day(ts_ms, self.for_day(local_day(ts_ms, self.latest())))
+        for _ in range(4):
+            start, end = self.bounds(day)
+            if ts_ms < start:
+                day = add_days(day, -1)
+            elif ts_ms >= end:
+                day = add_days(day, 1)
+            else:
+                self._hit = (start, end, day)
+                break
+        return day
+
+    def _pair(self, day: str) -> Tuple[int, int]:
+        return self.for_day(day), self.for_day(add_days(day, 1))
+
+    def offset_at(self, ts_ms: int) -> int:
+        """The zone offset in effect at an instant (for showing local times)."""
+        day = self.day_of(ts_ms)
+        first, second = self._pair(day)
+        if first == second:
+            return first
+        switch = _midnight_ms(day) + ZONE_SWITCH_MIN * 60_000 - first * 1000
+        return first if ts_ms < switch else second
+
+    def at_local(self, day: str, minutes: float) -> int:
+        """The instant of a wall-clock time on a local day (minutes after its
+        midnight)."""
+        first, second = self._pair(day)
+        off = first if first == second or minutes < ZONE_SWITCH_MIN else second
+        return _midnight_ms(day) + int(minutes * 60_000) - off * 1000
+
+    def local_minutes(self, day: str, ts_ms: int) -> float:
+        """Minutes after the local midnight of `day` that an instant reads on
+        the wall clock (negative the evening before)."""
+        first, second = self._pair(day)
+        m = (ts_ms + first * 1000 - _midnight_ms(day)) / 60_000.0
+        if first == second or m < ZONE_SWITCH_MIN:
+            return m
+        return (ts_ms + second * 1000 - _midnight_ms(day)) / 60_000.0
 
 
 # ------------------------------------------------------------------ files
@@ -343,7 +418,14 @@ class Store:
             c.execute(sql, (key, _dumps(value)))
 
     def set_day_offset(self, conn: sqlite3.Connection, day: str, offset_s: int) -> None:
+        """A day's offset as a bucket group states it (replaces any earlier one)."""
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                     (f"tzoff:{day}", str(int(offset_s))))
+
+    def hint_day_offset(self, conn: sqlite3.Connection, day: str, offset_s: int) -> None:
+        """A day's offset inferred from a record's own offset: only fills a day
+        that has none."""
+        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
                      (f"tzoff:{day}", str(int(offset_s))))
 
     def offsets(self, conn: Optional[sqlite3.Connection] = None) -> Offsets:
@@ -392,10 +474,16 @@ class Store:
 
     def replace_bucket_day(self, conn, metric: str, grain: str, origin_id: int, epoch: int,
                            day: str, offset_s: int, rows: List[list],
-                           flags: Optional[List[int]] = None) -> int:
+                           flags: Optional[List[int]] = None,
+                           next_offset_s: Optional[int] = None) -> int:
         """Replace one (metric, grain, origin, epoch) local day with `rows`:
-        [t, sum] for activity, [t, avg, min, max, n] for heart rate."""
-        start, end = day_bounds(day, offset_s)
+        [t, sum] for activity, [t, avg, min, max, n] for heart rate. The day
+        runs from its midnight at `offset_s` to the next one at
+        `next_offset_s` (23 or 25 hours across a DST change), and at least to
+        the last row the phone put in it."""
+        start, end = day_bounds(day, offset_s, next_offset_s)
+        if rows:
+            end = max(end, max(int(r[0]) for r in rows) + 1)
         conn.execute("DELETE FROM bucket WHERE metric=? AND grain=? AND origin_id=? AND epoch=? "
                      "AND ts>=? AND ts<?", (metric, grain, origin_id, epoch, start, end))
         return self.upsert_buckets(conn, metric, grain, origin_id, epoch, rows, flags)
@@ -462,14 +550,14 @@ class Store:
         for hc_id in ids:
             for row in conn.execute("SELECT start_ts, end_ts, tz_offset_s FROM session "
                                     "WHERE hc_id=?", (hc_id,)).fetchall():
-                off = row[2] if row[2] is not None else offsets.for_day(
-                    local_day(row[1], offsets.latest()))
-                days.update(day_range(local_day(row[0], off), local_day(row[1], off)))
+                days.update(day_range(offsets.day_of(row[0]), offsets.day_of(row[1])))
+                if row[2] is not None:
+                    days.update(day_range(local_day(row[0], row[2]), local_day(row[1], row[2])))
             for row in conn.execute("SELECT ts, tz_offset_s FROM reading WHERE hc_id=?",
                                     (hc_id,)).fetchall():
-                off = row[1] if row[1] is not None else offsets.for_day(
-                    local_day(row[0], offsets.latest()))
-                days.add(local_day(row[0], off))
+                days.add(offsets.day_of(row[0]))
+                if row[1] is not None:
+                    days.add(local_day(row[0], row[1]))
             conn.execute("DELETE FROM session WHERE hc_id=?", (hc_id,))
             conn.execute("DELETE FROM stage WHERE hc_id=?", (hc_id,))
             conn.execute("DELETE FROM reading WHERE hc_id=?", (hc_id,))

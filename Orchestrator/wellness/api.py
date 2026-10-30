@@ -118,11 +118,17 @@ class Ctx:
 
     @property
     def offset(self) -> int:
-        return self.offsets.latest()
+        """The zone offset in effect now."""
+        return self.offsets.offset_at(self.now_ms)
 
     @property
     def today(self) -> str:
-        return store_mod.local_day(self.now_ms, self.offset)
+        return self.offsets.day_of(self.now_ms)
+
+    def iso(self, ms: Optional[int]) -> Optional[str]:
+        """A local time with the offset in effect at THAT instant (a point
+        from last summer reads on summer time)."""
+        return None if ms is None else local_iso(ms, self.offsets.offset_at(ms))
 
 
 # ------------------------------------------------------------------ helpers
@@ -197,7 +203,7 @@ def _base(ctx: Ctx, tool: str) -> dict:
     last = cov.iso_to_ms(ctx.record.get("last_push_at"))
     paused = ctx.record.get("state") == "paused"
     env = {"ok": True, "tool": tool, "ref": None,
-           "as_of": local_iso(last, ctx.offset),
+           "as_of": ctx.iso(last),
            "stale": cov.is_stale(ctx.record.get("last_push_at"), ctx.now_ms),
            "paused": paused, "tz": tz_label(ctx.offset),
            "troubles": [{"code": t["code"], "title": t["title"], "fix": t["fix"]}
@@ -455,9 +461,9 @@ def summary(operator: str, period: str, categories: Optional[Iterable[str]] = No
     env = _base(ctx, tool)
     s, e = ctx.offsets.bounds(first)[0], ctx.offsets.bounds(last)[1]
     if period == "last_night":
-        s = e - 86_400_000 - 12 * 3_600_000
-    env.update({"period": {"name": period, "label": label, "start": local_iso(s, ctx.offset),
-                           "end": local_iso(min(e, ctx.now_ms), ctx.offset),
+        s -= 12 * 3_600_000
+    env.update({"period": {"name": period, "label": label, "start": ctx.iso(s),
+                           "end": ctx.iso(min(e, ctx.now_ms)),
                            "tz": tz_label(ctx.offset), "days": len(days)},
                 "sources": _sources(ctx, s, e), "metrics": [], "gaps": []})
     wanted = [c for c in ctx.categories]
@@ -593,7 +599,7 @@ def series(operator: str, metric: str, range: Optional[str] = None, *,  # noqa: 
         while t < e:
             got = slots.get(t, [])
             value = _agg(got, stat, metric)
-            points.append({"t": local_iso(t, ctx.offset), "value": _round(value),
+            points.append({"t": ctx.iso(t), "value": _round(value),
                            "display": catalog.display(metric, value) if value is not None
                            else None,
                            "coverage_pct": 100 if got else 0})
@@ -659,7 +665,7 @@ def _merge_points(points: List[dict], metric: str, stat: str) -> List[dict]:
 
 def _session_ref(ctx: Ctx, s: dict) -> str:
     h = hashlib.sha256(f"{ctx.st.op_key}:{s['epoch']}:{s['hc_id']}".encode()).hexdigest()[:8]
-    return f"s-{store_mod.local_day(s['end_ts'], ctx.offset).replace('-', '')}-{h}"
+    return f"s-{ctx.offsets.day_of(s['end_ts']).replace('-', '')}-{h}"
 
 
 def _session_row(ctx: Ctx, s: dict, brief: bool = False) -> dict:
@@ -678,7 +684,7 @@ def _session_row(ctx: Ctx, s: dict, brief: bool = False) -> dict:
     o = origins.get(s["origin_id"]) or {}
     row = {"session_ref": _session_ref(ctx, s), "kind": s["kind"],
            "type": attrs.get("type") or ("sleep" if s["kind"] == "sleep" else "other"),
-           "start": local_iso(s["start_ts"], ctx.offset), "end": local_iso(s["end_ts"], ctx.offset),
+           "start": ctx.iso(s["start_ts"]), "end": ctx.iso(s["end_ts"]),
            "duration_min": _round(minutes), "duration": catalog.duration_display(minutes),
            "avg_hr": _round(avg_hr), "avg_hr_display": catalog.display("heart_rate", avg_hr)
            if avg_hr is not None else None,
@@ -816,8 +822,7 @@ def sources(operator: str, *, now_ms: Optional[int] = None, delivery: Optional[D
     env = _base(ctx, tool)
     env.update({
         "phone": {"label": ctx.record.get("source_label"),
-                  "last_push": local_iso(cov.iso_to_ms(ctx.record.get("last_push_at")),
-                                         ctx.offset)},
+                  "last_push": ctx.iso(cov.iso_to_ms(ctx.record.get("last_push_at")))},
         "platforms": {"health_connect": {"status": hc.get("sdk_status"),
                                          "background_access": catalog.PERMISSION_BACKGROUND
                                          in granted,

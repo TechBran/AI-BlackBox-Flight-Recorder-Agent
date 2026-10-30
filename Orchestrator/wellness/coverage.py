@@ -176,11 +176,17 @@ def covered_bins(hr_ts: Iterable[int], start_ms: int, end_ms: int, bin_min: int)
 
 
 def day_wear_hours(hr_ts: Iterable[int], day_start_ms: int, mode: Optional[str],
-                   upto_ms: Optional[int] = None) -> Tuple[Optional[float], int, int]:
+                   upto_ms: Optional[int] = None,
+                   window: Optional[Tuple[int, int]] = None) -> Tuple[Optional[float], int, int]:
     """(wear hours, covered bins, expected bins) over 07:00-23:00 local (or up
-    to `upto_ms` for today)."""
-    start = day_start_ms + DAY_WEAR_START_H * 3_600_000
-    end = day_start_ms + DAY_WEAR_END_H * 3_600_000
+    to `upto_ms` for today). `window` gives those two instants when the day
+    is not 24 hours long (a DST change); without it they are counted from
+    the day's start."""
+    if window is not None:
+        start, end = window
+    else:
+        start = day_start_ms + DAY_WEAR_START_H * 3_600_000
+        end = day_start_ms + DAY_WEAR_END_H * 3_600_000
     if upto_ms is not None:
         end = max(start, min(end, upto_ms))
     bin_min = day_bin_minutes(mode)

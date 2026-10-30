@@ -31,6 +31,9 @@ needing at least 14; below that the median is null with the reason.
 Recompute runs only for dirty days, plus the days whose 14-day HR mode they
 change and the 28 baselines they feed (a late night recomputes everything it
 touches, and nothing else).
+
+Local times (07:00, 03:00-14:00, the bedtime) are wall-clock times read
+through the store's Offsets, so a 23- or 25-hour day keeps them.
 """
 from __future__ import annotations
 
@@ -209,9 +212,9 @@ def _clip(a: int, b: int, lo: int, hi: int) -> int:
     return max(0, min(b, hi) - max(a, lo))
 
 
-def _main_sleep(conn, store: Store, start: int) -> Optional[dict]:
-    lo = start + cov.NIGHT_END_EARLIEST_H * 3_600_000
-    hi = start + cov.NIGHT_END_LATEST_H * 3_600_000
+def _main_sleep(conn, store: Store, offsets: Offsets, day: str) -> Optional[dict]:
+    lo = offsets.at_local(day, cov.NIGHT_END_EARLIEST_H * 60)
+    hi = offsets.at_local(day, cov.NIGHT_END_LATEST_H * 60)
     cands = store.sessions("sleep", lo, hi, conn=conn)
     if not cands:
         return None
@@ -259,7 +262,7 @@ def compute_day(conn, store: Store, offsets: Offsets, day: str, *, now_ms: int,
 
     # ---- night -----------------------------------------------------------
     night_worn: Optional[int] = None
-    main = _main_sleep(conn, store, start)
+    main = _main_sleep(conn, store, offsets, day)
     sleeping_buckets: List[dict] = []
     if main is not None:
         s0, s1 = main["start_ts"], main["end_ts"]
@@ -289,10 +292,10 @@ def compute_day(conn, store: Store, offsets: Offsets, day: str, *, now_ms: int,
                 ms = sum(_clip(a, b, s0, s1) for a, b, c in stages if c in codes)
                 put(metric, "night", n=1, value=_r(ms / 60_000.0), coverage=session_cov,
                     method=method)
-        put("sleep_onset", "night", n=1, value=_r((s0 - start) / 60_000.0), coverage=session_cov,
-            method=method)
-        put("sleep_wake", "night", n=1, value=_r((s1 - start) / 60_000.0), coverage=session_cov,
-            method=method)
+        put("sleep_onset", "night", n=1, value=_r(offsets.local_minutes(day, s0)),
+            coverage=session_cov, method=method)
+        put("sleep_wake", "night", n=1, value=_r(offsets.local_minutes(day, s1)),
+            coverage=session_cov, method=method)
         if night_worn:
             sleeping_buckets = [b for b in hr_all if b["avg"] is not None
                                 and any(a <= b["ts"] < z for a, z in asleep)]
@@ -307,7 +310,10 @@ def compute_day(conn, store: Store, offsets: Offsets, day: str, *, now_ms: int,
 
     # ---- day: heart rate and wear ------------------------------------------
     day_hr = [b for b in hr_all if start <= b["ts"] < end]
-    wear_h, hit, total = cov.day_wear_hours([b["ts"] for b in day_hr], start, mode, upto)
+    wear_h, hit, total = cov.day_wear_hours(
+        [b["ts"] for b in day_hr], start, mode, upto,
+        window=(offsets.at_local(day, cov.DAY_WEAR_START_H * 60),
+                offsets.at_local(day, cov.DAY_WEAR_END_H * 60)))
     wear_cov = cov.coverage(hit if total else None, total or None,
                             cov.day_wear_label(wear_h, today), ea)
     if day_hr:

@@ -13,6 +13,13 @@ this build cannot use (an unknown metric, a grain that does not fit, a time in
 the future) is dropped and counted. Both counts go to the ingest log, never
 the values.
 
+Zone offsets (store.py has the day model): a bucket group's offset_s is the
+offset at its day's midnight and is stored as the day's; a session or reading
+carries the offset at its own time, which fills a day nobody stated yet or,
+when it differs from its day's, gives the next day's (the zone changed that
+day). Rows a group puts past the day's 24th hour say the same. A day whose
+offset changes is recomputed with the day before it, whose end moved.
+
 Logs: counts only, `[WELLNESS] ingest op=<first 4 of op_key> rows=.. ms=..`.
 """
 from __future__ import annotations
@@ -50,6 +57,10 @@ SESSION_MAX_H = {"sleep": 24.0, "exercise": 24.0}
 READING_RANGES = {"resting_hr": HR_RANGE, "hrv": HRV_RANGE, "spo2": SPO2_RANGE,
                   "respiratory_rate": RESP_RANGE}
 GRAIN_HOURS = {"1min": 1 / 60.0, "5min": 5 / 60.0, "1h": 1.0}
+GRAIN_MS = {"1min": 60_000, "5min": 300_000, "1h": 3_600_000}
+# A day can run this many hours past 24 (a fall-back day is 25; flying west
+# across zones a little more); rows further out than that infer nothing.
+MAX_DAY_STRETCH_H = 3
 
 
 class IngestError(Exception):
@@ -213,10 +224,48 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             return ids[HC_MERGED]
                         return ids.get(key)
 
-                    def note_offset(day: str, off: Optional[int]):
-                        if off is not None and offsets.by_day.get(day) != off:
-                            st.set_day_offset(conn, day, off)
-                            offsets.set(day, off)
+                    def moved(day: str, before: int, after: int):
+                        # The day's start and the day before's end moved.
+                        if before != after:
+                            dirty.update((add_days(day, -1), day))
+
+                    def note_day(day: str, off: Optional[int]):
+                        """A bucket group's offset: the one at `day`'s midnight."""
+                        if off is None or offsets.by_day.get(day) == off:
+                            return
+                        before = offsets.for_day(day)
+                        st.set_day_offset(conn, day, off)
+                        offsets.set(day, off)
+                        moved(day, before, off)
+
+                    def hint_day(day: str, off: int):
+                        if offsets.knows(day):
+                            return
+                        before = offsets.for_day(day)
+                        st.hint_day_offset(conn, day, off)
+                        offsets.set(day, off)
+                        moved(day, before, off)
+
+                    def note_record(t: int, off: Optional[int]):
+                        """A session's or reading's offset: the one in effect at t."""
+                        if off is None:
+                            return
+                        day = local_day(t, off)
+                        if not offsets.knows(day):
+                            hint_day(day, off)
+                        elif offsets.by_day[day] != off:
+                            hint_day(add_days(day, 1), off)
+
+                    def note_long_day(day: str, grain: str, rows: List[list]):
+                        """Rows past the day's end (the next day's offset not
+                        known yet): the zone fell back that day."""
+                        nxt = add_days(day, 1)
+                        if not rows or offsets.knows(nxt):
+                            return
+                        over = max(r[0] for r in rows) + GRAIN_MS[grain] - offsets.bounds(day)[1]
+                        hours = -(-over // 3_600_000)
+                        if 0 < hours <= MAX_DAY_STRETCH_H:
+                            hint_day(nxt, offsets.for_day(nxt) - hours * 3600)
 
                     # ---- buckets
                     for g in batch.buckets:
@@ -243,11 +292,12 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             rows.append([int(row[0])] + list(row[1:]))
                             flags.append(_bucket_flag(g.metric, g.grain, row))
                         if g.replace_day:
-                            note_offset(g.replace_day, g.offset_s)
-                            off = g.offset_s if g.offset_s is not None else \
-                                offsets.for_day(g.replace_day)
-                            st.replace_bucket_day(conn, g.metric, g.grain, oid, epoch,
-                                                  g.replace_day, off, rows, flags)
+                            note_day(g.replace_day, g.offset_s)
+                            note_long_day(g.replace_day, g.grain, rows)
+                            st.replace_bucket_day(
+                                conn, g.metric, g.grain, oid, epoch, g.replace_day,
+                                offsets.for_day(g.replace_day), rows, flags,
+                                next_offset_s=offsets.for_day(add_days(g.replace_day, 1)))
                             dirty.add(g.replace_day)
                         else:
                             st.upsert_buckets(conn, g.metric, g.grain, oid, epoch, rows, flags)
@@ -292,17 +342,16 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             attrs["flags"] = 1
                         subtype = s.subtype if s.subtype is not None else (
                             s.exercise_type if isinstance(s.exercise_type, int) else None)
-                        off = s.offset_s if s.offset_s is not None else offsets.for_day(
-                            local_day(s.end, offsets.latest()))
-                        end_day = local_day(s.end, off)
-                        note_offset(end_day, s.offset_s)
+                        if not flag:
+                            note_record(s.start, s.offset_s)
+                        end_day = offsets.day_of(s.end)
                         st.upsert_session(conn, epoch, {
                             "kind": s.kind, "hc_id": s.hc_id, "origin_id": oid, "start": s.start,
                             "end": s.end, "offset_s": s.offset_s, "subtype": subtype,
                             "attrs": attrs or None, "stages": stages,
                             "last_modified": s.last_modified})
                         if s.end > s.start and not flag:
-                            dirty.update(day_range(local_day(s.start, off), end_day))
+                            dirty.update(day_range(offsets.day_of(s.start), end_day))
                         else:
                             # A flagged session feeds no rollup: only its end day
                             # is touched, however far back a bogus start reaches.
@@ -323,10 +372,8 @@ def process_batch(st: Store, batch: schema.IngestBatch, *, enrollment_id: str, e
                             drop("future")
                             continue
                         flag = _reading_flag(r.metric, r.v, r.v2)
-                        off = r.offset_s if r.offset_s is not None else offsets.for_day(
-                            local_day(r.t, offsets.latest()))
-                        day = local_day(r.t, off)
-                        note_offset(day, r.offset_s)
+                        note_record(r.t, r.offset_s)
+                        day = offsets.day_of(r.t)
                         attrs = {k: v for k, v in (r.attrs.model_dump() if r.attrs else {}).items()
                                  if v is not None}
                         st.upsert_reading(conn, epoch, {
